@@ -1,0 +1,43 @@
+#include <stdint.h>
+#include <stddef.h>
+#include <stdbool.h>
+#include "limine/limine.h"
+#include "font/font.h"
+#include "video/video.h"
+
+__attribute__((used, section(".limine_requests")))
+static volatile uint64_t limine_base_revision[] = LIMINE_BASE_REVISION(6);
+
+__attribute__((used, section(".limine_requests")))
+static volatile struct limine_framebuffer_request framebuffer_request = {
+    .id = LIMINE_FRAMEBUFFER_REQUEST_ID,
+    .revision = 0
+};
+
+__attribute__((used, section(".limine_requests_start")))
+static volatile uint64_t limine_requests_start_marker[] = LIMINE_REQUESTS_START_MARKER;
+
+__attribute__((used, section(".limine_requests_end")))
+static volatile uint64_t limine_requests_end_marker[] = LIMINE_REQUESTS_END_MARKER;
+
+void kmain(void) {
+    if (LIMINE_BASE_REVISION_SUPPORTED(limine_base_revision) == false) {
+        for (;;) __asm__ volatile("hlt");
+    }
+    if (framebuffer_request.response == NULL
+     || framebuffer_request.response->framebuffer_count < 1) {
+        for (;;) __asm__ volatile("hlt");
+    }
+    struct limine_framebuffer *fb = framebuffer_request.response->framebuffers[0];
+    if (fb->memory_model != LIMINE_FRAMEBUFFER_RGB || fb->bpp != 32) {
+        for (;;) __asm__ volatile("hlt");
+    }
+
+    volatile uint32_t *fb_ptr = (volatile uint32_t *)fb->address;
+    uint32_t width = fb->width;
+
+    print_str(fb_ptr, "nyonn nyon nyonn ulelelel nyon leleel nyonn", 0, 0, 0xffffff, width);
+    print_str(fb_ptr, "-kawkaw from deltarune", 50, 16, 0xffffff, width);
+
+    for (;;) __asm__ volatile("hlt");
+}
