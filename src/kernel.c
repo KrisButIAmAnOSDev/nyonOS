@@ -4,7 +4,8 @@
 #include "limine/limine.h"
 #include "font/font.h"
 #include "video/video.h"
-#include "serial/serial.h"
+#include "io/serial/serial.h"
+#include "arch/x86_64/idt/idt.h"
 
 __attribute__((used, section(".limine_requests")))
 static volatile uint64_t limine_base_revision[] = LIMINE_BASE_REVISION(6);
@@ -45,6 +46,8 @@ void kmain(void) {
     }
     serial_print("nyonOS: Framebuffer format OK!\n");
 
+    idt_init();
+
     volatile uint32_t *fb_ptr = (volatile uint32_t *)fb->address;
     uint32_t width = fb->width;
 
@@ -52,6 +55,16 @@ void kmain(void) {
     print_str(fb_ptr, "-kawkaw from deltarune", 0, 16, 0xffffff, width);
 
     serial_print("nyonOS: Drawing complete!\n");
+
+    serial_print("Triggering divide by zero...\n");
+    serial_print("About to div...\n");
+    __asm__ volatile(
+        "int $0"
+        :
+        :
+        :
+    );
+    serial_print("After int $0...\n");
 
     for (;;) __asm__ volatile("hlt");
 }
