@@ -6,12 +6,14 @@
 #include "video/video.h"
 #include "io/serial/serial.h"
 #include "arch/x86_64/idt/idt.h"
+#include "arch/x86_64/pic/pic.h"
+#include "arch/x86_64/pit/pit.h"
 
 __attribute__((used, section(".limine_requests")))
 static volatile uint64_t limine_base_revision[] = LIMINE_BASE_REVISION(6);
 
 __attribute__((used, section(".limine_requests")))
-static volatile struct limine_framebuffer_request framebuffer_request = {
+volatile struct limine_framebuffer_request framebuffer_request = {
     .id = LIMINE_FRAMEBUFFER_REQUEST_ID,
     .revision = 0
 };
@@ -46,6 +48,9 @@ void kmain(void) {
     }
     serial_print("nyonOS: Framebuffer format OK!\n");
 
+    pic_remap(0x20, 0x28);
+    pit_init(1000);
+
     idt_init();
 
     volatile uint32_t *fb_ptr = (volatile uint32_t *)fb->address;
@@ -56,15 +61,9 @@ void kmain(void) {
 
     serial_print("nyonOS: Drawing complete!\n");
 
-    serial_print("Triggering divide by zero...\n");
-    serial_print("About to div...\n");
-    __asm__ volatile(
-        "int $0"
-        :
-        :
-        :
-    );
-    serial_print("After int $0...\n");
+    serial_print("PIT test: sleeping 1000ms...\n");
+    pit_sleep(1000);
+    serial_print("PIT test: woke up after 1000ms\n");
 
     for (;;) __asm__ volatile("hlt");
 }

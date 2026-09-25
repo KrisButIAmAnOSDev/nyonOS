@@ -2,6 +2,7 @@
 
 .extern exception_handler
 .extern serial_print
+.extern pit_handler
 
 .global debug_str_isr
 debug_str_isr:
@@ -39,10 +40,18 @@ isr_common:
     push r13
     push r14
     push r15
+
     mov rdi, rsp
-    lea rdi, [rip + debug_str_isr]
-    call serial_print
+    mov rsi, [rsp + 16*8 + 8]
+    cmp rsi, 32
+    jl 1f
+    cmp rsi, 47
+    jg 1f
+    call pit_handler
+    jmp 2f
+1:
     call exception_handler
+2:
     pop r15
     pop r14
     pop r13
@@ -65,9 +74,8 @@ isr_common:
 isr_stub_0:
     push 0
     push 0
-    lea rdi, [rip + debug_str_isr]
-    call serial_print
     jmp isr_common
+
 
 ISR_NOERRCODE 1
 ISR_NOERRCODE 2
@@ -100,6 +108,23 @@ ISR_NOERRCODE 28
 ISR_NOERRCODE 29
 ISR_ERRCODE 30
 ISR_NOERRCODE 31
+
+ISR_NOERRCODE 32
+ISR_NOERRCODE 33
+ISR_NOERRCODE 34
+ISR_NOERRCODE 35
+ISR_NOERRCODE 36
+ISR_NOERRCODE 37
+ISR_NOERRCODE 38
+ISR_NOERRCODE 39
+ISR_NOERRCODE 40
+ISR_NOERRCODE 41
+ISR_NOERRCODE 42
+ISR_NOERRCODE 43
+ISR_NOERRCODE 44
+ISR_NOERRCODE 45
+ISR_NOERRCODE 46
+ISR_NOERRCODE 47
 
 .global isr_stub_table
 isr_stub_table:
@@ -135,3 +160,19 @@ isr_stub_table:
     .quad isr_stub_29
     .quad isr_stub_30
     .quad isr_stub_31
+    .quad isr_stub_32
+    .quad isr_stub_33
+    .quad isr_stub_34
+    .quad isr_stub_35
+    .quad isr_stub_36
+    .quad isr_stub_37
+    .quad isr_stub_38
+    .quad isr_stub_39
+    .quad isr_stub_40
+    .quad isr_stub_41
+    .quad isr_stub_42
+    .quad isr_stub_43
+    .quad isr_stub_44
+    .quad isr_stub_45
+    .quad isr_stub_46
+    .quad isr_stub_47
