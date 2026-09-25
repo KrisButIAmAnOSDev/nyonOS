@@ -27,4 +27,4 @@ qemu-system-x86_64 -drive format=raw,file=nyonOS.img -serial stdio
 
 ## License
 
-GPL-3.0-only (font data from `kbd` package: GPL-2.0-or-later).
+GPL-3.0-only (font data from `kbd` package: GPL-2.0-or-later; limine: BSD-2-Clause)
