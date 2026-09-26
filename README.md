@@ -10,7 +10,7 @@ A minimal x86_64 hobby OS kernel written from scratch. Boots via Limine on BIOS/
 - **Serial debug output** (COM1, 115200 8N1)
 - **PIT timer** (channel 0, mode 2 rate generator) at 1000 Hz driving IRQ0` (didnt work yet)
 - **Working pmm and vmm** it works,at least
-- **"not working" keyboard dirver (ps/2)
+- **"not working"** keyboard dirver (ps/2)
 
 ## Building
 
