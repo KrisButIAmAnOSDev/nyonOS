@@ -7,9 +7,10 @@
 #include "io/serial/serial.h"
 #include "arch/x86_64/idt/idt.h"
 #include "arch/x86_64/pic/pic.h"
-#include "arch/x86_64/pit/pit.h"
+#include "io/keyboard/keyboard.h"
 #include "mm/pmm/pmm.h"
 #include "mm/vmm/vmm.h"
+#include "arch/x86_64/lapic/lapic.h"
 
 __attribute__((used, section(".limine_requests")))
 static volatile uint64_t limine_base_revision[] = LIMINE_BASE_REVISION(6);
@@ -71,13 +72,23 @@ void kmain(void) {
         serial_print("nyonOS: No HHDM response!\n");
         for (;;) __asm__ volatile("hlt");
     }
+    
     uint64_t hhdm_offset = hhdm_request.response->offset;
 
     pmm_init(memmap_request.response, hhdm_offset);
     vmm_init(hhdm_offset);
 
+    paddr_t lapic_phys = 0xFEE00000;
+    vaddr_t lapic_virt = hhdm_offset + lapic_phys;
+    if (!vmm_map(lapic_virt, lapic_phys, 1, PAGE_PRESENT | PAGE_WRITE | PAGE_PCD)) {
+       serial_print("nyonOS: Failed to map LAPIC!\n");
+       for (;;) __asm__ volatile("hlt");
+    }
+
     pic_remap(0x20, 0x28);
+    lapic_unmask_ext_int(lapic_virt);
     idt_init();
+    keyboard_init();
 
     volatile uint32_t *fb_ptr = (volatile uint32_t *)fb->address;
     uint32_t width = fb->width;
@@ -139,5 +150,8 @@ void kmain(void) {
         serial_print("  FAILED\n");
     }
 
-    for (;;) __asm__ volatile("hlt");
+    for (;;) {
+        keyboard_process_buffer();
+        __asm__ volatile("hlt");
+    }
 }

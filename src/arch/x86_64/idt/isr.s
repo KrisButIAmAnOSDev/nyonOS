@@ -3,6 +3,7 @@
 .extern exception_handler
 .extern serial_print
 .extern pit_handler
+.extern keyboard_handler
 
 .global debug_str_isr
 debug_str_isr:
@@ -47,10 +48,15 @@ isr_common:
     jl 1f
     cmp rsi, 47
     jg 1f
+    cmp rsi, 33
+    je 3f
     call pit_handler
     jmp 2f
 1:
     call exception_handler
+    jmp 2f
+3:
+    call keyboard_handler
 2:
     pop r15
     pop r14

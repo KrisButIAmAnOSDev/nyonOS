@@ -24,6 +24,7 @@ static bool cpu_has_5level(void) {
     uint32_t eax, ebx, ecx, edx;
     __asm__ volatile("cpuid" : "=a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx) : "a"(7), "c"(0));
     return (ecx & (1 << 16)) != 0;
+    // todo: acutlay enable la57
 }
 
 static struct page_table *alloc_page_table(void) {
