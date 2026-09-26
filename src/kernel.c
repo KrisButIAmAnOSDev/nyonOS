@@ -8,6 +8,8 @@
 #include "arch/x86_64/idt/idt.h"
 #include "arch/x86_64/pic/pic.h"
 #include "arch/x86_64/pit/pit.h"
+#include "mm/pmm/pmm.h"
+#include "mm/vmm/vmm.h"
 
 __attribute__((used, section(".limine_requests")))
 static volatile uint64_t limine_base_revision[] = LIMINE_BASE_REVISION(6);
@@ -15,6 +17,12 @@ static volatile uint64_t limine_base_revision[] = LIMINE_BASE_REVISION(6);
 __attribute__((used, section(".limine_requests")))
 volatile struct limine_framebuffer_request framebuffer_request = {
     .id = LIMINE_FRAMEBUFFER_REQUEST_ID,
+    .revision = 0
+};
+
+__attribute__((used, section(".limine_requests")))
+static volatile struct limine_memmap_request memmap_request = {
+    .id = LIMINE_MEMMAP_REQUEST_ID,
     .revision = 0
 };
 
@@ -48,22 +56,76 @@ void kmain(void) {
     }
     serial_print("nyonOS: Framebuffer format OK!\n");
 
-    pic_remap(0x20, 0x28);
-    pit_init(1000);
+    if (memmap_request.response == NULL) {
+        serial_print("nyonOS: No memmap response!\n");
+        for (;;) __asm__ volatile("hlt");
+    }
+    
+    pmm_init(memmap_request.response);
+    vmm_init();
 
+    pic_remap(0x20, 0x28);
     idt_init();
 
     volatile uint32_t *fb_ptr = (volatile uint32_t *)fb->address;
     uint32_t width = fb->width;
 
-    print_str(fb_ptr, "nyonn nyon nyonn ulelelel nyon leleel nyonn", 0, 0, 0xffffff, width);
-    print_str(fb_ptr, "-kawkaw from deltarune", 0, 16, 0xffffff, width);
+    print_str(fb_ptr, "nyonn nyon nyonn ulelelel nyon leleel nyonn", 0, 0, 0xff00ff, width);
+    print_str(fb_ptr, "-kawkaw from deltarune", 50, 16, 0xff00ff, width);
 
     serial_print("nyonOS: Drawing complete!\n");
 
-    serial_print("PIT test: sleeping 1000ms...\n");
-    pit_sleep(1000);
-    serial_print("PIT test: woke up after 1000ms\n");
+    serial_print("PMM test: alloc 3 pages...\n");
+    paddr_t p = pmm_alloc(3);
+    if (p) {
+        serial_print("  got 0x");
+        char buf[16];
+        size_t idx = 0, t = p;
+        if (t == 0) buf[idx++] = '0';
+        else { char rev[16]; size_t j = 0; while (t) { rev[j++] = "0123456789abcdef"[t % 16]; t /= 16; } while (j--) buf[idx++] = rev[j]; }
+        buf[idx] = 0;
+        serial_print(buf);
+        serial_print("\n");
+        pmm_free(p, 3);
+        serial_print("  freed\n");
+    } else {
+        serial_print("  FAILED\n");
+    }
+
+    serial_print("VMM test: map 2 pages...\n");
+    paddr_t phys = pmm_alloc(2);
+    vaddr_t virt = 0xFFFFFFFFC0000000;
+    if (phys && vmm_map(virt, phys, 2, VMM_DEFAULT_FLAGS)) {
+        serial_print("  mapped 0x");
+        char buf[16];
+        size_t idx = 0, t = virt;
+        if (t == 0) buf[idx++] = '0';
+        else { char rev[16]; size_t j = 0; while (t) { rev[j++] = "0123456789abcdef"[t % 16]; t /= 16; } while (j--) buf[idx++] = rev[j]; }
+        buf[idx] = 0;
+        serial_print(buf);
+        serial_print(" -> 0x");
+        t = phys; idx = 0;
+        if (t == 0) buf[idx++] = '0';
+        else { char rev[16]; size_t j = 0; while (t) { rev[j++] = "0123456789abcdef"[t % 16]; t /= 16; } while (j--) buf[idx++] = rev[j]; }
+        buf[idx] = 0;
+        serial_print(buf);
+        serial_print("\n");
+        
+        paddr_t phys2 = vmm_virt_to_phys(virt);
+        serial_print("  virt_to_phys: 0x");
+        t = phys2; idx = 0;
+        if (t == 0) buf[idx++] = '0';
+        else { char rev[16]; size_t j = 0; while (t) { rev[j++] = "0123456789abcdef"[t % 16]; t /= 16; } while (j--) buf[idx++] = rev[j]; }
+        buf[idx] = 0;
+        serial_print(buf);
+        serial_print("\n");
+        
+        vmm_unmap(virt, 2);
+        serial_print("  unmapped\n");
+        pmm_free(phys, 2);
+    } else {
+        serial_print("  FAILED\n");
+    }
 
     for (;;) __asm__ volatile("hlt");
 }

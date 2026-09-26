@@ -42,7 +42,7 @@ isr_common:
     push r15
 
     mov rdi, rsp
-    mov rsi, [rsp + 16*8 + 8]
+    mov rsi, [rsp + 120]
     cmp rsi, 32
     jl 1f
     cmp rsi, 47
@@ -69,6 +69,7 @@ isr_common:
     pop rax
     add rsp, 16
     iretq
+    
 
 .global isr_stub_0
 isr_stub_0:

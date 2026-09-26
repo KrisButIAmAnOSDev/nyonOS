@@ -9,6 +9,9 @@ extern void* isr_stub_table[];
 extern void idt_load(void* idtr_ptr);
 extern void* get_stub_table(void);
 
+volatile uint64_t debug_interrupt_count = 0;
+volatile uint64_t debug_last_vector = 0xFFFFFFFFFFFFFFFF;
+
 void idt_set_descriptor(uint8_t vector, void* isr, uint8_t flags) {
     idt[vector].isr_low = (uint64_t)isr & 0xFFFF;
     idt[vector].kernel_cs = 0x28;
@@ -17,6 +20,18 @@ void idt_set_descriptor(uint8_t vector, void* isr, uint8_t flags) {
     idt[vector].isr_mid = ((uint64_t)isr >> 16) & 0xFFFF;
     idt[vector].isr_high = ((uint64_t)isr >> 32) & 0xFFFFFFFF;
     idt[vector].reserved = 0;
+}
+
+void debug_track_interrupt(uint64_t vector) {
+    debug_interrupt_count++;
+    serial_print("INT vector=");
+    char buf[4];
+    buf[0] = '0' + (vector / 100);
+    buf[1] = '0' + ((vector / 10) % 10);
+    buf[2] = '0' + (vector % 10);
+    buf[3] = 0;
+    serial_print(buf);
+    serial_print("\n");
 }
 
 void idt_init(void) {
