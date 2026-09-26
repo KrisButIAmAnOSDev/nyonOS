@@ -18,7 +18,7 @@
 #define PAGE_GLOBAL     (1ULL << 8)
 #define PAGE_NX         (1ULL << 63)
 
-#define VMM_KERNEL_BASE 0xFFFFFFFF80000000
+extern uint64_t vmm_hhdm_offset;
 #define VMM_HIGHER_HALF 0xFFFF800000000000
 
 typedef uint64_t vaddr_t;
@@ -31,7 +31,7 @@ struct page_table {
 extern struct page_table *kernel_pml4;
 extern bool vmm_5level;
 
-void vmm_init(void);
+void vmm_init(uint64_t hhdm_offset);
 bool vmm_map(vaddr_t vaddr, paddr_t paddr, size_t pages, uint64_t flags);
 bool vmm_unmap(vaddr_t vaddr, size_t pages);
 paddr_t vmm_virt_to_phys(vaddr_t vaddr);

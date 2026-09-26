@@ -8,6 +8,8 @@ static size_t bitmap_pages = 0;
 static size_t total_pages = 0;
 static size_t free_pages = 0;
 
+static uint64_t pmm_hhdm_offset = 0;
+
 struct pmm_region pmm_regions[MAX_REGIONS];
 size_t pmm_region_count = 0;
 
@@ -39,9 +41,9 @@ static size_t bitmap_find_free(size_t count) {
     return SIZE_MAX;
 }
 
-void pmm_init(struct limine_memmap_response *memmap) {
+void pmm_init(struct limine_memmap_response *memmap, uint64_t hhdm_offset) {
+    pmm_hhdm_offset = hhdm_offset;
     paddr_t max_addr = 0;
-    
     for (size_t i = 0; i < memmap->entry_count; i++) {
         struct limine_memmap_entry *entry = memmap->entries[i];
         if (entry->type == LIMINE_MEMMAP_USABLE) {
@@ -70,7 +72,7 @@ void pmm_init(struct limine_memmap_response *memmap) {
         for (;;) __asm__ volatile("hlt");
     }
     
-    pmm_bitmap = (uint64_t *)bitmap_phys;
+    pmm_bitmap = (uint64_t *)(pmm_hhdm_offset + bitmap_phys);
     
     for (size_t i = 0; i < bitmap_pages; i++) {
         pmm_bitmap[i] = ~0ULL;
@@ -105,7 +107,7 @@ void pmm_init(struct limine_memmap_response *memmap) {
     else {
         char rev[24]; size_t j = 0;
         while (t) { rev[j++] = '0' + (t % 10); t /= 10; }
-        while (j--) buf[idx++] = rev[j--];
+        while (j > 0) { buf[idx++] = rev[--j]; }
     }
     buf[idx] = 0;
     serial_print(buf);
@@ -115,7 +117,7 @@ void pmm_init(struct limine_memmap_response *memmap) {
     else {
         char rev[24]; size_t j = 0;
         while (t) { rev[j++] = '0' + (t % 10); t /= 10; }
-        while (j--) buf[idx++] = rev[j--];
+        while (j > 0) { buf[idx++] = rev[--j]; }
     }
     buf[idx] = 0;
     serial_print(buf);

@@ -21,6 +21,12 @@ volatile struct limine_framebuffer_request framebuffer_request = {
 };
 
 __attribute__((used, section(".limine_requests")))
+static volatile struct limine_hhdm_request hhdm_request = {
+    .id = LIMINE_HHDM_REQUEST_ID,
+    .revision = 0
+};
+
+__attribute__((used, section(".limine_requests")))
 static volatile struct limine_memmap_request memmap_request = {
     .id = LIMINE_MEMMAP_REQUEST_ID,
     .revision = 0
@@ -61,8 +67,14 @@ void kmain(void) {
         for (;;) __asm__ volatile("hlt");
     }
     
-    pmm_init(memmap_request.response);
-    vmm_init();
+    if (hhdm_request.response == NULL) {
+        serial_print("nyonOS: No HHDM response!\n");
+        for (;;) __asm__ volatile("hlt");
+    }
+    uint64_t hhdm_offset = hhdm_request.response->offset;
+
+    pmm_init(memmap_request.response, hhdm_offset);
+    vmm_init(hhdm_offset);
 
     pic_remap(0x20, 0x28);
     idt_init();

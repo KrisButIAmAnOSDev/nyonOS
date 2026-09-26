@@ -19,7 +19,7 @@ struct pmm_region {
 extern struct pmm_region pmm_regions[];
 extern size_t pmm_region_count;
 
-void pmm_init(struct limine_memmap_response *memmap);
+void pmm_init(struct limine_memmap_response *memmap, uint64_t hhdm_offset);
 paddr_t pmm_alloc(size_t pages);
 void pmm_free(paddr_t addr, size_t pages);
 size_t pmm_total_pages(void);

@@ -4,6 +4,7 @@
 
 struct page_table *kernel_pml4 = NULL;
 bool vmm_5level = false;
+uint64_t vmm_hhdm_offset = 0;
 
 static inline uint64_t read_cr3(void) {
     uint64_t cr3;
@@ -28,13 +29,13 @@ static bool cpu_has_5level(void) {
 static struct page_table *alloc_page_table(void) {
     paddr_t phys = pmm_alloc(1);
     if (!phys) return NULL;
-    struct page_table *pt = (struct page_table *)(VMM_KERNEL_BASE + phys);
+    struct page_table *pt = (struct page_table *)(vmm_hhdm_offset + phys);
     for (size_t i = 0; i < 512; i++) pt->entries[i] = 0;
     return pt;
 }
 
 static void free_page_table(struct page_table *pt) {
-    pmm_free((paddr_t)((uint64_t)pt - VMM_KERNEL_BASE), 1);
+    pmm_free((paddr_t)((uint64_t)pt - vmm_hhdm_offset), 1);
 }
 
 static uint64_t *walk_page_table(struct page_table *table, vaddr_t vaddr, int level, bool alloc) {
@@ -56,11 +57,11 @@ static uint64_t *walk_page_table(struct page_table *table, vaddr_t vaddr, int le
     
     struct page_table *next;
     if (entry & PAGE_PRESENT) {
-        next = (struct page_table *)(VMM_KERNEL_BASE + (entry & 0x000FFFFFFFFFF000ULL));
+        next = (struct page_table *)(vmm_hhdm_offset + (entry & 0x000FFFFFFFFFF000ULL));
     } else if (alloc) {
         next = alloc_page_table();
         if (!next) return NULL;
-        table->entries[index] = ((uint64_t)next - VMM_KERNEL_BASE) | PAGE_PRESENT | PAGE_WRITE;
+        table->entries[index] = ((uint64_t)next - vmm_hhdm_offset) | PAGE_PRESENT | PAGE_WRITE;
     } else {
         return NULL;
     }
@@ -68,11 +69,12 @@ static uint64_t *walk_page_table(struct page_table *table, vaddr_t vaddr, int le
     return walk_page_table(next, vaddr, level - 1, alloc);
 }
 
-void vmm_init(void) {
+void vmm_init(uint64_t hhdm_offset) {
+    vmm_hhdm_offset = hhdm_offset;
     vmm_5level = cpu_has_5level();
     
     uint64_t cr3 = read_cr3();
-    kernel_pml4 = (struct page_table *)(VMM_KERNEL_BASE + (cr3 & 0x000FFFFFFFFFF000ULL));
+    kernel_pml4 = (struct page_table *)(vmm_hhdm_offset + (cr3 & 0x000FFFFFFFFFF000ULL));
     
     serial_print("VMM: Initialized, ");
     serial_print(vmm_5level ? "5-level paging\n" : "4-level paging\n");
@@ -136,7 +138,7 @@ struct page_table *vmm_create_address_space(void) {
 }
 
 void vmm_switch_address_space(struct page_table *pml4) {
-    write_cr3((uint64_t)pml4 - VMM_KERNEL_BASE);
+    write_cr3((uint64_t)pml4 - vmm_hhdm_offset);
 }
 
 void vmm_invlpg(vaddr_t vaddr) {
