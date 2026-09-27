@@ -6,6 +6,7 @@
 #include "video/video.h"
 #include "io/serial/serial.h"
 #include "arch/x86_64/idt/idt.h"
+#include "arch/x86_64/gdt/gdt.h"
 #include "arch/x86_64/pic/pic.h"
 #include "io/keyboard/keyboard.h"
 #include "mm/pmm/pmm.h"
@@ -77,6 +78,9 @@ void kmain(void) {
 
     pmm_init(memmap_request.response, hhdm_offset);
     vmm_init(hhdm_offset);
+
+    gdt_init(hhdm_offset);
+    gdt_dump();
 
     paddr_t lapic_phys = 0xFEE00000;
     vaddr_t lapic_virt = hhdm_offset + lapic_phys;

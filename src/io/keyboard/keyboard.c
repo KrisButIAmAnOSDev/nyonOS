@@ -164,15 +164,14 @@ void keyboard_process_buffer(void) {
     
     uint8_t scancode;
     while (keyboard_buffer_pop(&scancode)) {
+        serial_print("SC: 0x");
+        serial_putchar("0123456789abcdef"[(scancode >> 4) & 0xf]);
+        serial_putchar("0123456789abcdef"[scancode & 0xf]);
+        serial_print("\n");
+
         uint8_t ascii = scancode_to_ascii(scancode);
         if (ascii) {
             put_char_fb(ascii);
-            serial_print("KEY: ");
-            char buf[2];
-            buf[0] = ascii;
-            buf[1] = 0;
-            serial_print(buf);
-            serial_print("\n");
         }
     }
 }
@@ -187,19 +186,21 @@ void keyboard_init(void) {
     uint8_t status = inb(0x60);
     status |= 0x01;
     status &= ~0x10;
+    status |= 0x40;
     keyboard_wait_input();
     outb(0x64, 0x60);
-    keyboard_wait_output();
+    keyboard_wait_input();
     outb(0x60, status);
     
     keyboard_wait_input();
     outb(0x64, 0xAE);
-    keyboard_wait_output();
+    keyboard_wait_input();
     outb(0x60, 0xF4);
     keyboard_wait_output();
     
+    keyboard_wait_input();
     outb(0x64, 0xA8);
-    keyboard_wait_output();
+    keyboard_wait_input();
     outb(0x60, 0xF4);
     keyboard_wait_output();
     

@@ -12,10 +12,10 @@ extern void* get_stub_table(void);
 volatile uint64_t debug_interrupt_count = 0;
 volatile uint64_t debug_last_vector = 0xFFFFFFFFFFFFFFFF;
 
-void idt_set_descriptor(uint8_t vector, void* isr, uint8_t flags) {
+void idt_set_descriptor(uint8_t vector, void* isr, uint8_t flags, uint8_t ist) {
     idt[vector].isr_low = (uint64_t)isr & 0xFFFF;
-    idt[vector].kernel_cs = 0x28;
-    idt[vector].ist = 0;
+    idt[vector].kernel_cs = GDT_KERNEL_CODE;
+    idt[vector].ist = ist;
     idt[vector].attributes = flags;
     idt[vector].isr_mid = ((uint64_t)isr >> 16) & 0xFFFF;
     idt[vector].isr_high = ((uint64_t)isr >> 32) & 0xFFFFFFFF;
@@ -41,7 +41,21 @@ void idt_init(void) {
     void** stub_table = (void**)get_stub_table();
 
     for (int i = 0; i < 48; i++) {
-        idt_set_descriptor(i, stub_table[i], 0x8E);
+        uint8_t ist = 0;
+        uint8_t flags = 0x8E;
+
+        if (i == 8) {
+            ist = 1;
+        } else if (i == 2) {
+            ist = 2;
+        } else if (i == 1) {
+            ist = 3;
+            flags = 0xEE;
+        } else if (i == 0 || i == 6 || i == 12 || i == 13 || i == 14) {
+            flags = 0xEE;
+        }
+
+        idt_set_descriptor(i, stub_table[i], flags, ist);
     }
 
     // TEMP DEBUG: confirm stub_table[32] holds a real address

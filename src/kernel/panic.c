@@ -117,7 +117,7 @@ void panic_dump_regs(struct panic_context* ctx) {
     __asm__ volatile("mov %%cr2, %0" : "=r"(ctx->cr2));
     __asm__ volatile("mov %%cr3, %0" : "=r"(ctx->cr3));
     __asm__ volatile("mov %%cr4, %0" : "=r"(ctx->cr4));
-    ctx->rsp_at_panic = f->rbp;
+    __asm__ volatile("mov %%rsp, %0" : "=r"(ctx->rsp_at_panic));
 
     serial_print("RIP: 0x"); print_hex64_serial(f->rip); serial_print("\n");
     serial_print("CS:  0x"); print_hex64_serial(f->cs); serial_print("\n");

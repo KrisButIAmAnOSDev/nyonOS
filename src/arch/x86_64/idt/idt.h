@@ -2,6 +2,7 @@
 #define IDT_H
 
 #include <stdint.h>
+#include "arch/x86_64/gdt/gdt.h"
 
 #define IDT_SIZE 256
 
@@ -35,7 +36,7 @@ extern struct idtr idtr;
 extern void* isr_stub_table[];
 
 void idt_init(void);
-void idt_set_descriptor(uint8_t vector, void* isr, uint8_t flags);
+void idt_set_descriptor(uint8_t vector, void* isr, uint8_t flags, uint8_t ist);
 void exception_handler(struct isr_frame* frame);
 
 #endif
