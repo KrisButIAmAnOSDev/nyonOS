@@ -10,6 +10,7 @@
 #include "arch/x86_64/pic/pic.h"
 #include "io/keyboard/keyboard.h"
 #include "mm/pmm/pmm.h"
+#include "mm/heap/heap.h"
 #include "mm/vmm/vmm.h"
 #include "arch/x86_64/lapic/lapic.h"
 
@@ -152,6 +153,87 @@ void kmain(void) {
         pmm_free(phys, 2);
     } else {
         serial_print("  FAILED\n");
+    }
+
+    heap_init();
+
+    serial_print("HEAP test: basic\n");
+    char *ha = kmalloc(64);
+    char *hb = kmalloc(64);
+    for (int i = 0; i < 64; i++) ha[i] = 0xAA;
+    for (int i = 0; i < 64; i++) hb[i] = 0xBB;
+    serial_print("  a!=b: ");
+    serial_putchar(ha != hb ? 'Y' : 'N');
+    int intact = 1;
+    for (int i = 0; i < 64; i++) if (ha[i] != (char)0xAA) intact = 0;
+    serial_print("  a intact: ");
+    serial_putchar(intact ? 'Y' : 'N');
+    kfree(hb);
+    kfree(ha);
+    char *hc = kmalloc(64);
+    serial_print("  reuse head: ");
+    serial_putchar(hc == ha ? 'Y' : 'N');
+    kfree(hc);
+    serial_putchar('\n');
+
+    serial_print("HEAP test: ALIGN_UP overflow\n");
+    char *hh = kmalloc(SIZE_MAX);
+    serial_print("  kmalloc(SIZE_MAX) = ");
+    serial_print(hh ? "NON-NULL  <-- bug" : "NULL  ok");
+    serial_putchar('\n');
+
+    serial_print("HEAP test: double free\n");
+    char *q1 = kmalloc(64);
+    char *q2 = kmalloc(64);
+    char *q3 = kmalloc(64);
+    char *q4 = kmalloc(64);
+    kfree(q1);
+    kfree(q3);
+    kfree(q2);
+    kfree(q2);
+    kfree(q1);
+    kfree(q3);
+    kfree(q4);
+    char *probe = kmalloc(64);
+    serial_print("  heap still healthy after rejects: ");
+    serial_putchar(probe ? 'Y' : 'N');
+    kfree(probe);
+    serial_putchar('\n');
+
+    serial_print("HEAP test: kfree of a wild pointer\n");
+    kfree((void *)0x1234);
+    serial_print("  rejected, no crash: Y\n");
+
+    serial_print("HEAP test: kfree of a misaligned pointer\n");
+    char *ma = kmalloc(64);
+    kfree(ma + 8);
+    kfree(ma);
+    serial_print("  rejected, no crash: Y\n");
+
+    serial_print("HEAP test: churn (alloc/free 200x)\n");
+    int churn_ok = 1;
+    for (int i = 0; i < 200; i++) {
+        char *p = kmalloc(96);
+        if (!p) { churn_ok = 0; break; }
+        for (int k = 0; k < 96; k++) p[k] = (char)i;
+        for (int k = 0; k < 96; k++) if (p[k] != (char)i) churn_ok = 0;
+        kfree(p);
+    }
+    serial_print("  survived: ");
+    serial_putchar(churn_ok ? 'Y' : 'N');
+    serial_putchar('\n');
+
+    serial_print("HEAP test: trim returns pages\n");
+    serial_print("  committed now = ");
+    {
+        uint64_t t = heap_committed_bytes();
+        char b[24];
+        size_t i = 0;
+        if (t == 0) b[i++] = '0';
+        else { char r[24]; size_t j = 0; while (t) { r[j++] = '0' + (t % 10); t /= 10; } while (j) b[i++] = r[--j]; }
+        b[i] = 0;
+        serial_print(b);
+        serial_print(" bytes (0 = fully returned)\n");
     }
 
     for (;;) {

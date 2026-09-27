@@ -138,9 +138,35 @@ paddr_t pmm_alloc(size_t pages) {
     return start * PAGE_SIZE;
 }
 
+static bool pmm_page_managed(size_t page) {
+    for (size_t i = 0; i < pmm_region_count; i++) {
+        size_t base = pmm_regions[i].base / PAGE_SIZE;
+        if (page >= base && page < base + pmm_regions[i].pages) return true;
+    }
+    return false;
+}
+
 void pmm_free(paddr_t addr, size_t pages) {
     if (pages == 0) return;
+
+    if (addr & (PAGE_SIZE - 1)) {
+        serial_print("PMM: free of unaligned address\n");
+        return;
+    }
+
     size_t start = addr / PAGE_SIZE;
+    if (start >= total_pages || pages > total_pages - start) {
+        serial_print("PMM: free out of range\n");
+        return;
+    }
+
+    for (size_t i = 0; i < pages; i++) {
+        if (!pmm_page_managed(start + i)) {
+            serial_print("PMM: free of page outside managed regions\n");
+            return;
+        }
+    }
+
     for (size_t i = 0; i < pages; i++) {
         if (bitmap_test(start + i)) {
             bitmap_clear(start + i);

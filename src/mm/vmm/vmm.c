@@ -39,7 +39,7 @@ static void free_page_table(struct page_table *pt) {
     pmm_free((paddr_t)((uint64_t)pt - vmm_hhdm_offset), 1);
 }
 
-static uint64_t *walk_page_table(struct page_table *table, vaddr_t vaddr, int level, bool alloc) {
+static uint64_t *walk_page_table(struct page_table *table, vaddr_t vaddr, int level, bool alloc, uint64_t flags) {
     if (level == 0) return NULL;
     
     int shift;
@@ -58,16 +58,21 @@ static uint64_t *walk_page_table(struct page_table *table, vaddr_t vaddr, int le
     
     struct page_table *next;
     if (entry & PAGE_PRESENT) {
+        if (alloc && (flags & PAGE_USER) && !(entry & PAGE_USER)) {
+            table->entries[index] = entry | PAGE_USER;
+        }
         next = (struct page_table *)(vmm_hhdm_offset + (entry & 0x000FFFFFFFFFF000ULL));
     } else if (alloc) {
         next = alloc_page_table();
         if (!next) return NULL;
-        table->entries[index] = ((uint64_t)next - vmm_hhdm_offset) | PAGE_PRESENT | PAGE_WRITE;
+        uint64_t iflags = PAGE_PRESENT | PAGE_WRITE;
+        if (flags & PAGE_USER) iflags |= PAGE_USER;
+        table->entries[index] = ((uint64_t)next - vmm_hhdm_offset) | iflags;
     } else {
         return NULL;
     }
     
-    return walk_page_table(next, vaddr, level - 1, alloc);
+    return walk_page_table(next, vaddr, level - 1, alloc, flags);
 }
 
 void vmm_init(uint64_t hhdm_offset) {
@@ -81,18 +86,30 @@ void vmm_init(uint64_t hhdm_offset) {
     serial_print(vmm_5level ? "5-level paging\n" : "4-level paging\n");
 }
 
+// TODO: reclaim intermediate page tables that become empty after an unmap.
+// free_page_table exists but is never called, so empty tables leak physical
+// memory under map/unmap churn. Needed for real address-space teardown.
+// TODO: no locking on any of this. Fine for one CPU with no concurrent
+// allocation, but a spinlock is required before SMP or any allocator use
+// from an interrupt handler that races normal context.
+
 bool vmm_map(vaddr_t vaddr, paddr_t paddr, size_t pages, uint64_t flags) {
     if (pages == 0) return false;
     if (vaddr & (PAGE_SIZE - 1) || paddr & (PAGE_SIZE - 1)) return false;
     
+    int levels = vmm_5level ? 5 : 4;
+
+    for (size_t i = 0; i < pages; i++) {
+        uint64_t *entry = walk_page_table(kernel_pml4, vaddr + i * PAGE_SIZE, levels, true, flags);
+        if (!entry) return false;
+        if (*entry & PAGE_PRESENT) return false;
+    }
+
     for (size_t i = 0; i < pages; i++) {
         vaddr_t v = vaddr + i * PAGE_SIZE;
         paddr_t p = paddr + i * PAGE_SIZE;
         
-        uint64_t *entry = walk_page_table(kernel_pml4, v, vmm_5level ? 5 : 4, true);
-        if (!entry) return false;
-        
-        if (*entry & PAGE_PRESENT) return false;
+        uint64_t *entry = walk_page_table(kernel_pml4, v, levels, true, flags);
         *entry = p | flags | PAGE_PRESENT;
     }
     
@@ -103,12 +120,17 @@ bool vmm_unmap(vaddr_t vaddr, size_t pages) {
     if (pages == 0) return false;
     if (vaddr & (PAGE_SIZE - 1)) return false;
     
+    int levels = vmm_5level ? 5 : 4;
+
+    for (size_t i = 0; i < pages; i++) {
+        uint64_t *entry = walk_page_table(kernel_pml4, vaddr + i * PAGE_SIZE, levels, false, 0);
+        if (!entry || !(*entry & PAGE_PRESENT)) return false;
+    }
+
     for (size_t i = 0; i < pages; i++) {
         vaddr_t v = vaddr + i * PAGE_SIZE;
         
-        uint64_t *entry = walk_page_table(kernel_pml4, v, vmm_5level ? 5 : 4, false);
-        if (!entry || !(*entry & PAGE_PRESENT)) return false;
-        
+        uint64_t *entry = walk_page_table(kernel_pml4, v, levels, false, 0);
         *entry = 0;
         invlpg(v);
     }
@@ -117,13 +139,13 @@ bool vmm_unmap(vaddr_t vaddr, size_t pages) {
 }
 
 paddr_t vmm_virt_to_phys(vaddr_t vaddr) {
-    uint64_t *entry = walk_page_table(kernel_pml4, vaddr, vmm_5level ? 5 : 4, false);
+    uint64_t *entry = walk_page_table(kernel_pml4, vaddr, vmm_5level ? 5 : 4, false, 0);
     if (!entry || !(*entry & PAGE_PRESENT)) return 0;
     return (*entry & 0x000FFFFFFFFFF000ULL) | (vaddr & (PAGE_SIZE - 1));
 }
 
 bool vmm_is_mapped(vaddr_t vaddr) {
-    uint64_t *entry = walk_page_table(kernel_pml4, vaddr, vmm_5level ? 5 : 4, false);
+    uint64_t *entry = walk_page_table(kernel_pml4, vaddr, vmm_5level ? 5 : 4, false, 0);
     return entry && (*entry & PAGE_PRESENT);
 }
 
