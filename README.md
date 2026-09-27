@@ -27,6 +27,19 @@ Output: `nyonOS.img` (GPT disk image with Limine bootloader)
 qemu-system-x86_64 -drive format=raw,file=nyonOS.img -serial stdio
 ```
 
+## Disclaimer
+
+This project uses LLM assistance. Some of the code in this repository was
+written by an LLM (an AI coding assistant) rather than by a human.
+
+Roughly 70% of the code is human-written and 30% is LLM-generated.
+
+LLM-generated code has not necessarily been reviewed line by line by a human.
+Read it before you rely on it. The project is provided as-is, with no warranty
+of any kind.
+
 ## License
 
 GPL-3.0-only (font data from `kbd` package: GPL-2.0-or-later; limine: BSD-2-Clause)
+
+The license covers the LLM-generated portions as well as the human-written ones.
