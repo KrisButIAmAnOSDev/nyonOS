@@ -10,5 +10,6 @@
 
 void pit_init(uint32_t frequency_hz);
 void pit_sleep(uint64_t ms);
+uint64_t pit_get_ticks(void);
 
 #endif

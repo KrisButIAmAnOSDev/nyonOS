@@ -87,7 +87,14 @@ void panic_dump_regs(struct panic_context* ctx) {
         print_str_fb(fb, width, "KERNEL PANIC", 8, 8, 0xFF0000);
     }
 
-    const char* exc_name = (f->interrupt_number < 32) ? exception_names[f->interrupt_number] : "Unknown";
+    const char* exc_name;
+    if (f->interrupt_number == 255) {
+        exc_name = "Unexpected interrupt (unhandled vector 48-255)";
+    } else if (f->interrupt_number < 32) {
+        exc_name = exception_names[f->interrupt_number];
+    } else {
+        exc_name = "Unexpected interrupt";
+    }
     char msg[128];
     serial_print("Exception: ");
     serial_print(exc_name);

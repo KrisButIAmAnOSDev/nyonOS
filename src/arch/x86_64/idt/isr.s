@@ -133,6 +133,12 @@ ISR_NOERRCODE 45
 ISR_NOERRCODE 46
 ISR_NOERRCODE 47
 
+.global isr_stub_unexpected
+isr_stub_unexpected:
+    push 0
+    push 255
+    jmp isr_common
+
 .global isr_stub_table
 isr_stub_table:
     .quad isr_stub_0
@@ -183,3 +189,6 @@ isr_stub_table:
     .quad isr_stub_45
     .quad isr_stub_46
     .quad isr_stub_47
+    .rept 208
+    .quad isr_stub_unexpected
+    .endr

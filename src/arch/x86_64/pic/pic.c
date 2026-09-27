@@ -36,8 +36,8 @@ void pic_remap(uint8_t offset1, uint8_t offset2) {
     outb(PIC2_DATA, 0x01);
     io_wait();
 
-    outb(PIC1_DATA, 0x00);
-    outb(PIC2_DATA, 0x00);
+    outb(PIC1_DATA, 0xFF);
+    outb(PIC2_DATA, 0xFF);
 
     serial_print("PIC remapped to ");
     char buf[4];

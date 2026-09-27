@@ -58,6 +58,11 @@ void idt_init(void) {
         idt_set_descriptor(i, stub_table[i], flags, ist);
     }
 
+    extern void* isr_stub_unexpected;
+    for (int i = 48; i < 256; i++) {
+        idt_set_descriptor(i, isr_stub_unexpected, 0x8E, 0);
+    }
+
     // TEMP DEBUG: confirm stub_table[32] holds a real address
     serial_print("stub[32]=0x");
     uint64_t addr = (uint64_t)stub_table[32];

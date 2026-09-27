@@ -8,6 +8,7 @@
 #include "arch/x86_64/idt/idt.h"
 #include "arch/x86_64/gdt/gdt.h"
 #include "arch/x86_64/pic/pic.h"
+#include "arch/x86_64/pit/pit.h"
 #include "io/keyboard/keyboard.h"
 #include "mm/pmm/pmm.h"
 #include "mm/heap/heap.h"
@@ -40,6 +41,21 @@ static volatile uint64_t limine_requests_start_marker[] = LIMINE_REQUESTS_START_
 
 __attribute__((used, section(".limine_requests_end")))
 static volatile uint64_t limine_requests_end_marker[] = LIMINE_REQUESTS_END_MARKER;
+
+static void print_u64(uint64_t v) {
+    char buf[24];
+    size_t i = 0;
+    if (v == 0) {
+        buf[i++] = '0';
+    } else {
+        char rev[24];
+        size_t j = 0;
+        while (v) { rev[j++] = '0' + (v % 10); v /= 10; }
+        while (j) buf[i++] = rev[--j];
+    }
+    buf[i] = 0;
+    serial_print(buf);
+}
 
 void kmain(void) {
     serial_init();
@@ -91,6 +107,8 @@ void kmain(void) {
     }
 
     pic_remap(0x20, 0x28);
+    pic_clear_mask(2);
+    pit_init(1000);
     lapic_unmask_ext_int(lapic_virt);
     idt_init();
     keyboard_init();
@@ -153,6 +171,29 @@ void kmain(void) {
         pmm_free(phys, 2);
     } else {
         serial_print("  FAILED\n");
+    }
+
+    serial_print("PIT test: pit_sleep\n");
+    {
+        uint64_t t0 = pit_get_ticks();
+        pit_sleep(100);
+        uint64_t t1 = pit_get_ticks();
+        uint64_t d100 = t1 - t0;
+
+        t0 = pit_get_ticks();
+        pit_sleep(500);
+        t1 = pit_get_ticks();
+        uint64_t d500 = t1 - t0;
+
+        serial_print("  100ms slept, ticks advanced ");
+        print_u64(d100);
+        serial_print("  (expect ~100)\n  500ms slept, ticks advanced ");
+        print_u64(d500);
+        serial_print("  (expect ~500)\n  ticker alive: ");
+        serial_putchar(d100 > 0 ? 'Y' : 'N');
+        serial_print("  in range: ");
+        serial_putchar((d100 >= 95 && d100 <= 110 && d500 >= 490 && d500 <= 520) ? 'Y' : 'N');
+        serial_putchar('\n');
     }
 
     heap_init();
