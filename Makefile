@@ -39,9 +39,16 @@ obj/%.S.o: %.S
 image: kernel
 	./build.sh
 
-run: image
+run:
+	$(MAKE) clean
+	$(MAKE) kernel
+	./build.sh
+	qemu-system-x86_64 -drive format=raw,file=nyonOS.img -d int,cpu_reset -D qemu.log -serial stdio -no-reboot -k en-us
+
+run-ihatedisplay: image
+	qemu-system-x86_64 -drive format=raw,file=nyonOS.img -d int,cpu_reset -D qemu.log -serial stdio -no-reboot -k en-us -display none
 
 clean:
 	rm -rf bin obj
 
-.PHONY: all kernel image run clean
+.PHONY: all kernel image run run-ihatedisplay clean
