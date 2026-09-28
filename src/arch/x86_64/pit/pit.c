@@ -1,5 +1,6 @@
 #include "arch/x86_64/pit/pit.h"
 #include "arch/x86_64/idt/idt.h"
+#include "kernel/multitask/task.h"
 #include "arch/x86_64/pic/pic.h"
 #include "io/serial/serial.h"
 
@@ -16,9 +17,12 @@ static inline uint8_t inb(uint16_t port) {
     return val;
 }
 
-void pit_handler(struct isr_frame* frame __attribute__((unused))) {
+void pit_handler(struct isr_frame* frame) {
     pit_ticks++;
     pic_send_eoi(0);
+    if (pit_ticks % TASK_QUANTUM_TICKS == 0) {
+        task_schedule(frame);
+    }
 }
 
 void pit_init(uint32_t frequency_hz) {

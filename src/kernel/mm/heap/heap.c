@@ -1,6 +1,6 @@
 #include "heap.h"
-#include "../vmm/vmm.h"
-#include "../pmm/pmm.h"
+#include "kernel/mm/vmm/vmm.h"
+#include "kernel/mm/pmm/pmm.h"
 #include "io/serial/serial.h"
 
 #define HEAP_VIRT_BASE 0xFFFFFFFFD0000000ULL
@@ -97,8 +97,8 @@ static bool heap_grow(size_t min_extra) {
     if (heap_committed + needed > heap_max_bytes) return false;
     if (segment_count >= HEAP_MAX_SEGMENTS) return false;
 
-    paddr_t phys = pmm_alloc(pages);
-    if (!phys) return false;
+    paddr_t phys;
+    if (!pmm_alloc(&phys, pages)) return false;
 
     vaddr_t vaddr = HEAP_VIRT_BASE + heap_committed;
     if (!vmm_map(vaddr, phys, pages, VMM_DEFAULT_FLAGS)) {

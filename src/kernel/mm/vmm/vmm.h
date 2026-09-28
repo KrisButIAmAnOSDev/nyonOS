@@ -4,7 +4,7 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <stdbool.h>
-#include "../pmm/pmm.h"
+#include "kernel/mm/pmm/pmm.h"
 
 #define PAGE_SIZE 4096
 #define PAGE_PRESENT    (1ULL << 0)
@@ -35,6 +35,7 @@ void vmm_init(uint64_t hhdm_offset);
 bool vmm_map(vaddr_t vaddr, paddr_t paddr, size_t pages, uint64_t flags);
 bool vmm_unmap(vaddr_t vaddr, size_t pages);
 paddr_t vmm_virt_to_phys(vaddr_t vaddr);
+uint64_t vmm_query(vaddr_t vaddr);
 bool vmm_is_mapped(vaddr_t vaddr);
 struct page_table *vmm_create_address_space(void);
 void vmm_switch_address_space(struct page_table *pml4);

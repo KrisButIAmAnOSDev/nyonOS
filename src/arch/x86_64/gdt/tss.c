@@ -1,12 +1,12 @@
 #include "tss.h"
 #include "io/serial/serial.h"
-#include "mm/pmm/pmm.h"
+#include "kernel/mm/pmm/pmm.h"
 
 static struct tss tss;
 
 static uint64_t alloc_stack_top(uint64_t hhdm_offset) {
-    paddr_t p = pmm_alloc(1);
-    if (!p) {
+    paddr_t p;
+    if (!pmm_alloc(&p, 1)) {
         serial_print("TSS: out of memory allocating stack\n");
         for (;;) __asm__ volatile("hlt");
     }

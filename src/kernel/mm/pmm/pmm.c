@@ -124,18 +124,20 @@ void pmm_init(struct limine_memmap_response *memmap, uint64_t hhdm_offset) {
     serial_print(" free)\n");
 }
 
-paddr_t pmm_alloc(size_t pages) {
-    if (pages == 0) return 0;
-    if (pages > free_pages) return 0;
+bool pmm_alloc(paddr_t *out, size_t pages) {
+    if (!out) return false;
+    if (pages == 0) return false;
+    if (pages > free_pages) return false;
     
     size_t start = bitmap_find_free(pages);
-    if (start == SIZE_MAX) return 0;
+    if (start == SIZE_MAX) return false;
     
     for (size_t i = 0; i < pages; i++) {
         bitmap_set(start + i);
     }
     free_pages -= pages;
-    return start * PAGE_SIZE;
+    *out = start * PAGE_SIZE;
+    return true;
 }
 
 static bool pmm_page_managed(size_t page) {

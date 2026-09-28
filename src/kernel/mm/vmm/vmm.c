@@ -1,6 +1,6 @@
 #include "vmm.h"
-#include "../pmm/pmm.h"
-#include "../../io/serial/serial.h"
+#include "kernel/mm/pmm/pmm.h"
+#include "io/serial/serial.h"
 
 struct page_table *kernel_pml4 = NULL;
 bool vmm_5level = false;
@@ -16,20 +16,27 @@ static inline void write_cr3(uint64_t cr3) {
     __asm__ volatile("mov %0, %%cr3" :: "r"(cr3));
 }
 
+static inline uint64_t read_cr4(void) {
+    uint64_t cr4;
+    __asm__ volatile("mov %%cr4, %0" : "=r"(cr4));
+    return cr4;
+}
+
 static inline void invlpg(vaddr_t addr) {
     __asm__ volatile("invlpg (%0)" :: "r"(addr) : "memory");
 }
+
+#define CR4_LA57 (1ULL << 12)
 
 static bool cpu_has_5level(void) {
     uint32_t eax, ebx, ecx, edx;
     __asm__ volatile("cpuid" : "=a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx) : "a"(7), "c"(0));
     return (ecx & (1 << 16)) != 0;
-    // todo: acutlay enable la57
 }
 
 static struct page_table *alloc_page_table(void) {
-    paddr_t phys = pmm_alloc(1);
-    if (!phys) return NULL;
+    paddr_t phys;
+    if (!pmm_alloc(&phys, 1)) return NULL;
     struct page_table *pt = (struct page_table *)(vmm_hhdm_offset + phys);
     for (size_t i = 0; i < 512; i++) pt->entries[i] = 0;
     return pt;
@@ -77,13 +84,19 @@ static uint64_t *walk_page_table(struct page_table *table, vaddr_t vaddr, int le
 
 void vmm_init(uint64_t hhdm_offset) {
     vmm_hhdm_offset = hhdm_offset;
-    vmm_5level = cpu_has_5level();
-    
+
+    bool cpu_supports_la57 = cpu_has_5level();
+    bool paging_is_5level = (read_cr4() & CR4_LA57) != 0;
+    vmm_5level = cpu_supports_la57 && paging_is_5level;
+
     uint64_t cr3 = read_cr3();
     kernel_pml4 = (struct page_table *)(vmm_hhdm_offset + (cr3 & 0x000FFFFFFFFFF000ULL));
-    
+
     serial_print("VMM: Initialized, ");
     serial_print(vmm_5level ? "5-level paging\n" : "4-level paging\n");
+    if (cpu_supports_la57 && !paging_is_5level) {
+        serial_print("VMM: LA57 available but CR4.LA57 clear, using 4-level walk\n");
+    }
 }
 
 // TODO: reclaim intermediate page tables that become empty after an unmap.
@@ -142,6 +155,12 @@ paddr_t vmm_virt_to_phys(vaddr_t vaddr) {
     uint64_t *entry = walk_page_table(kernel_pml4, vaddr, vmm_5level ? 5 : 4, false, 0);
     if (!entry || !(*entry & PAGE_PRESENT)) return 0;
     return (*entry & 0x000FFFFFFFFFF000ULL) | (vaddr & (PAGE_SIZE - 1));
+}
+
+uint64_t vmm_query(vaddr_t vaddr) {
+    uint64_t *entry = walk_page_table(kernel_pml4, vaddr, vmm_5level ? 5 : 4, false, 0);
+    if (!entry) return 0;
+    return *entry;
 }
 
 bool vmm_is_mapped(vaddr_t vaddr) {

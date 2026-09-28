@@ -1,4 +1,6 @@
 #include "kernel/panic.h"
+#include "kernel/multitask/task.h"
+#include "kernel/mm/vmm/vmm.h"
 #include "io/serial/serial.h"
 #include "video/video.h"
 #include "limine/limine.h"
@@ -67,6 +69,83 @@ static void print_str_fb(volatile uint32_t* fb, uint32_t width, const char* str,
         x += 8;
         str++;
     }
+}
+
+static void dump_pf(struct panic_context* ctx, uint64_t err) {
+    serial_print("--- PAGE FAULT DETAIL ---\n");
+    serial_print("  cr2          = 0x");
+    print_hex64_serial(ctx->cr2);
+    serial_print("\n  err bits     = P:");
+    serial_putchar((err & (1ULL << 0)) ? '1' : '0');
+    serial_print(" W:");
+    serial_putchar((err & (1ULL << 1)) ? '1' : '0');
+    serial_print(" U:");
+    serial_putchar((err & (1ULL << 2)) ? '1' : '0');
+    serial_print(" RSVD:");
+    serial_putchar((err & (1ULL << 3)) ? '1' : '0');
+    serial_print(" FETCH:");
+    serial_putchar((err & (1ULL << 4)) ? '1' : '0');
+    serial_print(" NX:");
+    serial_putchar((err & (1ULL << 34)) ? '1' : '0');
+    serial_print("\n  cr0.WP      = ");
+    serial_putchar((ctx->cr0 & (1ULL << 16)) ? '1' : '0');
+    serial_print("\n  cr4         = 0x");
+    print_hex64_serial(ctx->cr4);
+    uint64_t pte = vmm_query(ctx->cr2);
+    serial_print("\n  leaf PTE    = 0x");
+    print_hex64_serial(pte);
+    if (pte == 0) {
+        serial_print("   (no mapping found)");
+    } else {
+        serial_print("   P:");
+        serial_putchar((pte & PAGE_PRESENT) ? '1' : '0');
+        serial_print(" W:");
+        serial_putchar((pte & PAGE_WRITE) ? '1' : '0');
+        serial_print(" U:");
+        serial_putchar((pte & PAGE_USER) ? '1' : '0');
+        serial_print(" NX:");
+        serial_putchar((pte & PAGE_NX) ? '1' : '0');
+    }
+    serial_print("\n  cr3         = 0x");
+    print_hex64_serial(ctx->cr3);
+    serial_putchar('\n');
+}
+
+static void dump_stack(uint64_t rsp) {
+    const volatile uint64_t *sp = (const volatile uint64_t *)rsp;
+    serial_print("--- STACK (24 qwords from rsp) ---\n");
+    for (int i = 0; i < 24; i++) {
+        uint64_t v = sp[i];
+        serial_print("  [");
+        print_hex64_serial((uint64_t)i * 8);
+        serial_print("] 0x");
+        print_hex64_serial(v);
+        if (v >= 0xffffffff80000000ULL && v < 0xffffffff80100000ULL) serial_print("  <- kernel image");
+        serial_putchar('\n');
+    }
+}
+
+static void dump_task(void) {
+    struct task *t = task_current();
+    serial_print("--- CURRENT TASK ---\n  name=");
+    serial_print(t->name ? t->name : "?");
+    serial_print("  in_use=");
+    serial_putchar(t->in_use ? 'Y' : 'N');
+    serial_print("  switches=");
+    print_hex64_serial(task_switch_count());
+    serial_print("  frame=0x");
+    print_hex64_serial((uint64_t)t->frame);
+    if (t->frame) {
+        const uint64_t *q = (const uint64_t *)t->frame;
+        serial_print("\n  frame rip=0x"); print_hex64_serial(q[17]);
+        serial_print(" cs=0x"); print_hex64_serial(q[18]);
+        serial_print(" rflags=0x"); print_hex64_serial(q[19]);
+        serial_print(" rsp=0x"); print_hex64_serial(q[20]);
+        serial_print(" ss=0x"); print_hex64_serial(q[21]);
+    }
+    serial_print("\n  stack_base=0x"); print_hex64_serial(t->stack_base);
+    serial_print("  stack_top=0x"); print_hex64_serial(t->stack_top);
+    serial_putchar('\n');
 }
 
 void panic_dump_regs(struct panic_context* ctx) {
@@ -180,6 +259,9 @@ void panic_dump_regs(struct panic_context* ctx) {
     }
 
     serial_print("========== HALTING ==========\n");
+    dump_pf(ctx, f->error_code);
+    dump_stack(ctx->rsp_at_panic);
+    dump_task();
     for (;;) __asm__ volatile("hlt");
 }
 
