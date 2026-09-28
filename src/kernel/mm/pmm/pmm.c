@@ -1,7 +1,10 @@
 #include "pmm.h"
 #include "io/serial/serial.h"
+#include "kernel/sync/sync.h"
 
 #define MAX_REGIONS 128
+
+static spinlock_t pmm_lock = SPINLOCK_INIT;
 
 static uint64_t *pmm_bitmap = NULL;
 static size_t bitmap_pages = 0;
@@ -127,16 +130,27 @@ void pmm_init(struct limine_memmap_response *memmap, uint64_t hhdm_offset) {
 bool pmm_alloc(paddr_t *out, size_t pages) {
     if (!out) return false;
     if (pages == 0) return false;
-    if (pages > free_pages) return false;
-    
+
+    lock_acquire(LOCK_PMM, &pmm_lock);
+
+    if (pages > free_pages) {
+        lock_release(LOCK_PMM, &pmm_lock);
+        return false;
+    }
+
     size_t start = bitmap_find_free(pages);
-    if (start == SIZE_MAX) return false;
-    
+    if (start == SIZE_MAX) {
+        lock_release(LOCK_PMM, &pmm_lock);
+        return false;
+    }
+
     for (size_t i = 0; i < pages; i++) {
         bitmap_set(start + i);
     }
     free_pages -= pages;
     *out = start * PAGE_SIZE;
+
+    lock_release(LOCK_PMM, &pmm_lock);
     return true;
 }
 
@@ -151,19 +165,24 @@ static bool pmm_page_managed(size_t page) {
 void pmm_free(paddr_t addr, size_t pages) {
     if (pages == 0) return;
 
+    lock_acquire(LOCK_PMM, &pmm_lock);
+
     if (addr & (PAGE_SIZE - 1)) {
+        lock_release(LOCK_PMM, &pmm_lock);
         serial_print("PMM: free of unaligned address\n");
         return;
     }
 
     size_t start = addr / PAGE_SIZE;
     if (start >= total_pages || pages > total_pages - start) {
+        lock_release(LOCK_PMM, &pmm_lock);
         serial_print("PMM: free out of range\n");
         return;
     }
 
     for (size_t i = 0; i < pages; i++) {
         if (!pmm_page_managed(start + i)) {
+            lock_release(LOCK_PMM, &pmm_lock);
             serial_print("PMM: free of page outside managed regions\n");
             return;
         }
@@ -175,6 +194,8 @@ void pmm_free(paddr_t addr, size_t pages) {
             free_pages++;
         }
     }
+
+    lock_release(LOCK_PMM, &pmm_lock);
 }
 
 size_t pmm_total_pages(void) { return total_pages; }

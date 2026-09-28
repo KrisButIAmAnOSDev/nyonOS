@@ -8,9 +8,12 @@ struct panic_context {
     struct isr_frame frame;
     uint64_t cr0, cr2, cr3, cr4;
     uint64_t rsp_at_panic;
+    const char* reason;
+    int has_pf;
 };
 
 void panic(const char* msg, struct isr_frame* frame);
 void panic_dump_regs(struct panic_context* ctx);
+void panic_assert(const char* msg);
 
 #endif

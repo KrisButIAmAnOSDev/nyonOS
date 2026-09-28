@@ -1,5 +1,7 @@
 #include "task.h"
 #include "io/serial/serial.h"
+#include "kernel/sync/sync.h"
+#include "kernel/panic.h"
 #include "kernel/mm/pmm/pmm.h"
 #include "kernel/mm/vmm/vmm.h"
 #include "arch/x86_64/pit/pit.h"
@@ -23,6 +25,7 @@ static size_t current_slot = 0;
 static bool in_scheduler = false;
 static bool sched_enabled = false;
 static uint64_t switch_count = 0;
+static spinlock_t sched_lock = SPINLOCK_INIT;
 
 
 
@@ -54,8 +57,11 @@ struct task *task_spawn(const char *name, void (*entry)(void)) {
     if (!entry) return NULL;
     if (task_count + 1 >= TASK_MAX) return NULL;
 
+    lock_acquire(LOCK_SCHED, &sched_lock);
+
     paddr_t phys;
     if (!pmm_alloc(&phys, TASK_STACK_PAGES)) {
+        lock_release(LOCK_SCHED, &sched_lock);
         serial_print("task: out of memory for stack\n");
         return NULL;
     }
@@ -81,6 +87,8 @@ struct task *task_spawn(const char *name, void (*entry)(void)) {
     t->name = name;
     task_count++;
 
+    lock_release(LOCK_SCHED, &sched_lock);
+
     serial_print("task: spawned ");
     serial_print(name);
     serial_putchar('\n');
@@ -99,9 +107,16 @@ static struct task *pick_next(void) {
 void task_schedule(struct isr_frame *frame) {
     if (!sched_enabled) return;
     if (in_scheduler) return;
+
+    if (sync_lock_depth() != 0) {
+        panic_assert("context switch attempted while this task still holds a lock");
+    }
+
     in_scheduler = true;
 
     __asm__ volatile("cli" ::: "memory");
+
+    lock_acquire(LOCK_SCHED, &sched_lock);
 
     tasks[current_slot].frame = frame;
 
@@ -116,13 +131,18 @@ void task_schedule(struct isr_frame *frame) {
         for (;;) __asm__ volatile("hlt");
     }
 
+    lock_release(LOCK_SCHED, &sched_lock);
+
     in_scheduler = false;
     task_resume(tasks[current_slot].frame);
 }
 
 void task_exit(void) {
     struct task *self = &tasks[current_slot];
+
+    lock_acquire(LOCK_SCHED, &sched_lock);
     self->in_use = false;
+    lock_release(LOCK_SCHED, &sched_lock);
 
     serial_print("task: ");
     serial_print(self->name);

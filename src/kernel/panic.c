@@ -44,108 +44,81 @@ static const char* exception_names[32] = {
     "Reserved"
 };
 
-static void print_hex64_fb(volatile uint32_t* fb, uint32_t width, uint64_t val, uint32_t x, uint32_t y, uint32_t color) {
-    for (int i = 15; i >= 0; i--) {
-        uint8_t nibble = (val >> (i * 4)) & 0xF;
-        char c = nibble < 10 ? '0' + nibble : 'a' + nibble - 10;
-        draw_char(fb, c, x, y, color, width);
-        x += 8;
-    }
-}
-
-static void print_hex64_serial(uint64_t val) {
-    for (int i = 15; i >= 0; i--) {
-        uint8_t nibble = (val >> (i * 4)) & 0xF;
-        char c = nibble < 10 ? '0' + nibble : 'a' + nibble - 10;
-        serial_putchar(c);
-    }
-}
-
-
-
-static void print_str_fb(volatile uint32_t* fb, uint32_t width, const char* str, uint32_t x, uint32_t y, uint32_t color) {
-    while (*str) {
-        draw_char(fb, *str, x, y, color, width);
-        x += 8;
-        str++;
-    }
-}
-
 static void dump_pf(struct panic_context* ctx, uint64_t err) {
-    serial_print("--- PAGE FAULT DETAIL ---\n");
-    serial_print("  cr2          = 0x");
-    print_hex64_serial(ctx->cr2);
-    serial_print("\n  err bits     = P:");
-    serial_putchar((err & (1ULL << 0)) ? '1' : '0');
-    serial_print(" W:");
-    serial_putchar((err & (1ULL << 1)) ? '1' : '0');
-    serial_print(" U:");
-    serial_putchar((err & (1ULL << 2)) ? '1' : '0');
-    serial_print(" RSVD:");
-    serial_putchar((err & (1ULL << 3)) ? '1' : '0');
-    serial_print(" FETCH:");
-    serial_putchar((err & (1ULL << 4)) ? '1' : '0');
-    serial_print(" NX:");
-    serial_putchar((err & (1ULL << 34)) ? '1' : '0');
-    serial_print("\n  cr0.WP      = ");
-    serial_putchar((ctx->cr0 & (1ULL << 16)) ? '1' : '0');
-    serial_print("\n  cr4         = 0x");
-    print_hex64_serial(ctx->cr4);
+    pout("--- PAGE FAULT DETAIL ---\n");
+    pout("  cr2          = 0x");
+    phex(ctx->cr2);
+    pout("\n  err bits     = P:");
+    poutc((err & (1ULL << 0)) ? '1' : '0');
+    pout(" W:");
+    poutc((err & (1ULL << 1)) ? '1' : '0');
+    pout(" U:");
+    poutc((err & (1ULL << 2)) ? '1' : '0');
+    pout(" RSVD:");
+    poutc((err & (1ULL << 3)) ? '1' : '0');
+    pout(" FETCH:");
+    poutc((err & (1ULL << 4)) ? '1' : '0');
+    pout(" NX:");
+    poutc((err & (1ULL << 34)) ? '1' : '0');
+    pout("\n  cr0.WP      = ");
+    poutc((ctx->cr0 & (1ULL << 16)) ? '1' : '0');
+    pout("\n  cr4         = 0x");
+    phex(ctx->cr4);
     uint64_t pte = vmm_query(ctx->cr2);
-    serial_print("\n  leaf PTE    = 0x");
-    print_hex64_serial(pte);
+    pout("\n  leaf PTE    = 0x");
+    phex(pte);
     if (pte == 0) {
-        serial_print("   (no mapping found)");
+        pout("   (no mapping found)");
     } else {
-        serial_print("   P:");
-        serial_putchar((pte & PAGE_PRESENT) ? '1' : '0');
-        serial_print(" W:");
-        serial_putchar((pte & PAGE_WRITE) ? '1' : '0');
-        serial_print(" U:");
-        serial_putchar((pte & PAGE_USER) ? '1' : '0');
-        serial_print(" NX:");
-        serial_putchar((pte & PAGE_NX) ? '1' : '0');
+        pout("   P:");
+        poutc((pte & PAGE_PRESENT) ? '1' : '0');
+        pout(" W:");
+        poutc((pte & PAGE_WRITE) ? '1' : '0');
+        pout(" U:");
+        poutc((pte & PAGE_USER) ? '1' : '0');
+        pout(" NX:");
+        poutc((pte & PAGE_NX) ? '1' : '0');
     }
-    serial_print("\n  cr3         = 0x");
-    print_hex64_serial(ctx->cr3);
-    serial_putchar('\n');
+    pout("\n  cr3         = 0x");
+    phex(ctx->cr3);
+    poutc('\n');
 }
 
 static void dump_stack(uint64_t rsp) {
     const volatile uint64_t *sp = (const volatile uint64_t *)rsp;
-    serial_print("--- STACK (24 qwords from rsp) ---\n");
+    pout("--- STACK (24 qwords from rsp) ---\n");
     for (int i = 0; i < 24; i++) {
         uint64_t v = sp[i];
-        serial_print("  [");
-        print_hex64_serial((uint64_t)i * 8);
-        serial_print("] 0x");
-        print_hex64_serial(v);
-        if (v >= 0xffffffff80000000ULL && v < 0xffffffff80100000ULL) serial_print("  <- kernel image");
-        serial_putchar('\n');
+        pout("  [");
+        phex((uint64_t)i * 8);
+        pout("] 0x");
+        phex(v);
+        if (v >= 0xffffffff80000000ULL && v < 0xffffffff80100000ULL) pout("  <- kernel image");
+        poutc('\n');
     }
 }
 
 static void dump_task(void) {
     struct task *t = task_current();
-    serial_print("--- CURRENT TASK ---\n  name=");
-    serial_print(t->name ? t->name : "?");
-    serial_print("  in_use=");
-    serial_putchar(t->in_use ? 'Y' : 'N');
-    serial_print("  switches=");
-    print_hex64_serial(task_switch_count());
-    serial_print("  frame=0x");
-    print_hex64_serial((uint64_t)t->frame);
+    pout("--- CURRENT TASK ---\n  name=");
+    pout(t->name ? t->name : "?");
+    pout("  in_use=");
+    poutc(t->in_use ? 'Y' : 'N');
+    pout("  switches=");
+    phex(task_switch_count());
+    pout("  frame=0x");
+    phex((uint64_t)t->frame);
     if (t->frame) {
         const uint64_t *q = (const uint64_t *)t->frame;
-        serial_print("\n  frame rip=0x"); print_hex64_serial(q[17]);
-        serial_print(" cs=0x"); print_hex64_serial(q[18]);
-        serial_print(" rflags=0x"); print_hex64_serial(q[19]);
-        serial_print(" rsp=0x"); print_hex64_serial(q[20]);
-        serial_print(" ss=0x"); print_hex64_serial(q[21]);
+        pout("\n  frame rip=0x"); phex(q[17]);
+        pout(" cs=0x"); phex(q[18]);
+        pout(" rflags=0x"); phex(q[19]);
+        pout(" rsp=0x"); phex(q[20]);
+        pout(" ss=0x"); phex(q[21]);
     }
-    serial_print("\n  stack_base=0x"); print_hex64_serial(t->stack_base);
-    serial_print("  stack_top=0x"); print_hex64_serial(t->stack_top);
-    serial_putchar('\n');
+    pout("\n  stack_base=0x"); phex(t->stack_base);
+    pout("  stack_top=0x"); phex(t->stack_top);
+    poutc('\n');
 }
 
 void panic_dump_regs(struct panic_context* ctx) {
@@ -155,48 +128,36 @@ void panic_dump_regs(struct panic_context* ctx) {
     uint32_t width = fb_ptr ? fb_ptr->width : 0;
     uint32_t height = fb_ptr ? fb_ptr->height : 0;
 
-    serial_print("\n========== KERNEL PANIC ==========\n");
+    video_attach(fb, width, height);
+    video_clear();
 
-    if (fb) {
-        for (uint32_t y = 0; y < height; y++) {
-            for (uint32_t x = 0; x < width; x++) {
-                fb[y * width + x] = 0x000000;
-            }
-        }
-        print_str_fb(fb, width, "KERNEL PANIC", 8, 8, 0xFF0000);
-    }
+    video_home(0, 0);
 
-    const char* exc_name;
-    if (f->interrupt_number == 255) {
-        exc_name = "Unexpected interrupt (unhandled vector 48-255)";
-    } else if (f->interrupt_number < 32) {
-        exc_name = exception_names[f->interrupt_number];
+    pout("\n========== KERNEL PANIC ==========\n");
+
+    if (ctx->reason) {
+        pout("Assertion: ");
+        pout(ctx->reason);
+        poutc('\n');
     } else {
-        exc_name = "Unexpected interrupt";
-    }
-    char msg[128];
-    serial_print("Exception: ");
-    serial_print(exc_name);
-    serial_print(" (vector ");
-    char num[4];
-    num[0] = '0' + (f->interrupt_number / 100);
-    num[1] = '0' + ((f->interrupt_number / 10) % 10);
-    num[2] = '0' + (f->interrupt_number % 10);
-    num[3] = 0;
-    serial_print(num);
-    serial_print(")\n");
-
-    if (fb) {
-        print_str_fb(fb, width, "Exception: ", 8, 32, 0xFFFFFF);
-        print_str_fb(fb, width, exc_name, 8 + 11 * 8, 32, 0xFFFFFF);
-        print_str_fb(fb, width, " (vector ", 8 + 11 * 8 + 8 * 16, 32, 0xFFFFFF);
+        const char* exc_name;
+        if (f->interrupt_number == 255) {
+            exc_name = "Unexpected interrupt (unhandled vector 48-255)";
+        } else if (f->interrupt_number < 32) {
+            exc_name = exception_names[f->interrupt_number];
+        } else {
+            exc_name = "Unexpected interrupt";
+        }
         char num[4];
         num[0] = '0' + (f->interrupt_number / 100);
         num[1] = '0' + ((f->interrupt_number / 10) % 10);
         num[2] = '0' + (f->interrupt_number % 10);
         num[3] = 0;
-        print_str_fb(fb, width, num, 8 + 11 * 8 + 8 * 16 + 8 * 10, 32, 0xFFFFFF);
-        print_str_fb(fb, width, ")", 8 + 11 * 8 + 8 * 16 + 8 * 10 + 8 * 3, 32, 0xFFFFFF);
+        pout("Exception: ");
+        pout(exc_name);
+        pout(" (vector ");
+        pout(num);
+        pout(")\n");
     }
 
     __asm__ volatile("mov %%cr0, %0" : "=r"(ctx->cr0));
@@ -205,68 +166,95 @@ void panic_dump_regs(struct panic_context* ctx) {
     __asm__ volatile("mov %%cr4, %0" : "=r"(ctx->cr4));
     __asm__ volatile("mov %%rsp, %0" : "=r"(ctx->rsp_at_panic));
 
-    serial_print("RIP: 0x"); print_hex64_serial(f->rip); serial_print("\n");
-    serial_print("CS:  0x"); print_hex64_serial(f->cs); serial_print("\n");
-    serial_print("RFLAGS: 0x"); print_hex64_serial(f->rflags); serial_print("\n");
-    serial_print("RSP: 0x"); print_hex64_serial(ctx->rsp_at_panic); serial_print("\n");
-    serial_print("RAX: 0x"); print_hex64_serial(f->rax); serial_print("\n");
-    serial_print("RBX: 0x"); print_hex64_serial(f->rbx); serial_print("\n");
-    serial_print("RCX: 0x"); print_hex64_serial(f->rcx); serial_print("\n");
-    serial_print("RDX: 0x"); print_hex64_serial(f->rdx); serial_print("\n");
-    serial_print("RSI: 0x"); print_hex64_serial(f->rsi); serial_print("\n");
-    serial_print("RDI: 0x"); print_hex64_serial(f->rdi); serial_print("\n");
-    serial_print("RBP: 0x"); print_hex64_serial(f->rbp); serial_print("\n");
-    serial_print("R8:  0x"); print_hex64_serial(f->r8); serial_print("\n");
-    serial_print("R9:  0x"); print_hex64_serial(f->r9); serial_print("\n");
-    serial_print("R10: 0x"); print_hex64_serial(f->r10); serial_print("\n");
-    serial_print("R11: 0x"); print_hex64_serial(f->r11); serial_print("\n");
-    serial_print("R12: 0x"); print_hex64_serial(f->r12); serial_print("\n");
-    serial_print("R13: 0x"); print_hex64_serial(f->r13); serial_print("\n");
-    serial_print("R14: 0x"); print_hex64_serial(f->r14); serial_print("\n");
-    serial_print("R15: 0x"); print_hex64_serial(f->r15); serial_print("\n");
-    serial_print("Error Code: 0x"); print_hex64_serial(f->error_code); serial_print("\n");
-    serial_print("CR0: 0x"); print_hex64_serial(ctx->cr0); serial_print("\n");
-    serial_print("CR2: 0x"); print_hex64_serial(ctx->cr2); serial_print("\n");
-    serial_print("CR3: 0x"); print_hex64_serial(ctx->cr3); serial_print("\n");
-    serial_print("CR4: 0x"); print_hex64_serial(ctx->cr4); serial_print("\n");
+    pout("RIP: 0x"); phex(f->rip); poutc('\n');
+    pout("CS:  0x"); phex(f->cs); poutc('\n');
+    pout("RFLAGS: 0x"); phex(f->rflags); poutc('\n');
+    pout("RSP: 0x"); phex(ctx->rsp_at_panic); poutc('\n');
+    pout("RAX: 0x"); phex(f->rax); poutc('\n');
+    pout("RBX: 0x"); phex(f->rbx); poutc('\n');
+    pout("RCX: 0x"); phex(f->rcx); poutc('\n');
+    pout("RDX: 0x"); phex(f->rdx); poutc('\n');
+    pout("RSI: 0x"); phex(f->rsi); poutc('\n');
+    pout("RDI: 0x"); phex(f->rdi); poutc('\n');
+    pout("RBP: 0x"); phex(f->rbp); poutc('\n');
+    pout("R8:  0x"); phex(f->r8); poutc('\n');
+    pout("R9:  0x"); phex(f->r9); poutc('\n');
+    pout("R10: 0x"); phex(f->r10); poutc('\n');
+    pout("R11: 0x"); phex(f->r11); poutc('\n');
+    pout("R12: 0x"); phex(f->r12); poutc('\n');
+    pout("R13: 0x"); phex(f->r13); poutc('\n');
+    pout("R14: 0x"); phex(f->r14); poutc('\n');
+    pout("R15: 0x"); phex(f->r15); poutc('\n');
+    pout("Error Code: 0x"); phex(f->error_code); poutc('\n');
+    pout("CR0: 0x"); phex(ctx->cr0); poutc('\n');
+    pout("CR2: 0x"); phex(ctx->cr2); poutc('\n');
+    pout("CR3: 0x"); phex(ctx->cr3); poutc('\n');
+    pout("CR4: 0x"); phex(ctx->cr4); poutc('\n');
 
-    if (fb) {
-        uint32_t y = 56;
-        print_str_fb(fb, width, "RIP: 0x", 8, y, 0xFFFFFF); print_hex64_fb(fb, width, f->rip, 64, y, 0xFFFFFF);
-        y += 16; print_str_fb(fb, width, "CS:  0x", 8, y, 0xFFFFFF); print_hex64_fb(fb, width, f->cs, 64, y, 0xFFFFFF);
-        y += 16; print_str_fb(fb, width, "RFLAGS: 0x", 8, y, 0xFFFFFF); print_hex64_fb(fb, width, f->rflags, 88, y, 0xFFFFFF);
-        y += 16; print_str_fb(fb, width, "RSP: 0x", 8, y, 0xFFFFFF); print_hex64_fb(fb, width, ctx->rsp_at_panic, 64, y, 0xFFFFFF);
-        y += 16; print_str_fb(fb, width, "RAX: 0x", 8, y, 0xFFFFFF); print_hex64_fb(fb, width, f->rax, 64, y, 0xFFFFFF);
-        y += 16; print_str_fb(fb, width, "RBX: 0x", 8, y, 0xFFFFFF); print_hex64_fb(fb, width, f->rbx, 64, y, 0xFFFFFF);
-        y += 16; print_str_fb(fb, width, "RCX: 0x", 8, y, 0xFFFFFF); print_hex64_fb(fb, width, f->rcx, 64, y, 0xFFFFFF);
-        y += 16; print_str_fb(fb, width, "RDX: 0x", 8, y, 0xFFFFFF); print_hex64_fb(fb, width, f->rdx, 64, y, 0xFFFFFF);
-        y += 16; print_str_fb(fb, width, "RSI: 0x", 8, y, 0xFFFFFF); print_hex64_fb(fb, width, f->rsi, 64, y, 0xFFFFFF);
-        y += 16; print_str_fb(fb, width, "RDI: 0x", 8, y, 0xFFFFFF); print_hex64_fb(fb, width, f->rdi, 64, y, 0xFFFFFF);
-        y += 16; print_str_fb(fb, width, "RBP: 0x", 8, y, 0xFFFFFF); print_hex64_fb(fb, width, f->rbp, 64, y, 0xFFFFFF);
-        y += 16; print_str_fb(fb, width, "R8:  0x", 8, y, 0xFFFFFF); print_hex64_fb(fb, width, f->r8, 64, y, 0xFFFFFF);
-        y += 16; print_str_fb(fb, width, "R9:  0x", 8, y, 0xFFFFFF); print_hex64_fb(fb, width, f->r9, 64, y, 0xFFFFFF);
-        y += 16; print_str_fb(fb, width, "R10: 0x", 8, y, 0xFFFFFF); print_hex64_fb(fb, width, f->r10, 64, y, 0xFFFFFF);
-        y += 16; print_str_fb(fb, width, "R11: 0x", 8, y, 0xFFFFFF); print_hex64_fb(fb, width, f->r11, 64, y, 0xFFFFFF);
-        y += 16; print_str_fb(fb, width, "R12: 0x", 8, y, 0xFFFFFF); print_hex64_fb(fb, width, f->r12, 64, y, 0xFFFFFF);
-        y += 16; print_str_fb(fb, width, "R13: 0x", 8, y, 0xFFFFFF); print_hex64_fb(fb, width, f->r13, 64, y, 0xFFFFFF);
-        y += 16; print_str_fb(fb, width, "R14: 0x", 8, y, 0xFFFFFF); print_hex64_fb(fb, width, f->r14, 64, y, 0xFFFFFF);
-        y += 16; print_str_fb(fb, width, "R15: 0x", 8, y, 0xFFFFFF); print_hex64_fb(fb, width, f->r15, 64, y, 0xFFFFFF);
-        y += 16; print_str_fb(fb, width, "Err:  0x", 8, y, 0xFFFFFF); print_hex64_fb(fb, width, f->error_code, 64, y, 0xFFFFFF);
-        y += 16; print_str_fb(fb, width, "CR0: 0x", 8, y, 0xFFFFFF); print_hex64_fb(fb, width, ctx->cr0, 64, y, 0xFFFFFF);
-        y += 16; print_str_fb(fb, width, "CR2: 0x", 8, y, 0xFFFFFF); print_hex64_fb(fb, width, ctx->cr2, 64, y, 0xFFFFFF);
-        y += 16; print_str_fb(fb, width, "CR3: 0x", 8, y, 0xFFFFFF); print_hex64_fb(fb, width, ctx->cr3, 64, y, 0xFFFFFF);
-        y += 16; print_str_fb(fb, width, "CR4: 0x", 8, y, 0xFFFFFF); print_hex64_fb(fb, width, ctx->cr4, 64, y, 0xFFFFFF);
-    }
+    video_home(width / 2, 0);
 
-    serial_print("========== HALTING ==========\n");
-    dump_pf(ctx, f->error_code);
+    pout("========== HALTING ==========\n");
+    if (ctx->has_pf) dump_pf(ctx, f->error_code);
     dump_stack(ctx->rsp_at_panic);
     dump_task();
     for (;;) __asm__ volatile("hlt");
 }
 
+static void capture_frame(struct isr_frame* f) {
+    uint64_t g[15];
+    uint64_t rip;
+
+    __asm__ volatile(
+        "mov %%r15,  0(%0)\n\t"
+        "mov %%r14,  8(%0)\n\t"
+        "mov %%r13, 16(%0)\n\t"
+        "mov %%r12, 24(%0)\n\t"
+        "mov %%r11, 32(%0)\n\t"
+        "mov %%r10, 40(%0)\n\t"
+        "mov %%r9,  48(%0)\n\t"
+        "mov %%r8,  56(%0)\n\t"
+        "mov %%rbp, 64(%0)\n\t"
+        "mov %%rdi, 72(%0)\n\t"
+        "mov %%rsi, 80(%0)\n\t"
+        "mov %%rdx, 88(%0)\n\t"
+        "mov %%rcx, 96(%0)\n\t"
+        "mov %%rbx,104(%0)\n\t"
+        "mov %%rax,112(%0)\n\t"
+        "lea 1f(%%rip), %%rax\n\t"
+        "mov %%rax,%1\n\t"
+        "1:\n\t"
+        : : "r"(g), "r"(rip) : "rax", "cc", "memory"
+    );
+
+    f->r15 = g[0];  f->r14 = g[1];  f->r13 = g[2];  f->r12 = g[3];
+    f->r11 = g[4];  f->r10 = g[5];  f->r9  = g[6];  f->r8  = g[7];
+    f->rbp = g[8];  f->rdi = g[9];  f->rsi = g[10]; f->rdx = g[11];
+    f->rcx = g[12]; f->rbx = g[13]; f->rax = g[14];
+    f->rip = rip;
+}
+
+void panic_assert(const char* msg) {
+    struct panic_context ctx;
+    uint8_t* z = (uint8_t*)&ctx;
+    for (size_t i = 0; i < sizeof(ctx); i++) z[i] = 0;
+
+    capture_frame(&ctx.frame);
+    ctx.reason = msg;
+    ctx.has_pf = 0;
+
+    panic_dump_regs(&ctx);
+
+    for (;;) __asm__ volatile("hlt");
+}
+
 void panic(const char* msg __attribute__((unused)), struct isr_frame* frame) {
     struct panic_context ctx;
+    uint8_t* z = (uint8_t*)&ctx;
+    for (size_t i = 0; i < sizeof(ctx); i++) z[i] = 0;
+
     ctx.frame = *frame;
+    ctx.reason = NULL;
+    ctx.has_pf = (frame->interrupt_number == 14);
+
     panic_dump_regs(&ctx);
 }

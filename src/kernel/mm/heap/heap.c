@@ -1,6 +1,7 @@
 #include "heap.h"
 #include "kernel/mm/vmm/vmm.h"
 #include "kernel/mm/pmm/pmm.h"
+#include "kernel/sync/sync.h"
 #include "io/serial/serial.h"
 
 #define HEAP_VIRT_BASE 0xFFFFFFFFD0000000ULL
@@ -8,6 +9,15 @@
 #define HEAP_MAX_SEGMENTS 64
 #define HEAP_MAGIC 0x6E796F6E
 #define ALIGN_UP(x, a) (((x) + (a) - 1) & ~((size_t)(a) - 1))
+
+typedef enum {
+    KFREE_OK = 0,
+    KFREE_OUTSIDE,
+    KFREE_NOT_BOUNDARY,
+    KFREE_DOUBLE,
+} kfree_result_t;
+
+static spinlock_t heap_lock = SPINLOCK_INIT;
 
 struct block_header {
     size_t size;
@@ -28,17 +38,6 @@ static struct heap_segment segments[HEAP_MAX_SEGMENTS];
 static size_t segment_count = 0;
 static uint64_t heap_committed = 0;
 static uint64_t heap_max_bytes = 0;
-
-static inline uint64_t irq_save(void) {
-    uint64_t flags;
-    __asm__ volatile("pushfq; pop %0" : "=r"(flags));
-    __asm__ volatile("cli");
-    return flags;
-}
-
-static inline void irq_restore(uint64_t flags) {
-    __asm__ volatile("pushq %0; popfq" :: "r"(flags) : "cc", "memory");
-}
 
 static struct block_header *heap_tail(void) {
     struct block_header *b = heap_head;
@@ -193,43 +192,48 @@ void *kmalloc(size_t size) {
 
     size = ALIGN_UP(size, 16);
 
-    uint64_t flags = irq_save();
+    lock_acquire(LOCK_HEAP, &heap_lock);
     void *result = kmalloc_locked(size);
-    irq_restore(flags);
+    lock_release(LOCK_HEAP, &heap_lock);
 
     return result;
 }
 
-static void kfree_locked(void *ptr) {
+static kfree_result_t kfree_locked(void *ptr) {
     uint64_t addr = (uint64_t)ptr;
 
     if (addr < HEAP_VIRT_BASE + sizeof(struct block_header) ||
         addr >= HEAP_VIRT_BASE + heap_committed) {
-        serial_print("kfree: pointer outside heap\n");
-        return;
+        return KFREE_OUTSIDE;
     }
 
     struct block_header *b = (struct block_header *)ptr - 1;
     if (b->magic != HEAP_MAGIC) {
-        serial_print("kfree: not a block boundary\n");
-        return;
+        return KFREE_NOT_BOUNDARY;
     }
     if (b->free) {
-        serial_print("kfree: double free\n");
-        return;
+        return KFREE_DOUBLE;
     }
 
     b->free = true;
     coalesce(b);
     heap_trim();
+    return KFREE_OK;
 }
 
 void kfree(void *ptr) {
     if (!ptr) return;
 
-    uint64_t flags = irq_save();
-    kfree_locked(ptr);
-    irq_restore(flags);
+    lock_acquire(LOCK_HEAP, &heap_lock);
+    kfree_result_t r = kfree_locked(ptr);
+    lock_release(LOCK_HEAP, &heap_lock);
+
+    switch (r) {
+        case KFREE_OUTSIDE:      serial_print("kfree: pointer outside heap\n"); break;
+        case KFREE_NOT_BOUNDARY: serial_print("kfree: not a block boundary\n"); break;
+        case KFREE_DOUBLE:       serial_print("kfree: double free\n"); break;
+        case KFREE_OK: break;
+    }
 }
 
 uint64_t heap_committed_bytes(void) {

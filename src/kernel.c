@@ -12,6 +12,7 @@
 #include "io/keyboard/keyboard.h"
 #include "kernel/mm/pmm/pmm.h"
 #include "kernel/mm/heap/heap.h"
+#include "kernel/sync/sync.h"
 #include "kernel/multitask/task.h"
 #include "kernel/mm/vmm/vmm.h"
 #include "arch/x86_64/lapic/lapic.h"
@@ -107,21 +108,35 @@ static void busy_wait_ms(uint64_t ms) {
 }
 
 static void task_aqua(void) {
-    for (uint64_t i = 0; i < 4; i++) {
+    for (int round = 0; round < 4; round++) {
+        char *p = kmalloc(64);
+        if (!p) { serial_print("[aqua] kmalloc failed\n"); task_exit(); }
+        for (int i = 0; i < 64; i++) p[i] = (char)0xA5;
         busy_wait_ms(60);
+        for (int i = 0; i < 64; i++) {
+            if (p[i] != (char)0xA5) { serial_print("[aqua] DATA CORRUPTED\n"); }
+        }
         serial_print("[aqua] pass ");
-        print_u64(i);
+        print_u64((uint64_t)round);
         serial_putchar('\n');
+        kfree(p);
     }
     task_exit();
 }
 
 static void task_seth(void) {
-    for (uint64_t i = 0; i < 4; i++) {
+    for (int round = 0; round < 4; round++) {
+        char *p = kmalloc(64);
+        if (!p) { serial_print("[seth] kmalloc failed\n"); task_exit(); }
+        for (int i = 0; i < 64; i++) p[i] = (char)0x5A;
         busy_wait_ms(60);
+        for (int i = 0; i < 64; i++) {
+            if (p[i] != (char)0x5A) { serial_print("[seth] DATA CORRUPTED\n"); }
+        }
         serial_print("[seth] pass ");
-        print_u64(i);
+        print_u64((uint64_t)round);
         serial_putchar('\n');
+        kfree(p);
     }
     task_exit();
 }
@@ -187,6 +202,7 @@ void kmain(void) {
 
     print_str(fb_ptr, "nyonn nyon nyonn ulelelel nyon leleel nyonn", 0, 0, 0xff00ff, width);
     print_str(fb_ptr, "-kawkaw from deltarune", 50, 16, 0xff00ff, width);
+    print_str(fb_ptr, "text typing simulator enable,enjoy your nyon", 66,32,0x00ffff, width);
 
     serial_print("nyonOS: Drawing complete!\n");
 
@@ -358,6 +374,7 @@ void kmain(void) {
         serial_print(" bytes (0 = fully returned)\n");
     }
 
+    sync_init();
     task_init();
     test_sentinels();
     task_spawn("aqua", task_aqua);

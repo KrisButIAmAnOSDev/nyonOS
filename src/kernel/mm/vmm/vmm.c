@@ -1,6 +1,9 @@
 #include "vmm.h"
 #include "kernel/mm/pmm/pmm.h"
 #include "io/serial/serial.h"
+#include "kernel/sync/sync.h"
+
+static spinlock_t vmm_lock = SPINLOCK_INIT;
 
 struct page_table *kernel_pml4 = NULL;
 bool vmm_5level = false;
@@ -102,9 +105,6 @@ void vmm_init(uint64_t hhdm_offset) {
 // TODO: reclaim intermediate page tables that become empty after an unmap.
 // free_page_table exists but is never called, so empty tables leak physical
 // memory under map/unmap churn. Needed for real address-space teardown.
-// TODO: no locking on any of this. Fine for one CPU with no concurrent
-// allocation, but a spinlock is required before SMP or any allocator use
-// from an interrupt handler that races normal context.
 
 bool vmm_map(vaddr_t vaddr, paddr_t paddr, size_t pages, uint64_t flags) {
     if (pages == 0) return false;
@@ -112,20 +112,29 @@ bool vmm_map(vaddr_t vaddr, paddr_t paddr, size_t pages, uint64_t flags) {
     
     int levels = vmm_5level ? 5 : 4;
 
+    lock_acquire(LOCK_VMM, &vmm_lock);
+
     for (size_t i = 0; i < pages; i++) {
         uint64_t *entry = walk_page_table(kernel_pml4, vaddr + i * PAGE_SIZE, levels, true, flags);
-        if (!entry) return false;
-        if (*entry & PAGE_PRESENT) return false;
+        if (!entry) {
+            lock_release(LOCK_VMM, &vmm_lock);
+            return false;
+        }
+        if (*entry & PAGE_PRESENT) {
+            lock_release(LOCK_VMM, &vmm_lock);
+            return false;
+        }
     }
 
     for (size_t i = 0; i < pages; i++) {
         vaddr_t v = vaddr + i * PAGE_SIZE;
         paddr_t p = paddr + i * PAGE_SIZE;
-        
+
         uint64_t *entry = walk_page_table(kernel_pml4, v, levels, true, flags);
         *entry = p | flags | PAGE_PRESENT;
     }
-    
+
+    lock_release(LOCK_VMM, &vmm_lock);
     return true;
 }
 
@@ -135,19 +144,25 @@ bool vmm_unmap(vaddr_t vaddr, size_t pages) {
     
     int levels = vmm_5level ? 5 : 4;
 
+    lock_acquire(LOCK_VMM, &vmm_lock);
+
     for (size_t i = 0; i < pages; i++) {
         uint64_t *entry = walk_page_table(kernel_pml4, vaddr + i * PAGE_SIZE, levels, false, 0);
-        if (!entry || !(*entry & PAGE_PRESENT)) return false;
+        if (!entry || !(*entry & PAGE_PRESENT)) {
+            lock_release(LOCK_VMM, &vmm_lock);
+            return false;
+        }
     }
 
     for (size_t i = 0; i < pages; i++) {
         vaddr_t v = vaddr + i * PAGE_SIZE;
-        
+
         uint64_t *entry = walk_page_table(kernel_pml4, v, levels, false, 0);
         *entry = 0;
         invlpg(v);
     }
-    
+
+    lock_release(LOCK_VMM, &vmm_lock);
     return true;
 }
 
