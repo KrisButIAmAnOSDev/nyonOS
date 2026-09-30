@@ -1,9 +1,15 @@
 #include "idt.h"
+#include "io/kprintf/kprintf.h"
 #include "io/serial/serial.h"
-#include "kernel/panic.h"
+#include "kernel/panic/panic.h"
+#include "arch/x86_64/pic/pic.h"
+#include "arch/x86_64/pit/pit.h"
 
 struct idt_entry idt[IDT_SIZE];
 struct idtr idtr;
+
+static irq_handler_t irq_handlers[IRQ_COUNT];
+uint64_t spurious_irq_count = 0;
 
 extern void* isr_stub_table[];
 extern void idt_load(void* idtr_ptr);
@@ -52,7 +58,27 @@ void idt_init(void) {
 
     __asm__ volatile("sti");
 
-    serial_print("IDT loaded!\n");
+    kprintf(PRINT_SERIAL, "IDT loaded!\n");
+}
+
+void irq_install(uint8_t irq, irq_handler_t handler) {
+    if (irq >= IRQ_COUNT) return;
+    irq_handlers[irq] = handler;
+}
+
+void irq_dispatch(struct isr_frame* frame) {
+    uint8_t vector = (uint8_t)frame->interrupt_number;
+    if (vector < IDT_FIRST_IRQ || vector >= IDT_FIRST_IRQ + IRQ_COUNT) return;
+
+    uint8_t irq = (uint8_t)(vector - IDT_FIRST_IRQ);
+
+    current_isr_frame = frame;
+
+    if (irq >= 8) pic_send_eoi(8);
+    pic_send_eoi(0);
+
+    if (irq_handlers[irq]) irq_handlers[irq]();
+    else spurious_irq_count++;
 }
 
 void exception_handler(struct isr_frame* frame) {

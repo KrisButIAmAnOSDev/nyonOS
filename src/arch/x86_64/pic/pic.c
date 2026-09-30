@@ -1,4 +1,5 @@
 #include "arch/x86_64/pic/pic.h"
+#include "io/kprintf/kprintf.h"
 #include "io/serial/serial.h"
 
 static inline void outb(uint16_t port, uint8_t val) {
@@ -39,20 +40,20 @@ void pic_remap(uint8_t offset1, uint8_t offset2) {
     outb(PIC1_DATA, 0xFF);
     outb(PIC2_DATA, 0xFF);
 
-    serial_print("PIC remapped to ");
+    kprintf(PRINT_SERIAL, "PIC remapped to ");
     char buf[4];
     buf[0] = '0' + (offset1 / 100);
     buf[1] = '0' + ((offset1 / 10) % 10);
     buf[2] = '0' + (offset1 % 10);
     buf[3] = 0;
-    serial_print(buf);
-    serial_print("-");
+    kprintf(PRINT_SERIAL, "%s", buf);
+    kprintf(PRINT_SERIAL, "-");
     buf[0] = '0' + (offset2 / 100);
     buf[1] = '0' + ((offset2 / 10) % 10);
     buf[2] = '0' + (offset2 % 10);
     buf[3] = 0;
-    serial_print(buf);
-    serial_print("\n");
+    kprintf(PRINT_SERIAL, "%s", buf);
+    kprintf(PRINT_SERIAL, "\n");
 }
 
 void pic_send_eoi(uint8_t irq) {
@@ -77,5 +78,5 @@ void pic_clear_mask(uint8_t irq) {
 void pic_disable(void) {
     outb(PIC1_DATA, 0xFF);
     outb(PIC2_DATA, 0xFF);
-    serial_print("PIC disabled\n");
+    kprintf(PRINT_SERIAL, "PIC disabled\n");
 }

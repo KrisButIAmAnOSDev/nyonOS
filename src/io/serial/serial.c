@@ -25,7 +25,3 @@ void serial_putchar(char c) {
     while ((inb(0x3FD) & 0x20) == 0) {}
     outb(0x3F8, (uint8_t)c);
 }
-
-void serial_print(const char *str) {
-    while (*str) serial_putchar(*str++);
-}

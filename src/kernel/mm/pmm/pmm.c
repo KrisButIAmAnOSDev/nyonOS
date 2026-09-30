@@ -1,4 +1,5 @@
 #include "pmm.h"
+#include "io/kprintf/kprintf.h"
 #include "io/serial/serial.h"
 #include "kernel/sync/sync.h"
 
@@ -71,7 +72,7 @@ void pmm_init(struct limine_memmap_response *memmap, uint64_t hhdm_offset) {
     }
     
     if (!bitmap_phys) {
-        serial_print("PMM: No space for bitmap!\n");
+        kprintf(PRINT_SERIAL, "PMM: No space for bitmap!\n");
         for (;;) __asm__ volatile("hlt");
     }
     
@@ -102,7 +103,7 @@ void pmm_init(struct limine_memmap_response *memmap, uint64_t hhdm_offset) {
         }
     }
     
-    serial_print("PMM: Init done. Total: ");
+    kprintf(PRINT_SERIAL, "PMM: Init done. Total: ");
     char buf[24];
     size_t t = total_pages;
     size_t idx = 0;
@@ -113,8 +114,8 @@ void pmm_init(struct limine_memmap_response *memmap, uint64_t hhdm_offset) {
         while (j > 0) { buf[idx++] = rev[--j]; }
     }
     buf[idx] = 0;
-    serial_print(buf);
-    serial_print(" pages (");
+    kprintf(PRINT_SERIAL, "%s", buf);
+    kprintf(PRINT_SERIAL, " pages (");
     t = free_pages; idx = 0;
     if (t == 0) buf[idx++] = '0';
     else {
@@ -123,8 +124,8 @@ void pmm_init(struct limine_memmap_response *memmap, uint64_t hhdm_offset) {
         while (j > 0) { buf[idx++] = rev[--j]; }
     }
     buf[idx] = 0;
-    serial_print(buf);
-    serial_print(" free)\n");
+    kprintf(PRINT_SERIAL, "%s", buf);
+    kprintf(PRINT_SERIAL, " free)\n");
 }
 
 bool pmm_alloc(paddr_t *out, size_t pages) {
@@ -169,21 +170,21 @@ void pmm_free(paddr_t addr, size_t pages) {
 
     if (addr & (PAGE_SIZE - 1)) {
         lock_release(LOCK_PMM, &pmm_lock);
-        serial_print("PMM: free of unaligned address\n");
+        kprintf(PRINT_SERIAL, "PMM: free of unaligned address\n");
         return;
     }
 
     size_t start = addr / PAGE_SIZE;
     if (start >= total_pages || pages > total_pages - start) {
         lock_release(LOCK_PMM, &pmm_lock);
-        serial_print("PMM: free out of range\n");
+        kprintf(PRINT_SERIAL, "PMM: free out of range\n");
         return;
     }
 
     for (size_t i = 0; i < pages; i++) {
         if (!pmm_page_managed(start + i)) {
             lock_release(LOCK_PMM, &pmm_lock);
-            serial_print("PMM: free of page outside managed regions\n");
+            kprintf(PRINT_SERIAL, "PMM: free of page outside managed regions\n");
             return;
         }
     }

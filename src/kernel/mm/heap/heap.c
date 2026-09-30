@@ -1,4 +1,5 @@
 #include "heap.h"
+#include "io/kprintf/kprintf.h"
 #include "kernel/mm/vmm/vmm.h"
 #include "kernel/mm/pmm/pmm.h"
 #include "kernel/sync/sync.h"
@@ -138,10 +139,10 @@ void heap_init(void) {
     heap_max_bytes = (total_bytes * HEAP_MAX_PERCENT) / 100;
 
     if (!heap_grow(PAGE_SIZE * 4)) {
-        serial_print("Heap: initial grow failed!\n");
+        kprintf(PRINT_SERIAL, "Heap: initial grow failed!\n");
         for (;;) __asm__ volatile("hlt");
     }
-    serial_print("Heap: initialized\n");
+    kprintf(PRINT_SERIAL, "Heap: initialized\n");
 }
 
 static void split_block(struct block_header *b, size_t size) {
@@ -229,9 +230,9 @@ void kfree(void *ptr) {
     lock_release(LOCK_HEAP, &heap_lock);
 
     switch (r) {
-        case KFREE_OUTSIDE:      serial_print("kfree: pointer outside heap\n"); break;
-        case KFREE_NOT_BOUNDARY: serial_print("kfree: not a block boundary\n"); break;
-        case KFREE_DOUBLE:       serial_print("kfree: double free\n"); break;
+        case KFREE_OUTSIDE:      kprintf(PRINT_SERIAL, "kfree: pointer outside heap\n"); break;
+        case KFREE_NOT_BOUNDARY: kprintf(PRINT_SERIAL, "kfree: not a block boundary\n"); break;
+        case KFREE_DOUBLE:       kprintf(PRINT_SERIAL, "kfree: double free\n"); break;
         case KFREE_OK: break;
     }
 }

@@ -1,4 +1,5 @@
 #include "arch/x86_64/pit/pit.h"
+#include "io/kprintf/kprintf.h"
 #include "arch/x86_64/idt/idt.h"
 #include "kernel/multitask/task.h"
 #include "kernel/sync/preempt.h"
@@ -7,6 +8,8 @@
 
 static volatile uint64_t pit_ticks = 0;
 static uint32_t pit_frequency = 0;
+
+struct isr_frame *current_isr_frame;
 
 static inline void outb(uint16_t port, uint8_t val) {
     __asm__ volatile("outb %0, %1" : : "a"(val), "Nd"(port));
@@ -18,14 +21,13 @@ static inline uint8_t inb(uint16_t port) {
     return val;
 }
 
-void pit_handler(struct isr_frame* frame) {
+void pit_handler(void) {
     pit_ticks++;
-    pic_send_eoi(0);
 
     if (pit_ticks % TASK_QUANTUM_TICKS != 0) return;
     if (preempt_count() != 0) return;
 
-    task_schedule(frame);
+    task_schedule(current_isr_frame);
 }
 
 void pit_init(uint32_t frequency_hz) {
@@ -38,7 +40,7 @@ void pit_init(uint32_t frequency_hz) {
 
     pic_clear_mask(0);
 
-    serial_print("PIT initialized at ");
+    kprintf(PRINT_SERIAL, "PIT initialized at ");
     char buf[16];
     int i = 0;
     uint32_t freq = frequency_hz;
@@ -53,8 +55,8 @@ void pit_init(uint32_t frequency_hz) {
         while (j--) buf[i++] = rev[j];
     }
     buf[i++] = 'H'; buf[i++] = 'z'; buf[i] = 0;
-    serial_print(buf);
-    serial_print("\n");
+    kprintf(PRINT_SERIAL, "%s", buf);
+    kprintf(PRINT_SERIAL, "\n");
 }
 
 void pit_sleep(uint64_t ms) {

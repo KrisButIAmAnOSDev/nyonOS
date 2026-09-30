@@ -1,9 +1,10 @@
 #include "keyboard.h"
+#include "io/kprintf/kprintf.h"
 #include "arch/x86_64/pic/pic.h"
 #include "io/serial/serial.h"
-#include "video/video.h"
-#include "font/font.h"
-#include "limine/limine.h"
+#include "graphics/video/video.h"
+#include "graphics/font/font.h"
+#include "boot/limine/limine.h"
 #include <stdbool.h>
 
 __attribute__((used, section(".limine_requests")))
@@ -111,7 +112,6 @@ void keyboard_handler(void) {
     keyboard_wait_output();
     uint8_t scancode = inb(0x60);
     keyboard_buffer_push(scancode);
-    pic_send_eoi(1);
 }
 
 static uint32_t cursor_x = 0;
@@ -132,10 +132,10 @@ static void put_char_fb(char c) {
     } else if (c == '\b') {
         if (cursor_x >= 8) {
             cursor_x -= 8;
-            draw_char(fb_ptr, ' ', cursor_x, cursor_y, 0x000000, width);
+            draw_char(fb_ptr, ' ', cursor_x, cursor_y, 0x000000, width, height);
         }
     } else if (c >= 32 && c <= 126) {
-        draw_char(fb_ptr, c, cursor_x, cursor_y, 0xffffff, width);
+        draw_char(fb_ptr, c, cursor_x, cursor_y, 0xffffff, width, height);
         cursor_x += 8;
     }
     
@@ -164,10 +164,10 @@ void keyboard_process_buffer(void) {
     
     uint8_t scancode;
     while (keyboard_buffer_pop(&scancode)) {
-        serial_print("SC: 0x");
-        serial_putchar("0123456789abcdef"[(scancode >> 4) & 0xf]);
-        serial_putchar("0123456789abcdef"[scancode & 0xf]);
-        serial_print("\n");
+        kprintf(PRINT_SERIAL, "SC: 0x");
+        kprintchar("0123456789abcdef"[(scancode >> 4) & 0xf], PRINT_SERIAL);
+        kprintchar("0123456789abcdef"[scancode & 0xf], PRINT_SERIAL);
+        kprintf(PRINT_SERIAL, "\n");
 
         uint8_t ascii = scancode_to_ascii(scancode);
         if (ascii) {
@@ -206,5 +206,5 @@ void keyboard_init(void) {
     
     pic_clear_mask(1);
     
-    serial_print("Keyboard: Initialized\n");
+    kprintf(PRINT_SERIAL, "Keyboard: Initialized\n");
 }

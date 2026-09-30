@@ -6,6 +6,16 @@
 
 #define IDT_SIZE 256
 
+#define IDT_FIRST_EXC 0
+#define IDT_FIRST_IRQ 32
+#define IRQ_COUNT 16
+
+#define IDT_ATTR_PRESENT 0x8E
+#define IDT_ATTR_DPL3 0xEE
+
+typedef void (*irq_handler_t)(void);
+void irq_install(uint8_t irq, irq_handler_t handler);
+
 struct idt_entry {
     uint16_t isr_low;
     uint16_t kernel_cs;
@@ -38,5 +48,6 @@ extern void* isr_stub_table[];
 void idt_init(void);
 void idt_set_descriptor(uint8_t vector, void* isr, uint8_t flags, uint8_t ist);
 void exception_handler(struct isr_frame* frame);
+void irq_dispatch(struct isr_frame* frame);
 
 #endif

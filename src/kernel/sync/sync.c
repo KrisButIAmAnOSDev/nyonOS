@@ -1,5 +1,6 @@
 #include "sync.h"
-#include "kernel/panic.h"
+#include "io/kprintf/kprintf.h"
+#include "kernel/panic/panic.h"
 #include "io/serial/serial.h"
 
 static uint32_t held_mask = 0;
@@ -54,15 +55,15 @@ bool spin_trylock(spinlock_t *l) {
 }
 
 static void lock_panic(const char *what, lock_id_t a, lock_id_t b) {
-    serial_print("lock ");
-    serial_print(lock_name(a));
+    kprintf(PRINT_SERIAL, "lock ");
+    kprintf(PRINT_SERIAL, "%s", lock_name(a));
     if (b != LOCK_NONE) {
-        serial_print(" vs ");
-        serial_print(lock_name(b));
+        kprintf(PRINT_SERIAL, " vs ");
+        kprintf(PRINT_SERIAL, "%s", lock_name(b));
     }
-    serial_print(": ");
-    serial_print(what);
-    serial_print("\n");
+    kprintf(PRINT_SERIAL, ": ");
+    kprintf(PRINT_SERIAL, "%s", what);
+    kprintf(PRINT_SERIAL, "\n");
     panic_assert("lock invariant violated");
 }
 

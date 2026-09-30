@@ -3,6 +3,7 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include "kernel/panic/panic.h"
 
 #define PREEMPT_CACHELINE 64
 
@@ -23,7 +24,10 @@ static inline void preempt_disable(void) {
 }
 
 static inline void preempt_enable(void) {
-    __atomic_sub_fetch(&preempt_state.count, 1, __ATOMIC_RELAXED);
+    uint32_t prev = __atomic_fetch_sub(&preempt_state.count, 1, __ATOMIC_RELAXED);
+    if (prev == 0) {
+        panic_assert("preempt_enable with no matching preempt_disable");
+    }
 }
 
 void preempt_init(void);

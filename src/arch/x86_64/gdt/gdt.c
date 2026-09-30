@@ -1,6 +1,7 @@
 #include "gdt.h"
 #include "tss.h"
 #include "io/serial/serial.h"
+#include "io/kprintf/kprintf.h"
 #include <stddef.h>
 
 static uint8_t gdt[GDT_ENTRIES * 8];
@@ -80,30 +81,6 @@ static void gdt_encode_tss(uint8_t *t, uint64_t base, uint32_t limit) {
     t[15] = 0;
 }
 
-static void print_hex64(uint64_t val) {
-    for (int i = 15; i >= 0; i--) {
-        uint8_t nibble = (val >> (i * 4)) & 0xF;
-        char c = nibble < 10 ? '0' + nibble : 'a' + nibble - 10;
-        serial_putchar(c);
-    }
-}
-
-static void print_hex8(uint64_t val) {
-    for (int i = 1; i >= 0; i--) {
-        uint8_t nibble = (val >> (i * 4)) & 0xF;
-        char c = nibble < 10 ? '0' + nibble : 'a' + nibble - 10;
-        serial_putchar(c);
-    }
-}
-
-static void print_hex16(uint64_t val) {
-    for (int i = 3; i >= 0; i--) {
-        uint8_t nibble = (val >> (i * 4)) & 0xF;
-        char c = nibble < 10 ? '0' + nibble : 'a' + nibble - 10;
-        serial_putchar(c);
-    }
-}
-
 static uint64_t entry_qword(const uint8_t *d) {
     uint64_t q = 0;
     for (int i = 7; i >= 0; i--) q = (q << 8) | d[i];
@@ -130,42 +107,42 @@ void gdt_init(uint64_t hhdm_offset) {
 
     gdt_load(&gdtr);
 
-    serial_print("GDT: loaded, TSS limit=");
-    print_hex16(sizeof(struct tss) - 1);
-    serial_print(" ist=");
+    kprintf(PRINT_SERIAL, "GDT: loaded, TSS limit=");
+    kprintf(PRINT_SERIAL, "%04x", (unsigned)(sizeof(struct tss) - 1));
+    kprintf(PRINT_SERIAL, " ist=");
     for (int i = 0; i < TSS_IST_COUNT; i++) {
-        serial_putchar('1' + i);
+        kprintchar('1' + i, PRINT_SERIAL);
     }
-    serial_putchar('\n');
+    kprintchar('\n', PRINT_SERIAL);
 }
 
 void gdt_dump(void) {
     struct gdt_pointer gdtr;
     __asm__ volatile("sgdt %0" : "=m"(gdtr));
 
-    serial_print("GDT base=0x");
-    print_hex64(gdtr.base);
-    serial_print(" limit=0x");
-    print_hex16(gdtr.limit);
-    serial_putchar('\n');
+    kprintf(PRINT_SERIAL, "GDT base=0x");
+    kprintf(PRINT_SERIAL, "%016llx", (unsigned long long)(gdtr.base));
+    kprintf(PRINT_SERIAL, " limit=0x");
+    kprintf(PRINT_SERIAL, "%04x", (unsigned)(gdtr.limit));
+    kprintchar('\n', PRINT_SERIAL);
 
     size_t count = ((size_t)gdtr.limit + 1) / 8;
     const uint8_t *table = (const uint8_t *)gdtr.base;
 
     for (size_t i = 0; i < count; i++) {
-        serial_print("  0x");
-        print_hex8(i * 8);
-        serial_print(": 0x");
-        print_hex64(entry_qword(table + i * 8));
-        serial_putchar('\n');
+        kprintf(PRINT_SERIAL, "  0x");
+        kprintf(PRINT_SERIAL, "%02x", (unsigned)(i * 8));
+        kprintf(PRINT_SERIAL, ": 0x");
+        kprintf(PRINT_SERIAL, "%016llx", (unsigned long long)(entry_qword(table + i * 8)));
+        kprintchar('\n', PRINT_SERIAL);
     }
 
-    serial_print("cs=0x"); print_hex16(gdt_rd_cs());
-    serial_print(" ds=0x"); print_hex16(gdt_rd_ds());
-    serial_print(" es=0x"); print_hex16(gdt_rd_es());
-    serial_print(" ss=0x"); print_hex16(gdt_rd_ss());
-    serial_print(" fs=0x"); print_hex16(gdt_rd_fs());
-    serial_print(" gs=0x"); print_hex16(gdt_rd_gs());
-    serial_print(" tr=0x"); print_hex16(gdt_rd_tr());
-    serial_putchar('\n');
+    kprintf(PRINT_SERIAL, "cs=0x"); kprintf(PRINT_SERIAL, "%04x", (unsigned)(gdt_rd_cs()));
+    kprintf(PRINT_SERIAL, " ds=0x"); kprintf(PRINT_SERIAL, "%04x", (unsigned)(gdt_rd_ds()));
+    kprintf(PRINT_SERIAL, " es=0x"); kprintf(PRINT_SERIAL, "%04x", (unsigned)(gdt_rd_es()));
+    kprintf(PRINT_SERIAL, " ss=0x"); kprintf(PRINT_SERIAL, "%04x", (unsigned)(gdt_rd_ss()));
+    kprintf(PRINT_SERIAL, " fs=0x"); kprintf(PRINT_SERIAL, "%04x", (unsigned)(gdt_rd_fs()));
+    kprintf(PRINT_SERIAL, " gs=0x"); kprintf(PRINT_SERIAL, "%04x", (unsigned)(gdt_rd_gs()));
+    kprintf(PRINT_SERIAL, " tr=0x"); kprintf(PRINT_SERIAL, "%04x", (unsigned)(gdt_rd_tr()));
+    kprintchar('\n', PRINT_SERIAL);
 }

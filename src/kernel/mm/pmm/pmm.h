@@ -4,7 +4,7 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <stdbool.h>
-#include "limine/limine.h"
+#include "boot/limine/limine.h"
 
 #define PAGE_SIZE 4096
 

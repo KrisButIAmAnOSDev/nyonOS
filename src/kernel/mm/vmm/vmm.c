@@ -1,4 +1,5 @@
 #include "vmm.h"
+#include "io/kprintf/kprintf.h"
 #include "kernel/mm/pmm/pmm.h"
 #include "io/serial/serial.h"
 #include "kernel/sync/sync.h"
@@ -37,11 +38,15 @@ static bool cpu_has_5level(void) {
     return (ecx & (1 << 16)) != 0;
 }
 
+#define VMM_PT_ENTRIES 512
+#define VMM_PT_INDEX_MASK 0x1FF
+#define VMM_PT_ADDR_MASK 0x000FFFFFFFFFF000ULL
+
 static struct page_table *alloc_page_table(void) {
     paddr_t phys;
     if (!pmm_alloc(&phys, 1)) return NULL;
     struct page_table *pt = (struct page_table *)(vmm_hhdm_offset + phys);
-    for (size_t i = 0; i < 512; i++) pt->entries[i] = 0;
+    for (size_t i = 0; i < VMM_PT_ENTRIES; i++) pt->entries[i] = 0;
     return pt;
 }
 
@@ -49,29 +54,38 @@ static void free_page_table(struct page_table *pt) {
     pmm_free((paddr_t)((uint64_t)pt - vmm_hhdm_offset), 1);
 }
 
-static uint64_t *walk_page_table(struct page_table *table, vaddr_t vaddr, int level, bool alloc, uint64_t flags) {
-    if (level == 0) return NULL;
-    
-    int shift;
+static int level_shift(int level) {
     if (vmm_5level) {
         static const int shifts[5] = {48, 39, 30, 21, 12};
-        shift = shifts[5 - level];
-    } else {
-        static const int shifts[4] = {39, 30, 21, 12};
-        shift = shifts[4 - level];
+        return shifts[5 - level];
     }
-    
-    size_t index = (vaddr >> shift) & 0x1FF;
+    static const int shifts[4] = {39, 30, 21, 12};
+    return shifts[4 - level];
+}
+
+static bool table_is_empty(struct page_table *pt) {
+    for (size_t i = 0; i < VMM_PT_ENTRIES; i++) {
+        if (pt->entries[i]) return false;
+    }
+    return true;
+}
+
+static uint64_t *walk_page_table(struct page_table *table, vaddr_t vaddr, int level, bool alloc, uint64_t flags) {
+    if (level == 0) return NULL;
+
+    int shift = level_shift(level);
+
+    size_t index = (vaddr >> shift) & VMM_PT_INDEX_MASK;
     uint64_t entry = table->entries[index];
-    
+
     if (level == 1) return &table->entries[index];
-    
+
     struct page_table *next;
     if (entry & PAGE_PRESENT) {
         if (alloc && (flags & PAGE_USER) && !(entry & PAGE_USER)) {
             table->entries[index] = entry | PAGE_USER;
         }
-        next = (struct page_table *)(vmm_hhdm_offset + (entry & 0x000FFFFFFFFFF000ULL));
+        next = (struct page_table *)(vmm_hhdm_offset + (entry & VMM_PT_ADDR_MASK));
     } else if (alloc) {
         next = alloc_page_table();
         if (!next) return NULL;
@@ -81,8 +95,29 @@ static uint64_t *walk_page_table(struct page_table *table, vaddr_t vaddr, int le
     } else {
         return NULL;
     }
-    
+
     return walk_page_table(next, vaddr, level - 1, alloc, flags);
+}
+
+// Frees the child table at `level` and any ancestors that became empty.
+// Never frees the root table, which is shared with the rest of the kernel.
+static void reclaim_ancestors(struct page_table *table, vaddr_t vaddr, int level) {
+    int shift = level_shift(level);
+    size_t index = (vaddr >> shift) & VMM_PT_INDEX_MASK;
+    uint64_t entry = table->entries[index];
+
+    if (!(entry & PAGE_PRESENT)) return;
+
+    struct page_table *child = (struct page_table *)(vmm_hhdm_offset + (entry & VMM_PT_ADDR_MASK));
+
+    if (level > 1) reclaim_ancestors(child, vaddr, level - 1);
+
+    if (table == kernel_pml4) return;
+    if (!table_is_empty(child)) return;
+
+    table->entries[index] = 0;
+    invlpg(vaddr);
+    free_page_table(child);
 }
 
 void vmm_init(uint64_t hhdm_offset) {
@@ -95,10 +130,10 @@ void vmm_init(uint64_t hhdm_offset) {
     uint64_t cr3 = read_cr3();
     kernel_pml4 = (struct page_table *)(vmm_hhdm_offset + (cr3 & 0x000FFFFFFFFFF000ULL));
 
-    serial_print("VMM: Initialized, ");
-    serial_print(vmm_5level ? "5-level paging\n" : "4-level paging\n");
+    kprintf(PRINT_SERIAL, "VMM: Initialized, ");
+    kprintf(PRINT_SERIAL, "%s", vmm_5level ? "5-level paging\n" : "4-level paging\n");
     if (cpu_supports_la57 && !paging_is_5level) {
-        serial_print("VMM: LA57 available but CR4.LA57 clear, using 4-level walk\n");
+        kprintf(PRINT_SERIAL, "VMM: LA57 available but CR4.LA57 clear, using 4-level walk\n");
     }
 }
 
@@ -160,6 +195,10 @@ bool vmm_unmap(vaddr_t vaddr, size_t pages) {
         uint64_t *entry = walk_page_table(kernel_pml4, v, levels, false, 0);
         *entry = 0;
         invlpg(v);
+    }
+
+    for (size_t i = 0; i < pages; i++) {
+        reclaim_ancestors(kernel_pml4, vaddr + i * PAGE_SIZE, levels);
     }
 
     lock_release(LOCK_VMM, &vmm_lock);

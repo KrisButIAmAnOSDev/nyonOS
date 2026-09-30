@@ -1,7 +1,8 @@
 #include "task.h"
+#include "io/kprintf/kprintf.h"
 #include "io/serial/serial.h"
 #include "kernel/sync/sync.h"
-#include "kernel/panic.h"
+#include "kernel/panic/panic.h"
 #include "kernel/mm/pmm/pmm.h"
 #include "kernel/mm/vmm/vmm.h"
 #include "arch/x86_64/pit/pit.h"
@@ -62,7 +63,7 @@ struct task *task_spawn(const char *name, void (*entry)(void)) {
     paddr_t phys;
     if (!pmm_alloc(&phys, TASK_STACK_PAGES)) {
         lock_release(LOCK_SCHED, &sched_lock);
-        serial_print("task: out of memory for stack\n");
+        kprintf(PRINT_SERIAL, "task: out of memory for stack\n");
         return NULL;
     }
 
@@ -89,9 +90,9 @@ struct task *task_spawn(const char *name, void (*entry)(void)) {
 
     lock_release(LOCK_SCHED, &sched_lock);
 
-    serial_print("task: spawned ");
-    serial_print(name);
-    serial_putchar('\n');
+    kprintf(PRINT_SERIAL, "task: spawned ");
+    kprintf(PRINT_SERIAL, "%s", name);
+    kprintchar('\n', PRINT_SERIAL);
     return t;
 }
 
@@ -127,7 +128,7 @@ void task_schedule(struct isr_frame *frame) {
     }
 
     if (!tasks[current_slot].frame) {
-        serial_print("task: no saved frame, cannot resume\n");
+        kprintf(PRINT_SERIAL, "task: no saved frame, cannot resume\n");
         for (;;) __asm__ volatile("hlt");
     }
 
@@ -144,9 +145,9 @@ void task_exit(void) {
     self->in_use = false;
     lock_release(LOCK_SCHED, &sched_lock);
 
-    serial_print("task: ");
-    serial_print(self->name);
-    serial_print(" exited\n");
+    kprintf(PRINT_SERIAL, "task: ");
+    kprintf(PRINT_SERIAL, "%s", self->name);
+    kprintf(PRINT_SERIAL, " exited\n");
 
     for (;;) {
         struct task *next = pick_next();
