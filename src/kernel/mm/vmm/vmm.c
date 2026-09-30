@@ -99,8 +99,6 @@ static uint64_t *walk_page_table(struct page_table *table, vaddr_t vaddr, int le
     return walk_page_table(next, vaddr, level - 1, alloc, flags);
 }
 
-// Frees the child table at `level` and any ancestors that became empty.
-// Never frees the root table, which is shared with the rest of the kernel.
 static void reclaim_ancestors(struct page_table *table, vaddr_t vaddr, int level) {
     int shift = level_shift(level);
     size_t index = (vaddr >> shift) & VMM_PT_INDEX_MASK;
@@ -137,14 +135,10 @@ void vmm_init(uint64_t hhdm_offset) {
     }
 }
 
-// TODO: reclaim intermediate page tables that become empty after an unmap.
-// free_page_table exists but is never called, so empty tables leak physical
-// memory under map/unmap churn. Needed for real address-space teardown.
-
 bool vmm_map(vaddr_t vaddr, paddr_t paddr, size_t pages, uint64_t flags) {
     if (pages == 0) return false;
     if (vaddr & (PAGE_SIZE - 1) || paddr & (PAGE_SIZE - 1)) return false;
-    
+
     int levels = vmm_5level ? 5 : 4;
 
     lock_acquire(LOCK_VMM, &vmm_lock);
@@ -176,7 +170,7 @@ bool vmm_map(vaddr_t vaddr, paddr_t paddr, size_t pages, uint64_t flags) {
 bool vmm_unmap(vaddr_t vaddr, size_t pages) {
     if (pages == 0) return false;
     if (vaddr & (PAGE_SIZE - 1)) return false;
-    
+
     int levels = vmm_5level ? 5 : 4;
 
     lock_acquire(LOCK_VMM, &vmm_lock);
@@ -205,6 +199,25 @@ bool vmm_unmap(vaddr_t vaddr, size_t pages) {
     return true;
 }
 
+bool vmm_range_present(vaddr_t addr, size_t len) {
+    if (len == 0) return false;
+    if (addr > VMM_HIGHER_HALF) return false;
+    if (len > VMM_HIGHER_HALF - addr) return false;
+
+    vaddr_t first = addr & ~(vaddr_t)(PAGE_SIZE - 1);
+    vaddr_t last = (addr + len - 1) & ~(vaddr_t)(PAGE_SIZE - 1);
+
+    int levels = vmm_5level ? 5 : 4;
+
+    for (vaddr_t v = first; v <= last; v += PAGE_SIZE) {
+        uint64_t *entry = walk_page_table(kernel_pml4, v, levels, false, 0);
+        if (!entry) return false;
+        if (!(*entry & PAGE_PRESENT)) return false;
+    }
+
+    return true;
+}
+
 paddr_t vmm_virt_to_phys(vaddr_t vaddr) {
     uint64_t *entry = walk_page_table(kernel_pml4, vaddr, vmm_5level ? 5 : 4, false, 0);
     if (!entry || !(*entry & PAGE_PRESENT)) return 0;
@@ -225,11 +238,11 @@ bool vmm_is_mapped(vaddr_t vaddr) {
 struct page_table *vmm_create_address_space(void) {
     struct page_table *new_pml4 = alloc_page_table();
     if (!new_pml4) return NULL;
-    
+
     for (size_t i = 256; i < 512; i++) {
         new_pml4->entries[i] = kernel_pml4->entries[i];
     }
-    
+
     return new_pml4;
 }
 

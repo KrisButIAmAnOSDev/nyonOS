@@ -12,8 +12,6 @@
 void pit_init(uint32_t frequency_hz);
 void pit_sleep(uint64_t ms);
 uint64_t pit_get_ticks(void);
-void pit_handler(void);
-
-extern struct isr_frame *current_isr_frame;
+void pit_handler(struct isr_frame *frame);
 
 #endif

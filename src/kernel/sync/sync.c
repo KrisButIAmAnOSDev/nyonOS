@@ -49,8 +49,11 @@ void spin_unlock(spinlock_t *l) {
 }
 
 bool spin_trylock(spinlock_t *l) {
-    if (atomic_flag_test_and_set_explicit(&l->f, memory_order_acquire)) return false;
     preempt_disable();
+    if (atomic_flag_test_and_set_explicit(&l->f, memory_order_acquire)) {
+        preempt_enable();
+        return false;
+    }
     return true;
 }
 
@@ -68,8 +71,6 @@ static void lock_panic(const char *what, lock_id_t a, lock_id_t b) {
 }
 
 void lock_acquire(lock_id_t id, spinlock_t *l) {
-    spin_lock(l);
-
     uint32_t bit = 1u << id;
 
     if (held_mask & bit) {
@@ -86,6 +87,7 @@ void lock_acquire(lock_id_t id, spinlock_t *l) {
         lock_panic("nested deeper than LOCK_MAX_DEPTH", id, LOCK_NONE);
     }
 
+    spin_lock(l);
     held_mask |= bit;
     lock_depth++;
 }

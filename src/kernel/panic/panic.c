@@ -45,10 +45,21 @@ static const char* exception_names[32] = {
     "Reserved"
 };
 
+static void dump_syscall_state(struct panic_context* ctx) {
+    struct isr_frame* f = &ctx->frame;
+
+    kprintf(PRINT_BOTH, "--- SYSCALL STATE ---\n");
+    kprintf(PRINT_BOTH, "  fault vector   = %llu\n", (unsigned long long)f->interrupt_number);
+    kprintf(PRINT_BOTH, "  fault is 0x80  = %s\n", f->interrupt_number == 0x80 ? "Y" : "N");
+    kprintf(PRINT_BOTH, "  frame cs       = 0x%llx rpl=%llu\n", (unsigned long long)f->cs, (unsigned long long)(f->cs & 3));
+    kprintf(PRINT_BOTH, "  frame ss       = 0x%llx\n", (unsigned long long)f->ss);
+    kprintf(PRINT_BOTH, "  frame rsp      = 0x%llx\n", (unsigned long long)f->rsp);
+}
+
 static void dump_pf(struct panic_context* ctx, uint64_t err) {
     kprintf(PRINT_BOTH, "--- PAGE FAULT DETAIL ---\n");
     kprintf(PRINT_BOTH, "  cr2          = 0x");
-    kprintf(PRINT_BOTH, "%016llx", (unsigned long long)(ctx->cr2));
+    kprintf(PRINT_BOTH, "%llx", (unsigned long long)(ctx->cr2));
     kprintf(PRINT_BOTH, "\n  err bits     = P:");
     kprintchar((err & (1ULL << 0)) ? '1' : '0', PRINT_BOTH);
     kprintf(PRINT_BOTH, " W:");
@@ -64,10 +75,10 @@ static void dump_pf(struct panic_context* ctx, uint64_t err) {
     kprintf(PRINT_BOTH, "\n  cr0.WP      = ");
     kprintchar((ctx->cr0 & (1ULL << 16)) ? '1' : '0', PRINT_BOTH);
     kprintf(PRINT_BOTH, "\n  cr4         = 0x");
-    kprintf(PRINT_BOTH, "%016llx", (unsigned long long)(ctx->cr4));
+    kprintf(PRINT_BOTH, "%llx", (unsigned long long)(ctx->cr4));
     uint64_t pte = vmm_query(ctx->cr2);
     kprintf(PRINT_BOTH, "\n  leaf PTE    = 0x");
-    kprintf(PRINT_BOTH, "%016llx", (unsigned long long)(pte));
+    kprintf(PRINT_BOTH, "%llx", (unsigned long long)(pte));
     if (pte == 0) {
         kprintf(PRINT_BOTH, "   (no mapping found)");
     } else {
@@ -81,7 +92,7 @@ static void dump_pf(struct panic_context* ctx, uint64_t err) {
         kprintchar((pte & PAGE_NX) ? '1' : '0', PRINT_BOTH);
     }
     kprintf(PRINT_BOTH, "\n  cr3         = 0x");
-    kprintf(PRINT_BOTH, "%016llx", (unsigned long long)(ctx->cr3));
+    kprintf(PRINT_BOTH, "%llx", (unsigned long long)(ctx->cr3));
     kprintchar('\n', PRINT_BOTH);
 }
 
@@ -91,9 +102,9 @@ static void dump_stack(uint64_t rsp) {
     for (int i = 0; i < 24; i++) {
         uint64_t v = sp[i];
         kprintf(PRINT_BOTH, "  [");
-        kprintf(PRINT_BOTH, "%016llx", (unsigned long long)((uint64_t)i * 8));
+        kprintf(PRINT_BOTH, "%llx", (unsigned long long)((uint64_t)i * 8));
         kprintf(PRINT_BOTH, "] 0x");
-        kprintf(PRINT_BOTH, "%016llx", (unsigned long long)(v));
+        kprintf(PRINT_BOTH, "%llx", (unsigned long long)(v));
         if (v >= 0xffffffff80000000ULL && v < 0xffffffff80100000ULL) kprintf(PRINT_BOTH, "  <- kernel image");
         kprintchar('\n', PRINT_BOTH);
     }
@@ -106,19 +117,19 @@ static void dump_task(void) {
     kprintf(PRINT_BOTH, "  in_use=");
     kprintchar(t->in_use ? 'Y' : 'N', PRINT_BOTH);
     kprintf(PRINT_BOTH, "  switches=");
-    kprintf(PRINT_BOTH, "%016llx", (unsigned long long)(task_switch_count()));
+    kprintf(PRINT_BOTH, "%llx", (unsigned long long)(task_switch_count()));
     kprintf(PRINT_BOTH, "  frame=0x");
-    kprintf(PRINT_BOTH, "%016llx", (unsigned long long)((uint64_t)t->frame));
+    kprintf(PRINT_BOTH, "%llx", (unsigned long long)((uint64_t)t->frame));
     if (t->frame) {
         const uint64_t *q = (const uint64_t *)t->frame;
-        kprintf(PRINT_BOTH, "\n  frame rip=0x"); kprintf(PRINT_BOTH, "%016llx", (unsigned long long)(q[17]));
-        kprintf(PRINT_BOTH, " cs=0x"); kprintf(PRINT_BOTH, "%016llx", (unsigned long long)(q[18]));
-        kprintf(PRINT_BOTH, " rflags=0x"); kprintf(PRINT_BOTH, "%016llx", (unsigned long long)(q[19]));
-        kprintf(PRINT_BOTH, " rsp=0x"); kprintf(PRINT_BOTH, "%016llx", (unsigned long long)(q[20]));
-        kprintf(PRINT_BOTH, " ss=0x"); kprintf(PRINT_BOTH, "%016llx", (unsigned long long)(q[21]));
+        kprintf(PRINT_BOTH, "\n  frame rip=0x"); kprintf(PRINT_BOTH, "%llx", (unsigned long long)(q[17]));
+        kprintf(PRINT_BOTH, " cs=0x"); kprintf(PRINT_BOTH, "%llx", (unsigned long long)(q[18]));
+        kprintf(PRINT_BOTH, " rflags=0x"); kprintf(PRINT_BOTH, "%llx", (unsigned long long)(q[19]));
+        kprintf(PRINT_BOTH, " rsp=0x"); kprintf(PRINT_BOTH, "%llx", (unsigned long long)(q[20]));
+        kprintf(PRINT_BOTH, " ss=0x"); kprintf(PRINT_BOTH, "%llx", (unsigned long long)(q[21]));
     }
-    kprintf(PRINT_BOTH, "\n  stack_base=0x"); kprintf(PRINT_BOTH, "%016llx", (unsigned long long)(t->stack_base));
-    kprintf(PRINT_BOTH, "  stack_top=0x"); kprintf(PRINT_BOTH, "%016llx", (unsigned long long)(t->stack_top));
+    kprintf(PRINT_BOTH, "\n  stack_base=0x"); kprintf(PRINT_BOTH, "%llx", (unsigned long long)(t->stack_base));
+    kprintf(PRINT_BOTH, "  stack_top=0x"); kprintf(PRINT_BOTH, "%llx", (unsigned long long)(t->stack_top));
     kprintchar('\n', PRINT_BOTH);
 }
 
@@ -167,34 +178,35 @@ void panic_dump_regs(struct panic_context* ctx) {
     __asm__ volatile("mov %%cr4, %0" : "=r"(ctx->cr4));
     __asm__ volatile("mov %%rsp, %0" : "=r"(ctx->rsp_at_panic));
 
-    kprintf(PRINT_BOTH, "RIP: 0x"); kprintf(PRINT_BOTH, "%016llx", (unsigned long long)(f->rip)); kprintchar('\n', PRINT_BOTH);
-    kprintf(PRINT_BOTH, "CS:  0x"); kprintf(PRINT_BOTH, "%016llx", (unsigned long long)(f->cs)); kprintchar('\n', PRINT_BOTH);
-    kprintf(PRINT_BOTH, "RFLAGS: 0x"); kprintf(PRINT_BOTH, "%016llx", (unsigned long long)(f->rflags)); kprintchar('\n', PRINT_BOTH);
-    kprintf(PRINT_BOTH, "RSP: 0x"); kprintf(PRINT_BOTH, "%016llx", (unsigned long long)(ctx->rsp_at_panic)); kprintchar('\n', PRINT_BOTH);
-    kprintf(PRINT_BOTH, "RAX: 0x"); kprintf(PRINT_BOTH, "%016llx", (unsigned long long)(f->rax)); kprintchar('\n', PRINT_BOTH);
-    kprintf(PRINT_BOTH, "RBX: 0x"); kprintf(PRINT_BOTH, "%016llx", (unsigned long long)(f->rbx)); kprintchar('\n', PRINT_BOTH);
-    kprintf(PRINT_BOTH, "RCX: 0x"); kprintf(PRINT_BOTH, "%016llx", (unsigned long long)(f->rcx)); kprintchar('\n', PRINT_BOTH);
-    kprintf(PRINT_BOTH, "RDX: 0x"); kprintf(PRINT_BOTH, "%016llx", (unsigned long long)(f->rdx)); kprintchar('\n', PRINT_BOTH);
-    kprintf(PRINT_BOTH, "RSI: 0x"); kprintf(PRINT_BOTH, "%016llx", (unsigned long long)(f->rsi)); kprintchar('\n', PRINT_BOTH);
-    kprintf(PRINT_BOTH, "RDI: 0x"); kprintf(PRINT_BOTH, "%016llx", (unsigned long long)(f->rdi)); kprintchar('\n', PRINT_BOTH);
-    kprintf(PRINT_BOTH, "RBP: 0x"); kprintf(PRINT_BOTH, "%016llx", (unsigned long long)(f->rbp)); kprintchar('\n', PRINT_BOTH);
-    kprintf(PRINT_BOTH, "R8:  0x"); kprintf(PRINT_BOTH, "%016llx", (unsigned long long)(f->r8)); kprintchar('\n', PRINT_BOTH);
-    kprintf(PRINT_BOTH, "R9:  0x"); kprintf(PRINT_BOTH, "%016llx", (unsigned long long)(f->r9)); kprintchar('\n', PRINT_BOTH);
-    kprintf(PRINT_BOTH, "R10: 0x"); kprintf(PRINT_BOTH, "%016llx", (unsigned long long)(f->r10)); kprintchar('\n', PRINT_BOTH);
-    kprintf(PRINT_BOTH, "R11: 0x"); kprintf(PRINT_BOTH, "%016llx", (unsigned long long)(f->r11)); kprintchar('\n', PRINT_BOTH);
-    kprintf(PRINT_BOTH, "R12: 0x"); kprintf(PRINT_BOTH, "%016llx", (unsigned long long)(f->r12)); kprintchar('\n', PRINT_BOTH);
-    kprintf(PRINT_BOTH, "R13: 0x"); kprintf(PRINT_BOTH, "%016llx", (unsigned long long)(f->r13)); kprintchar('\n', PRINT_BOTH);
-    kprintf(PRINT_BOTH, "R14: 0x"); kprintf(PRINT_BOTH, "%016llx", (unsigned long long)(f->r14)); kprintchar('\n', PRINT_BOTH);
-    kprintf(PRINT_BOTH, "R15: 0x"); kprintf(PRINT_BOTH, "%016llx", (unsigned long long)(f->r15)); kprintchar('\n', PRINT_BOTH);
-    kprintf(PRINT_BOTH, "Error Code: 0x"); kprintf(PRINT_BOTH, "%016llx", (unsigned long long)(f->error_code)); kprintchar('\n', PRINT_BOTH);
-    kprintf(PRINT_BOTH, "CR0: 0x"); kprintf(PRINT_BOTH, "%016llx", (unsigned long long)(ctx->cr0)); kprintchar('\n', PRINT_BOTH);
-    kprintf(PRINT_BOTH, "CR2: 0x"); kprintf(PRINT_BOTH, "%016llx", (unsigned long long)(ctx->cr2)); kprintchar('\n', PRINT_BOTH);
-    kprintf(PRINT_BOTH, "CR3: 0x"); kprintf(PRINT_BOTH, "%016llx", (unsigned long long)(ctx->cr3)); kprintchar('\n', PRINT_BOTH);
-    kprintf(PRINT_BOTH, "CR4: 0x"); kprintf(PRINT_BOTH, "%016llx", (unsigned long long)(ctx->cr4)); kprintchar('\n', PRINT_BOTH);
+    kprintf(PRINT_BOTH, "RIP: 0x"); kprintf(PRINT_BOTH, "%llx", (unsigned long long)(f->rip)); kprintchar('\n', PRINT_BOTH);
+    kprintf(PRINT_BOTH, "CS:  0x"); kprintf(PRINT_BOTH, "%llx", (unsigned long long)(f->cs)); kprintchar('\n', PRINT_BOTH);
+    kprintf(PRINT_BOTH, "RFLAGS: 0x"); kprintf(PRINT_BOTH, "%llx", (unsigned long long)(f->rflags)); kprintchar('\n', PRINT_BOTH);
+    kprintf(PRINT_BOTH, "RSP: 0x"); kprintf(PRINT_BOTH, "%llx", (unsigned long long)(ctx->rsp_at_panic)); kprintchar('\n', PRINT_BOTH);
+    kprintf(PRINT_BOTH, "RAX: 0x"); kprintf(PRINT_BOTH, "%llx", (unsigned long long)(f->rax)); kprintchar('\n', PRINT_BOTH);
+    kprintf(PRINT_BOTH, "RBX: 0x"); kprintf(PRINT_BOTH, "%llx", (unsigned long long)(f->rbx)); kprintchar('\n', PRINT_BOTH);
+    kprintf(PRINT_BOTH, "RCX: 0x"); kprintf(PRINT_BOTH, "%llx", (unsigned long long)(f->rcx)); kprintchar('\n', PRINT_BOTH);
+    kprintf(PRINT_BOTH, "RDX: 0x"); kprintf(PRINT_BOTH, "%llx", (unsigned long long)(f->rdx)); kprintchar('\n', PRINT_BOTH);
+    kprintf(PRINT_BOTH, "RSI: 0x"); kprintf(PRINT_BOTH, "%llx", (unsigned long long)(f->rsi)); kprintchar('\n', PRINT_BOTH);
+    kprintf(PRINT_BOTH, "RDI: 0x"); kprintf(PRINT_BOTH, "%llx", (unsigned long long)(f->rdi)); kprintchar('\n', PRINT_BOTH);
+    kprintf(PRINT_BOTH, "RBP: 0x"); kprintf(PRINT_BOTH, "%llx", (unsigned long long)(f->rbp)); kprintchar('\n', PRINT_BOTH);
+    kprintf(PRINT_BOTH, "R8:  0x"); kprintf(PRINT_BOTH, "%llx", (unsigned long long)(f->r8)); kprintchar('\n', PRINT_BOTH);
+    kprintf(PRINT_BOTH, "R9:  0x"); kprintf(PRINT_BOTH, "%llx", (unsigned long long)(f->r9)); kprintchar('\n', PRINT_BOTH);
+    kprintf(PRINT_BOTH, "R10: 0x"); kprintf(PRINT_BOTH, "%llx", (unsigned long long)(f->r10)); kprintchar('\n', PRINT_BOTH);
+    kprintf(PRINT_BOTH, "R11: 0x"); kprintf(PRINT_BOTH, "%llx", (unsigned long long)(f->r11)); kprintchar('\n', PRINT_BOTH);
+    kprintf(PRINT_BOTH, "R12: 0x"); kprintf(PRINT_BOTH, "%llx", (unsigned long long)(f->r12)); kprintchar('\n', PRINT_BOTH);
+    kprintf(PRINT_BOTH, "R13: 0x"); kprintf(PRINT_BOTH, "%llx", (unsigned long long)(f->r13)); kprintchar('\n', PRINT_BOTH);
+    kprintf(PRINT_BOTH, "R14: 0x"); kprintf(PRINT_BOTH, "%llx", (unsigned long long)(f->r14)); kprintchar('\n', PRINT_BOTH);
+    kprintf(PRINT_BOTH, "R15: 0x"); kprintf(PRINT_BOTH, "%llx", (unsigned long long)(f->r15)); kprintchar('\n', PRINT_BOTH);
+    kprintf(PRINT_BOTH, "Error Code: 0x"); kprintf(PRINT_BOTH, "%llx", (unsigned long long)(f->error_code)); kprintchar('\n', PRINT_BOTH);
+    kprintf(PRINT_BOTH, "CR0: 0x"); kprintf(PRINT_BOTH, "%llx", (unsigned long long)(ctx->cr0)); kprintchar('\n', PRINT_BOTH);
+    kprintf(PRINT_BOTH, "CR2: 0x"); kprintf(PRINT_BOTH, "%llx", (unsigned long long)(ctx->cr2)); kprintchar('\n', PRINT_BOTH);
+    kprintf(PRINT_BOTH, "CR3: 0x"); kprintf(PRINT_BOTH, "%llx", (unsigned long long)(ctx->cr3)); kprintchar('\n', PRINT_BOTH);
+    kprintf(PRINT_BOTH, "CR4: 0x"); kprintf(PRINT_BOTH, "%llx", (unsigned long long)(ctx->cr4)); kprintchar('\n', PRINT_BOTH);
 
     kprintf_home(width / 2, 0);
 
     kprintf(PRINT_BOTH, "========== HALTING ==========\n");
+    dump_syscall_state(ctx);
     if (ctx->has_pf) dump_pf(ctx, f->error_code);
     dump_stack(ctx->rsp_at_panic);
     dump_task();
@@ -206,25 +218,25 @@ static void capture_frame(struct isr_frame* f) {
     uint64_t rip;
 
     __asm__ volatile(
-        "mov %%r15,  0(%0)\n\t"
-        "mov %%r14,  8(%0)\n\t"
-        "mov %%r13, 16(%0)\n\t"
-        "mov %%r12, 24(%0)\n\t"
-        "mov %%r11, 32(%0)\n\t"
-        "mov %%r10, 40(%0)\n\t"
-        "mov %%r9,  48(%0)\n\t"
-        "mov %%r8,  56(%0)\n\t"
-        "mov %%rbp, 64(%0)\n\t"
-        "mov %%rdi, 72(%0)\n\t"
-        "mov %%rsi, 80(%0)\n\t"
-        "mov %%rdx, 88(%0)\n\t"
-        "mov %%rcx, 96(%0)\n\t"
-        "mov %%rbx,104(%0)\n\t"
-        "mov %%rax,112(%0)\n\t"
+        "mov %%r15,  0(%1)\n\t"
+        "mov %%r14,  8(%1)\n\t"
+        "mov %%r13, 16(%1)\n\t"
+        "mov %%r12, 24(%1)\n\t"
+        "mov %%r11, 32(%1)\n\t"
+        "mov %%r10, 40(%1)\n\t"
+        "mov %%r9,  48(%1)\n\t"
+        "mov %%r8,  56(%1)\n\t"
+        "mov %%rbp, 64(%1)\n\t"
+        "mov %%rdi, 72(%1)\n\t"
+        "mov %%rsi, 80(%1)\n\t"
+        "mov %%rdx, 88(%1)\n\t"
+        "mov %%rcx, 96(%1)\n\t"
+        "mov %%rbx,104(%1)\n\t"
+        "mov %%rax,112(%1)\n\t"
         "lea 1f(%%rip), %%rax\n\t"
-        "mov %%rax,%1\n\t"
+        "mov %%rax,%0\n\t"
         "1:\n\t"
-        : : "r"(g), "r"(rip) : "rax", "cc", "memory"
+        : "=r"(rip) : "r"(g) : "rax", "cc", "memory"
     );
 
     f->r15 = g[0];  f->r14 = g[1];  f->r13 = g[2];  f->r12 = g[3];

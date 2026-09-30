@@ -1,4 +1,5 @@
 #include "serial.h"
+#include "kernel/sync/preempt.h"
 
 static inline void outb(uint16_t port, uint8_t val) {
     __asm__ volatile("outb %0, %1" : : "a"(val), "Nd"(port));
@@ -21,7 +22,16 @@ void serial_init(void) {
 }
 
 void serial_putchar(char c) {
-    if (c == '\n') serial_putchar('\r');
+
+    preempt_disable();
+
+    if (c == '\n') {
+        while ((inb(0x3FD) & 0x20) == 0) {}
+        outb(0x3F8, '\r');
+    }
+
     while ((inb(0x3FD) & 0x20) == 0) {}
     outb(0x3F8, (uint8_t)c);
+
+    preempt_enable();
 }

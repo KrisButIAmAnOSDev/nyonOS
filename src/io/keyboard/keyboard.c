@@ -74,17 +74,17 @@ static const uint8_t scancode_set1_shift[] = {
 static uint8_t scancode_to_ascii(uint8_t scancode) {
     bool extended = false;
     static bool extended_prev = false;
-    
+
     if (scancode == 0xE0) {
         extended_prev = true;
         return 0;
     }
-    
+
     if (extended_prev) {
         extended_prev = false;
         extended = true;
     }
-    
+
     if (scancode & 0x80) {
         uint8_t released = scancode & 0x7F;
         if (released == 0x2A || released == 0x36) shift_pressed = false;
@@ -92,23 +92,24 @@ static uint8_t scancode_to_ascii(uint8_t scancode) {
         else if (released == 0x38) alt_pressed = false;
         return 0;
     }
-    
+
     if (scancode == 0x2A || scancode == 0x36) { shift_pressed = true; return 0; }
     if (scancode == 0x1D) { ctrl_pressed = true; return 0; }
     if (scancode == 0x38) { alt_pressed = true; return 0; }
     if (scancode == 0x3A) { caps_lock = !caps_lock; return 0; }
-    
+
     uint8_t ascii = 0;
     if (shift_pressed ^ caps_lock) {
         if (scancode < sizeof(scancode_set1_shift)) ascii = scancode_set1_shift[scancode];
     } else {
         if (scancode < sizeof(scancode_set1)) ascii = scancode_set1[scancode];
     }
-    
+
     return ascii;
 }
 
-void keyboard_handler(void) {
+void keyboard_handler(struct isr_frame *frame) {
+    (void)frame;
     keyboard_wait_output();
     uint8_t scancode = inb(0x60);
     keyboard_buffer_push(scancode);
@@ -120,12 +121,12 @@ static bool framebuffer_ready = false;
 
 static void put_char_fb(char c) {
     if (!framebuffer_ready) return;
-    
+
     struct limine_framebuffer *fb = framebuffer_request.response->framebuffers[0];
     volatile uint32_t *fb_ptr = (volatile uint32_t *)fb->address;
     uint32_t width = fb->width;
     uint32_t height = fb->height;
-    
+
     if (c == '\n') {
         cursor_x = 0;
         cursor_y += 16;
@@ -138,7 +139,7 @@ static void put_char_fb(char c) {
         draw_char(fb_ptr, c, cursor_x, cursor_y, 0xffffff, width, height);
         cursor_x += 8;
     }
-    
+
     if (cursor_x >= width - 8) {
         cursor_x = 0;
         cursor_y += 16;
@@ -161,7 +162,7 @@ void keyboard_process_buffer(void) {
             cursor_y = 200;
         }
     }
-    
+
     uint8_t scancode;
     while (keyboard_buffer_pop(&scancode)) {
         kprintf(PRINT_SERIAL, "SC: 0x");
@@ -179,7 +180,7 @@ void keyboard_process_buffer(void) {
 void keyboard_init(void) {
     keyboard_wait_input();
     outb(0x64, 0xAE);
-    
+
     keyboard_wait_input();
     outb(0x64, 0x20);
     keyboard_wait_output();
@@ -191,20 +192,20 @@ void keyboard_init(void) {
     outb(0x64, 0x60);
     keyboard_wait_input();
     outb(0x60, status);
-    
+
     keyboard_wait_input();
     outb(0x64, 0xAE);
     keyboard_wait_input();
     outb(0x60, 0xF4);
     keyboard_wait_output();
-    
+
     keyboard_wait_input();
     outb(0x64, 0xA8);
     keyboard_wait_input();
     outb(0x60, 0xF4);
     keyboard_wait_output();
-    
+
     pic_clear_mask(1);
-    
+
     kprintf(PRINT_SERIAL, "Keyboard: Initialized\n");
 }

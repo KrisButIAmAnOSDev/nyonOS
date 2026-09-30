@@ -2,6 +2,7 @@
 #include <stdbool.h>
 #include "io/serial/serial.h"
 #include "graphics/video/video.h"
+#include "kernel/sync/preempt.h"
 
 #define GLYPH_W 8
 #define GLYPH_H 16
@@ -31,16 +32,37 @@ void kprintf_clear(void) {
     }
 }
 
+static void screen_scroll(void) {
+    if (!fb || GLYPH_H >= fb_h) return;
+
+    uint32_t keep = fb_h - GLYPH_H;
+    for (uint32_t y = 0; y < keep; y++) {
+        for (uint32_t x = 0; x < fb_w; x++) {
+            fb[y * fb_w + x] = fb[(y + GLYPH_H) * fb_w + x];
+        }
+    }
+    for (uint32_t y = keep; y < fb_h; y++) {
+        for (uint32_t x = 0; x < fb_w; x++) fb[y * fb_w + x] = 0;
+    }
+
+    if (cur_y >= fb_h) cur_y = keep;
+}
+
+static void screen_newline(void) {
+    cur_x = home_x;
+    cur_y += GLYPH_H;
+    if (cur_y + GLYPH_H > fb_h) screen_scroll();
+}
+
 static void screen_char(char c, uint32_t color) {
     if (!fb) return;
-    if (c == '\n') {
-        cur_x = home_x;
-        cur_y += GLYPH_H;
-        return;
-    }
+    if (c == '\n') { screen_newline(); return; }
     if (c == '\r') return;
     if (c < 32 || c > 126) return;
-    if (cur_y + GLYPH_H > fb_h || cur_x + GLYPH_W > fb_w) return;
+
+    if (cur_x + GLYPH_W > fb_w) screen_newline();
+    if (cur_y + GLYPH_H > fb_h) return;
+
     draw_char(fb, (uint8_t)c, cur_x, cur_y, color, fb_w, fb_h);
     cur_x += GLYPH_W;
 }
@@ -67,7 +89,7 @@ void kprintchar(char c, uint32_t attr) {
     screen_char(c, color);
 }
 
-static void put_unsigned(uint64_t v, unsigned base, bool upper, uint32_t attr) {
+static void put_unsigned(uint64_t v, unsigned base, bool upper, uint32_t attr, int min_digits, char pad) {
     const char *digits = upper ? "0123456789ABCDEF" : "0123456789abcdef";
     char buf[24];
     int i = 0;
@@ -77,21 +99,23 @@ static void put_unsigned(uint64_t v, unsigned base, bool upper, uint32_t attr) {
         return;
     }
 
-    while (v && i < 24) {
-        buf[i++] = digits[v % base];
+    do {
+        if (i < 24) buf[i++] = digits[v % base];
         v /= base;
-    }
+    } while (v);
+
+    while (i < min_digits && i < 24) buf[i++] = pad;
 
     while (i--) kprintchar(buf[i], attr);
 }
 
-static void put_signed(int64_t v, uint32_t attr) {
+static void put_signed(int64_t v, uint32_t attr, int min_digits, char pad) {
     if (v < 0) {
         kprintchar('-', attr);
-        put_unsigned((uint64_t)(-(v + 1)) + 1, 10, false, attr);
+        put_unsigned((uint64_t)(-(v + 1)) + 1, 10, false, attr, min_digits, pad);
         return;
     }
-    put_unsigned((uint64_t)v, 10, false, attr);
+    put_unsigned((uint64_t)v, 10, false, attr, min_digits, pad);
 }
 
 void kvprintf(uint32_t attr, const char *fmt, va_list args) {
@@ -104,9 +128,36 @@ void kvprintf(uint32_t attr, const char *fmt, va_list args) {
         fmt++;
         if (!*fmt) return;
 
+        int prec = -1;
+        if (*fmt == '*') {
+            fmt++;
+            prec = va_arg(args, int);
+            if (prec < 0) prec = -1;
+        } else if (*fmt == '.') {
+            fmt++;
+
+            if (*fmt == '*') {
+                fmt++;
+                prec = va_arg(args, int);
+                if (prec < 0) prec = -1;
+            } else {
+                prec = 0;
+                while (*fmt >= '0' && *fmt <= '9') { prec = prec * 10 + (*fmt - '0'); fmt++; }
+            }
+        }
+
         int longness = 0;
         while (*fmt == 'l') { longness++; fmt++; }
         if (*fmt == 'z') { longness = 1; fmt++; }
+
+        int zero_pad = 0;
+        if (*fmt == '0') { zero_pad = 1; fmt++; }
+        int width = 0;
+        while (*fmt >= '0' && *fmt <= '9') { width = width * 10 + (*fmt - '0'); fmt++; }
+
+        int min_digits = prec > 0 ? prec : 0;
+        if (width > min_digits) min_digits = width;
+        char pad = zero_pad ? '0' : ' ';
 
         switch (*fmt) {
             case 'd':
@@ -114,14 +165,14 @@ void kvprintf(uint32_t attr, const char *fmt, va_list args) {
                 int64_t v = (longness >= 2) ? va_arg(args, long long)
                           : (longness == 1) ? (long)va_arg(args, long)
                           : (int)va_arg(args, int);
-                put_signed(v, attr);
+                put_signed(v, attr, min_digits, pad);
                 break;
             }
             case 'u': {
                 uint64_t v = (longness >= 2) ? va_arg(args, unsigned long long)
                            : (longness == 1) ? (unsigned long)va_arg(args, unsigned long)
                            : (unsigned)va_arg(args, unsigned int);
-                put_unsigned(v, 10, false, attr);
+                put_unsigned(v, 10, false, attr, min_digits, pad);
                 break;
             }
             case 'x':
@@ -129,19 +180,23 @@ void kvprintf(uint32_t attr, const char *fmt, va_list args) {
                 uint64_t v = (longness >= 2) ? va_arg(args, unsigned long long)
                            : (longness == 1) ? (unsigned long)va_arg(args, unsigned long)
                            : (unsigned)va_arg(args, unsigned int);
-                put_unsigned(v, 16, *fmt == 'X', attr);
+                put_unsigned(v, 16, *fmt == 'X', attr, min_digits, pad);
                 break;
             }
             case 'p': {
                 kprintchar('0', attr);
                 kprintchar('x', attr);
-                put_unsigned((uint64_t)(uintptr_t)va_arg(args, void *), 16, false, attr);
+                put_unsigned((uint64_t)(uintptr_t)va_arg(args, void *), 16, false, attr, min_digits, pad);
                 break;
             }
             case 's': {
                 const char *s = va_arg(args, const char *);
                 if (!s) s = "(null)";
-                while (*s) kprintchar(*s++, attr);
+
+                size_t slen = 0;
+                while (s[slen] && slen < (size_t)prec) slen++;
+                for (size_t i = slen; i < (size_t)width; i++) kprintchar(' ', attr);
+                for (size_t i = 0; i < slen; i++) kprintchar(s[i], attr);
                 break;
             }
             case 'c':
@@ -160,7 +215,10 @@ void kvprintf(uint32_t attr, const char *fmt, va_list args) {
 
 void kprintf(uint32_t attr, const char *fmt, ...) {
     va_list args;
+
+    preempt_disable();
     va_start(args, fmt);
     kvprintf(attr, fmt, args);
     va_end(args);
+    preempt_enable();
 }

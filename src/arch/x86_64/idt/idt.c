@@ -72,15 +72,13 @@ void irq_dispatch(struct isr_frame* frame) {
 
     uint8_t irq = (uint8_t)(vector - IDT_FIRST_IRQ);
 
-    current_isr_frame = frame;
-
     if (irq >= 8) pic_send_eoi(8);
     pic_send_eoi(0);
 
-    if (irq_handlers[irq]) irq_handlers[irq]();
+    if (irq_handlers[irq]) irq_handlers[irq](frame);
     else spurious_irq_count++;
 }
 
 void exception_handler(struct isr_frame* frame) {
-    panic("CPU Exception", frame); //sad nyon 
+    panic("CPU Exception", frame);
 }

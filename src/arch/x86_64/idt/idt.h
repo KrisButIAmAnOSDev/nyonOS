@@ -13,9 +13,6 @@
 #define IDT_ATTR_PRESENT 0x8E
 #define IDT_ATTR_DPL3 0xEE
 
-typedef void (*irq_handler_t)(void);
-void irq_install(uint8_t irq, irq_handler_t handler);
-
 struct idt_entry {
     uint16_t isr_low;
     uint16_t kernel_cs;
@@ -39,7 +36,13 @@ struct isr_frame {
     uint64_t rip;
     uint64_t cs;
     uint64_t rflags;
+    uint64_t rsp;
+    uint64_t ss;
 };
+
+typedef void (*irq_handler_t)(struct isr_frame *frame);
+
+void irq_install(uint8_t irq, irq_handler_t handler);
 
 extern struct idt_entry idt[IDT_SIZE];
 extern struct idtr idtr;

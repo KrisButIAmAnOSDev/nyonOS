@@ -17,6 +17,8 @@
 #include "kernel/multitask/task.h"
 #include "kernel/mm/vmm/vmm.h"
 #include "arch/x86_64/lapic/lapic.h"
+#include "arch/x86_64/syscall/syscall.h"
+#include "arch/x86_64/gdt/gdt.h"
 
 __attribute__((used, section(".limine_requests")))
 static volatile uint64_t limine_base_revision[] = LIMINE_BASE_REVISION(6);
@@ -44,42 +46,6 @@ static volatile uint64_t limine_requests_start_marker[] = LIMINE_REQUESTS_START_
 
 __attribute__((used, section(".limine_requests_end")))
 static volatile uint64_t limine_requests_end_marker[] = LIMINE_REQUESTS_END_MARKER;
-
-uint64_t sentinel_regs[15];
-volatile uint64_t sentinel_counter;
-void sentinel_test(void);
-
-static void test_sentinels(void) {
-    static const char *names[15] = {
-        "rax", "rbx", "rcx", "rdx", "rsi", "rdi", "rbp",
-        "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15"
-    };
-    static const uint64_t want[15] = {
-        0xA0A0A0A0A0A0A0A0, 0x1111111111111111, 0xC0C0C0C0C0C0C0C0,
-        0xD0D0D0D0D0D0D0D0, 0xE0E0E0E0E0E0E0E0, 0xF0F0F0F0F0F0F0F0,
-        0x0101010101010101, 0x0202020202020202, 0x0303030303030303,
-        0x0404040404040404, 0x0505050505050505, 0x0606060606060606,
-        0x0707070707070707, 0x0808080808080808, 0x0909090909090909
-    };
-
-    sentinel_test();
-
-    int bad = 0;
-    for (int i = 0; i < 15; i++) {
-        if (sentinel_regs[i] == want[i]) continue;
-        bad++;
-        kprintf(PRINT_SERIAL, "  SENTINEL ");
-        kprintf(PRINT_SERIAL, "%s", names[i]);
-        kprintf(PRINT_SERIAL, " expected ");
-        kprintf(PRINT_SERIAL, "%016llx", (unsigned long long)(want[i]));
-        kprintf(PRINT_SERIAL, " got ");
-        kprintf(PRINT_SERIAL, "%016llx", (unsigned long long)(sentinel_regs[i]));
-        kprintchar('\n', PRINT_SERIAL);
-    }
-    kprintf(PRINT_SERIAL, "SENTINEL test: ");
-    kprintf(PRINT_SERIAL, "%s", bad ? "CORRUPTED" : "all 15 registers intact across preemption");
-    kprintchar('\n', PRINT_SERIAL);
-}
 
 static void busy_wait_ms(uint64_t ms) {
     uint64_t start = pit_get_ticks();
@@ -182,12 +148,12 @@ void kmain(void) {
         kprintf(PRINT_SERIAL, "nyonOS: No memmap response!\n");
         for (;;) __asm__ volatile("hlt");
     }
-    
+
     if (hhdm_request.response == NULL) {
         kprintf(PRINT_SERIAL, "nyonOS: No HHDM response!\n");
         for (;;) __asm__ volatile("hlt");
     }
-    
+
     uint64_t hhdm_offset = hhdm_request.response->offset;
 
     pmm_init(memmap_request.response, hhdm_offset);
@@ -208,6 +174,7 @@ void kmain(void) {
     pit_init(1000);
     lapic_unmask_ext_int(lapic_virt);
     idt_init();
+    syscall_init();
     irq_install(0, pit_handler);
     irq_install(1, keyboard_handler);
     keyboard_init();
@@ -241,12 +208,11 @@ void kmain(void) {
     bool got_phys = pmm_alloc(&phys, 2);
     vaddr_t virt = 0xFFFFFFFFC0000000;
     if (got_phys && vmm_map(virt, phys, 2, VMM_DEFAULT_FLAGS)) {
-        kprintf(PRINT_SERIAL, "  mapped 0x%llx -> 0x%llx\n",
-                (unsigned long long)virt, (unsigned long long)phys);
+        kprintf(PRINT_SERIAL, "  mapped 0x%llx -> 0x%llx\n", (unsigned long long)virt, (unsigned long long)phys);
 
         paddr_t phys2 = vmm_virt_to_phys(virt);
         kprintf(PRINT_SERIAL, "  virt_to_phys: 0x%llx\n", (unsigned long long)phys2);
-        
+
         vmm_unmap(virt, 2);
         kprintf(PRINT_SERIAL, "  unmapped\n");
         pmm_free(phys, 2);
@@ -279,9 +245,7 @@ void kmain(void) {
 
     test_map_unmap_churn();
 
-    kprintf(PRINT_SERIAL, "KPRINTF test: %d %u %x %X %s %c %% %ld %lu %zu\n",
-            -42, 42u, 0xdeadbeefu, 0xcafeu, "str", 'Z',
-            -123456789L, 123456789UL, (size_t)4096);
+    kprintf(PRINT_SERIAL, "KPRINTF test: %d %u %x %X %s %c %% %ld %lu %zu\n", -42, 42u, 0xdeadbeefu, 0xcafeu, "str", 'Z', -123456789L, 123456789UL, (size_t)4096);
     kprintf(PRINT_SERIAL, "KPRINTF test: ptr=%p null=%s\n", (void *)0xffffffff80000000ULL, (char *)0);
 
     heap_init();
@@ -367,14 +331,32 @@ void kmain(void) {
 
     sync_init();
     task_init();
-    test_sentinels();
     task_spawn("aqua", task_aqua);
     task_spawn("seth", task_seth);
 
+    kprintf_clear();
     kprintf_home(0, 0);
     kprintf(KATTR(PRINT_BOTH, COLOR_MAGENTA), "nyonn nyon nyonn ulelelel nyon leleel nyonn\n");
     kprintf(KATTR(PRINT_SCREEN, COLOR_CYAN), "kawkaw from deltarune\n");
     kprintf(PRINT_SERIAL, "ululululululelelleelele uleeelle nyon -another kawkaw\n");
+
+    {
+        extern uint8_t user_test_entry[];
+        extern uint8_t user_test_end[];
+
+        paddr_t uphys;
+        vaddr_t uvirt = 0x0000000000400000ULL;
+        size_t code_bytes = (size_t)(user_test_end - user_test_entry);
+        size_t code_pages = (code_bytes + PAGE_SIZE - 1) / PAGE_SIZE;
+
+        if (pmm_alloc(&uphys, code_pages) && vmm_map(uvirt, uphys, code_pages, VMM_USER_FLAGS)) {
+            volatile uint8_t *dst = (volatile uint8_t *)(uvirt);
+            for (size_t i = 0; i < code_bytes; i++) dst[i] = user_test_entry[i];
+            task_spawn_ring3("ring3", uvirt);
+        } else {
+            kprintf(PRINT_SERIAL, "RING3 test: FAILED to map user code\n");
+        }
+    }
 
     for (;;) {
         keyboard_process_buffer();

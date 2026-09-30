@@ -70,14 +70,12 @@ isr_common:
     pop rax
     add rsp, 16
     iretq
-    
 
 .global isr_stub_0
 isr_stub_0:
     push 0
     push 0
     jmp isr_common
-
 
 ISR_NOERRCODE 1
 ISR_NOERRCODE 2

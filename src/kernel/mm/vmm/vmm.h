@@ -37,6 +37,7 @@ bool vmm_unmap(vaddr_t vaddr, size_t pages);
 paddr_t vmm_virt_to_phys(vaddr_t vaddr);
 uint64_t vmm_query(vaddr_t vaddr);
 bool vmm_is_mapped(vaddr_t vaddr);
+bool vmm_range_present(vaddr_t addr, size_t len);
 struct page_table *vmm_create_address_space(void);
 void vmm_switch_address_space(struct page_table *pml4);
 void vmm_invlpg(vaddr_t vaddr);

@@ -94,8 +94,8 @@ void gdt_init(uint64_t hhdm_offset) {
 
     gdt_encode(&gdt[0x08], 0, 0x000FFFFF, 0x9B, 0xA);
     gdt_encode(&gdt[0x10], 0, 0x000FFFFF, 0x93, 0xC);
-    gdt_encode(&gdt[0x18], 0, 0x000FFFFF, 0xFB, 0xA);
-    gdt_encode(&gdt[0x20], 0, 0x000FFFFF, 0xF3, 0xC);
+    gdt_encode(&gdt[0x18], 0, 0x000FFFFF, 0xF3, 0xC);
+    gdt_encode(&gdt[0x20], 0, 0x000FFFFF, 0xFB, 0xA);
     gdt_encode_tss(&gdt[0x28], tss_addr(), sizeof(struct tss) - 1);
 
     for (size_t i = 0; i < 16; i++) gdt_tss_desc[i] = gdt[0x28 + i];
@@ -108,7 +108,7 @@ void gdt_init(uint64_t hhdm_offset) {
     gdt_load(&gdtr);
 
     kprintf(PRINT_SERIAL, "GDT: loaded, TSS limit=");
-    kprintf(PRINT_SERIAL, "%04x", (unsigned)(sizeof(struct tss) - 1));
+    kprintf(PRINT_SERIAL, "%llx", (unsigned)(sizeof(struct tss) - 1));
     kprintf(PRINT_SERIAL, " ist=");
     for (int i = 0; i < TSS_IST_COUNT; i++) {
         kprintchar('1' + i, PRINT_SERIAL);
@@ -121,9 +121,9 @@ void gdt_dump(void) {
     __asm__ volatile("sgdt %0" : "=m"(gdtr));
 
     kprintf(PRINT_SERIAL, "GDT base=0x");
-    kprintf(PRINT_SERIAL, "%016llx", (unsigned long long)(gdtr.base));
+    kprintf(PRINT_SERIAL, "%llx", (unsigned long long)(gdtr.base));
     kprintf(PRINT_SERIAL, " limit=0x");
-    kprintf(PRINT_SERIAL, "%04x", (unsigned)(gdtr.limit));
+    kprintf(PRINT_SERIAL, "%llx", (unsigned)(gdtr.limit));
     kprintchar('\n', PRINT_SERIAL);
 
     size_t count = ((size_t)gdtr.limit + 1) / 8;
@@ -131,18 +131,18 @@ void gdt_dump(void) {
 
     for (size_t i = 0; i < count; i++) {
         kprintf(PRINT_SERIAL, "  0x");
-        kprintf(PRINT_SERIAL, "%02x", (unsigned)(i * 8));
+        kprintf(PRINT_SERIAL, "%llx", (unsigned)(i * 8));
         kprintf(PRINT_SERIAL, ": 0x");
-        kprintf(PRINT_SERIAL, "%016llx", (unsigned long long)(entry_qword(table + i * 8)));
+        kprintf(PRINT_SERIAL, "%llx", (unsigned long long)(entry_qword(table + i * 8)));
         kprintchar('\n', PRINT_SERIAL);
     }
 
-    kprintf(PRINT_SERIAL, "cs=0x"); kprintf(PRINT_SERIAL, "%04x", (unsigned)(gdt_rd_cs()));
-    kprintf(PRINT_SERIAL, " ds=0x"); kprintf(PRINT_SERIAL, "%04x", (unsigned)(gdt_rd_ds()));
-    kprintf(PRINT_SERIAL, " es=0x"); kprintf(PRINT_SERIAL, "%04x", (unsigned)(gdt_rd_es()));
-    kprintf(PRINT_SERIAL, " ss=0x"); kprintf(PRINT_SERIAL, "%04x", (unsigned)(gdt_rd_ss()));
-    kprintf(PRINT_SERIAL, " fs=0x"); kprintf(PRINT_SERIAL, "%04x", (unsigned)(gdt_rd_fs()));
-    kprintf(PRINT_SERIAL, " gs=0x"); kprintf(PRINT_SERIAL, "%04x", (unsigned)(gdt_rd_gs()));
-    kprintf(PRINT_SERIAL, " tr=0x"); kprintf(PRINT_SERIAL, "%04x", (unsigned)(gdt_rd_tr()));
+    kprintf(PRINT_SERIAL, "cs=0x"); kprintf(PRINT_SERIAL, "%llx", (unsigned)(gdt_rd_cs()));
+    kprintf(PRINT_SERIAL, " ds=0x"); kprintf(PRINT_SERIAL, "%llx", (unsigned)(gdt_rd_ds()));
+    kprintf(PRINT_SERIAL, " es=0x"); kprintf(PRINT_SERIAL, "%llx", (unsigned)(gdt_rd_es()));
+    kprintf(PRINT_SERIAL, " ss=0x"); kprintf(PRINT_SERIAL, "%llx", (unsigned)(gdt_rd_ss()));
+    kprintf(PRINT_SERIAL, " fs=0x"); kprintf(PRINT_SERIAL, "%llx", (unsigned)(gdt_rd_fs()));
+    kprintf(PRINT_SERIAL, " gs=0x"); kprintf(PRINT_SERIAL, "%llx", (unsigned)(gdt_rd_gs()));
+    kprintf(PRINT_SERIAL, " tr=0x"); kprintf(PRINT_SERIAL, "%llx", (unsigned)(gdt_rd_tr()));
     kprintchar('\n', PRINT_SERIAL);
 }

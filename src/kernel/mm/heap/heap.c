@@ -7,7 +7,8 @@
 
 #define HEAP_VIRT_BASE 0xFFFFFFFFD0000000ULL
 #define HEAP_MAX_PERCENT 50
-#define HEAP_MAX_SEGMENTS 64
+#define HEAP_MAX_SEGMENTS 256
+#define HEAP_GROW_MIN_PAGES 32
 #define HEAP_MAGIC 0x6E796F6E
 #define ALIGN_UP(x, a) (((x) + (a) - 1) & ~((size_t)(a) - 1))
 
@@ -53,10 +54,12 @@ static void coalesce(struct block_header *b) {
         b->next = b->next->next;
         if (b->next) b->next->prev = b;
     }
-    if (b->prev && b->prev->free) {
-        b->prev->size += sizeof(struct block_header) + b->size;
-        b->prev->next = b->next;
-        if (b->next) b->next->prev = b->prev;
+    while (b->prev && b->prev->free) {
+        struct block_header *p = b->prev;
+        p->size += sizeof(struct block_header) + b->size;
+        p->next = b->next;
+        if (b->next) b->next->prev = p;
+        b = p;
     }
 }
 
@@ -66,17 +69,23 @@ static void heap_trim(void) {
         struct block_header *tail = heap_tail();
         if (!tail || !tail->free) return;
 
-        uint8_t *bstart = (uint8_t *)tail;
-        uint8_t *bend = bstart + sizeof(struct block_header) + tail->size;
         vaddr_t seg_end = seg->vaddr + seg->pages * PAGE_SIZE;
 
-        if (bstart != (uint8_t *)seg->vaddr) return;
+        uint8_t *bstart = (uint8_t *)tail;
+        uint8_t *bend = bstart + sizeof(struct block_header) + tail->size;
+
         if (bend != (uint8_t *)seg_end) return;
 
-        if (tail->prev) {
-            tail->prev->next = NULL;
+        if (bstart > (uint8_t *)seg->vaddr) return;
+
+        if (bstart < (uint8_t *)seg->vaddr) {
+            tail->size -= seg->pages * PAGE_SIZE;
         } else {
-            heap_head = NULL;
+            if (tail->prev) {
+                tail->prev->next = NULL;
+            } else {
+                heap_head = NULL;
+            }
         }
 
         vmm_unmap(seg->vaddr, seg->pages);
@@ -91,10 +100,14 @@ static bool heap_grow(size_t min_extra) {
     if (min_extra == 0) return false;
 
     size_t needed = ALIGN_UP(min_extra, PAGE_SIZE);
-    size_t pages = needed / PAGE_SIZE;
+
+    size_t chunk = needed;
+    if (chunk < HEAP_GROW_MIN_PAGES * PAGE_SIZE) chunk = HEAP_GROW_MIN_PAGES * PAGE_SIZE;
+
+    size_t pages = chunk / PAGE_SIZE;
     if (pages == 0) return false;
 
-    if (heap_committed + needed > heap_max_bytes) return false;
+    if (heap_committed + chunk > heap_max_bytes) return false;
     if (segment_count >= HEAP_MAX_SEGMENTS) return false;
 
     paddr_t phys;
@@ -114,7 +127,7 @@ static bool heap_grow(size_t min_extra) {
     struct block_header *tail = heap_tail();
 
     struct block_header *new_block = (struct block_header *)vaddr;
-    new_block->size = needed - sizeof(struct block_header);
+    new_block->size = chunk - sizeof(struct block_header);
     new_block->free = true;
     new_block->magic = HEAP_MAGIC;
     new_block->next = NULL;
@@ -126,7 +139,7 @@ static bool heap_grow(size_t min_extra) {
         heap_head = new_block;
     }
 
-    heap_committed += needed;
+    heap_committed += chunk;
     return true;
 }
 

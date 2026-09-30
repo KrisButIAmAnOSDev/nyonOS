@@ -9,11 +9,6 @@
 #define LOCK_CACHELINE 64
 #define LOCK_MAX_DEPTH 8
 
-// Global lock order, outermost first. A lock may only be acquired if no
-// lock to its left is currently held. Derived from the call graph:
-//   heap_grow -> vmm_map + pmm_alloc
-//   vmm walk  -> alloc_page_table -> pmm_alloc
-//   task_spawn-> pmm_alloc
 typedef enum {
     LOCK_NONE = 0,
     LOCK_SCHED,

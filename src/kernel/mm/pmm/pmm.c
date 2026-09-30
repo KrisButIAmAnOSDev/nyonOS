@@ -32,7 +32,7 @@ static bool bitmap_test(size_t bit) {
 static size_t bitmap_find_free(size_t count) {
     size_t consecutive = 0;
     size_t start = 0;
-    
+
     for (size_t i = 0; i < total_pages; i++) {
         if (!bitmap_test(i)) {
             if (consecutive == 0) start = i;
@@ -55,11 +55,11 @@ void pmm_init(struct limine_memmap_response *memmap, uint64_t hhdm_offset) {
             if (end > max_addr) max_addr = end;
         }
     }
-    
+
     total_pages = (max_addr + PAGE_SIZE - 1) / PAGE_SIZE;
     bitmap_pages = (total_pages + 63) / 64;
     size_t bitmap_size = bitmap_pages * 8;
-    
+
     paddr_t bitmap_phys = 0;
     for (size_t i = 0; i < memmap->entry_count; i++) {
         struct limine_memmap_entry *entry = memmap->entries[i];
@@ -70,30 +70,30 @@ void pmm_init(struct limine_memmap_response *memmap, uint64_t hhdm_offset) {
             break;
         }
     }
-    
+
     if (!bitmap_phys) {
         kprintf(PRINT_SERIAL, "PMM: No space for bitmap!\n");
         for (;;) __asm__ volatile("hlt");
     }
-    
+
     pmm_bitmap = (uint64_t *)(pmm_hhdm_offset + bitmap_phys);
-    
+
     for (size_t i = 0; i < bitmap_pages; i++) {
         pmm_bitmap[i] = ~0ULL;
     }
-    
+
     pmm_region_count = 0;
     for (size_t i = 0; i < memmap->entry_count; i++) {
         struct limine_memmap_entry *entry = memmap->entries[i];
         if (entry->type == LIMINE_MEMMAP_USABLE && entry->length >= PAGE_SIZE) {
             paddr_t base = (entry->base + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
             size_t pages = (entry->base + entry->length - base) / PAGE_SIZE;
-            
+
             if (pages > 0 && pmm_region_count < MAX_REGIONS) {
                 pmm_regions[pmm_region_count++] = (struct pmm_region){
                     .base = base, .pages = pages, .used = false
                 };
-                
+
                 size_t start_page = base / PAGE_SIZE;
                 for (size_t j = 0; j < pages; j++) {
                     bitmap_clear(start_page + j);
@@ -102,7 +102,7 @@ void pmm_init(struct limine_memmap_response *memmap, uint64_t hhdm_offset) {
             }
         }
     }
-    
+
     kprintf(PRINT_SERIAL, "PMM: Init done. Total: ");
     char buf[24];
     size_t t = total_pages;
