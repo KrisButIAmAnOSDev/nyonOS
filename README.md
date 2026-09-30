@@ -5,11 +5,11 @@ A minimal x86_64 hobby OS kernel written from scratch. Boots via Limine on BIOS/
 ## Features
 
 - **Limine boot protocol** (revision 6) - works on BIOS and UEFI
-- **Higher-half kernel** at `0xffffffff80000000` with ELF64 entry point `kmain`
+- **Mutitasking (premitive)** with synchronization too
 - **VGA framebuffer rendering** with 8x16 font (from `kbd` package, GPL-2.0)
 - **Serial debug output** (COM1, 115200 8N1)
 - **PIT timer** (channel 0, mode 2 rate generator) at 1000 Hz driving IRQ0`
-- **Working pmm and vmm** it works,at least
+- **Working pmm and vmm** it works,at least (and 5lvl paging)
 - **"working"** keyboard dirver (ps/2)
 
 ## Building
