@@ -61,22 +61,9 @@ void pic_send_eoi(uint8_t irq) {
     outb(PIC1_CMD, PIC_EOI);
 }
 
-void pic_set_mask(uint8_t irq) {
-    uint16_t port = (irq < 8) ? PIC1_DATA : PIC2_DATA;
-    uint8_t irq_num = irq % 8;
-    uint8_t mask = inb(port) | (1 << irq_num);
-    outb(port, mask);
-}
-
 void pic_clear_mask(uint8_t irq) {
     uint16_t port = (irq < 8) ? PIC1_DATA : PIC2_DATA;
     uint8_t irq_num = irq % 8;
     uint8_t mask = inb(port) & ~(1 << irq_num);
     outb(port, mask);
-}
-
-void pic_disable(void) {
-    outb(PIC1_DATA, 0xFF);
-    outb(PIC2_DATA, 0xFF);
-    kprintf(PRINT_SERIAL, "PIC disabled\n");
 }

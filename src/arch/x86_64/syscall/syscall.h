@@ -12,8 +12,6 @@
 #define SYS_WRITE 1
 #define SYS_EXIT  2
 
-#define SYS_OK        0
-#define SYS_EBADF    (-9)
 #define SYS_EFAULT  (-14)
 #define SYS_EINVAL  (-22)
 #define SYS_ENOSYS  (-38)

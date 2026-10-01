@@ -19,6 +19,5 @@ struct tss {
 void tss_init(uint64_t hhdm_offset);
 void tss_set_rsp0(uint64_t rsp);
 uint64_t tss_addr(void);
-uint64_t tss_get_ist(int index);
 
 #endif

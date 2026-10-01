@@ -2,8 +2,15 @@
 #include "io/kprintf/kprintf.h"
 #include "io/serial/serial.h"
 #include "kernel/panic/panic.h"
+#include "kernel/multitask/task.h"
 #include "arch/x86_64/pic/pic.h"
 #include "arch/x86_64/pit/pit.h"
+
+static inline uint64_t read_cr2(void) {
+    uint64_t cr2;
+    __asm__ volatile("mov %%cr2, %0" : "=r"(cr2));
+    return cr2;
+}
 
 struct idt_entry idt[IDT_SIZE];
 struct idtr idtr;
@@ -79,6 +86,30 @@ void irq_dispatch(struct isr_frame* frame) {
     else spurious_irq_count++;
 }
 
+static int exception_signal(uint64_t vector) {
+    switch (vector) {
+        case 0:  return 8;
+        case 6:  return 4;
+        case 8:
+        case 13:
+        case 14: return 11;
+        default: return 4;
+    }
+}
+
 void exception_handler(struct isr_frame* frame) {
+
+    if ((frame->cs & 3) == 3) {
+        struct task *t = task_current();
+        const char *name = t && t->name ? t->name : "ring3";
+        uint64_t vector = frame->interrupt_number;
+        int signal = exception_signal(vector);
+
+        kprintf(PRINT_BOTH, "\ntask %s killed by CPU exception, vector 0x%llx\n", name, (unsigned long long)vector);
+        kprintf(PRINT_BOTH, "  faulting rip=0x%llx err=0x%llx cr2=0x%llx signal=%d\n", (unsigned long long)frame->rip, (unsigned long long)frame->error_code, (unsigned long long)read_cr2(), signal);
+
+        task_exit_code(128 + signal);
+    }
+
     panic("CPU Exception", frame);
 }

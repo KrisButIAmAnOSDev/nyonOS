@@ -4,6 +4,7 @@
 #include "kernel/usermode.h"
 #include "kernel/mm/vmm/vmm.h"
 #include "kernel/multitask/task.h"
+#include "kernel/sync/preempt.h"
 
 extern void isr_stub_syscall(void);
 
@@ -21,16 +22,23 @@ static uint64_t sys_write(struct isr_frame *f) {
     if (f->cs & 3) {
         if (!user_range_ok((uint64_t)buf, len)) return SYS_EFAULT;
 
-        if (!vmm_range_present((vaddr_t)buf, (size_t)len)) return SYS_EFAULT;
+        struct page_table *pml4 = task_current_pml4();
+        if (pml4 && !vmm_range_present_in(pml4, (vaddr_t)buf, (size_t)len)) return SYS_EFAULT;
     }
 
-    kprintf(KATTR(dest, color), "%.*s", (int)len, (const char *)buf);
+    uint32_t attr = KATTR(dest, color);
+
+    preempt_disable();
+    for (uint64_t i = 0; i < len; i++) {
+        kprintchar(buf[i], attr);
+    }
+    preempt_enable();
+
     return len;
 }
 
 static uint64_t sys_exit(struct isr_frame *f) {
-    (void)f;
-    task_exit();
+    task_exit_code(f->rdi);
     for (;;) __asm__ volatile("hlt");
     __builtin_unreachable();
 }

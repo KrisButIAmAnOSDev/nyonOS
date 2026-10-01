@@ -91,7 +91,7 @@ void pmm_init(struct limine_memmap_response *memmap, uint64_t hhdm_offset) {
 
             if (pages > 0 && pmm_region_count < MAX_REGIONS) {
                 pmm_regions[pmm_region_count++] = (struct pmm_region){
-                    .base = base, .pages = pages, .used = false
+                    .base = base, .pages = pages
                 };
 
                 size_t start_page = base / PAGE_SIZE;
@@ -201,4 +201,3 @@ void pmm_free(paddr_t addr, size_t pages) {
 
 size_t pmm_total_pages(void) { return total_pages; }
 size_t pmm_free_pages(void) { return free_pages; }
-size_t pmm_used_pages(void) { return total_pages - free_pages; }

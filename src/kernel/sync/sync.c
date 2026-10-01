@@ -21,17 +21,8 @@ void sync_init(void) {
     preempt_init();
 }
 
-uint32_t sync_held_mask(void) {
-    return held_mask;
-}
-
 uint32_t sync_lock_depth(void) {
     return lock_depth;
-}
-
-void sync_set_held(uint32_t mask, uint32_t depth) {
-    held_mask = mask;
-    lock_depth = depth;
 }
 
 void spin_lock(spinlock_t *l) {
@@ -46,15 +37,6 @@ void spin_lock(spinlock_t *l) {
 void spin_unlock(spinlock_t *l) {
     atomic_flag_clear_explicit(&l->f, memory_order_release);
     preempt_enable();
-}
-
-bool spin_trylock(spinlock_t *l) {
-    preempt_disable();
-    if (atomic_flag_test_and_set_explicit(&l->f, memory_order_acquire)) {
-        preempt_enable();
-        return false;
-    }
-    return true;
 }
 
 static void lock_panic(const char *what, lock_id_t a, lock_id_t b) {

@@ -38,11 +38,17 @@ paddr_t vmm_virt_to_phys(vaddr_t vaddr);
 uint64_t vmm_query(vaddr_t vaddr);
 bool vmm_is_mapped(vaddr_t vaddr);
 bool vmm_range_present(vaddr_t addr, size_t len);
-struct page_table *vmm_create_address_space(void);
-void vmm_switch_address_space(struct page_table *pml4);
-void vmm_invlpg(vaddr_t vaddr);
 
-static inline bool vmm_is_5level(void) { return vmm_5level; }
+struct page_table *vmm_create_address_space(void);
+void vmm_destroy_address_space(struct page_table *pml4);
+void vmm_switch_address_space(struct page_table *pml4);
+
+bool vmm_map_user(struct page_table *root, vaddr_t vaddr, paddr_t paddr, size_t pages, uint64_t flags);
+bool vmm_unmap_from(struct page_table *root, vaddr_t vaddr, size_t pages);
+
+bool vmm_is_user_present_in(struct page_table *root, vaddr_t addr, size_t len);
+bool vmm_range_present_in(struct page_table *root, vaddr_t addr, size_t len);
+bool vmm_is_mapped_in(struct page_table *root, vaddr_t vaddr);
 
 #define VMM_DEFAULT_FLAGS (PAGE_PRESENT | PAGE_WRITE | PAGE_GLOBAL)
 #define VMM_USER_FLAGS (PAGE_PRESENT | PAGE_WRITE | PAGE_USER)

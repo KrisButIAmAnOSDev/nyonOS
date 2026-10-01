@@ -24,18 +24,14 @@ typedef struct {
 } spinlock_t;
 
 #define SPINLOCK_INIT { ATOMIC_FLAG_INIT, {0} }
-#define DEFINE_SPINLOCK(name) spinlock_t name = SPINLOCK_INIT
 
 void spin_lock(spinlock_t *l);
 void spin_unlock(spinlock_t *l);
-bool spin_trylock(spinlock_t *l);
 
 void lock_acquire(lock_id_t id, spinlock_t *l);
 void lock_release(lock_id_t id, spinlock_t *l);
 
-uint32_t sync_held_mask(void);
 uint32_t sync_lock_depth(void);
-void sync_set_held(uint32_t mask, uint32_t depth);
 void sync_init(void);
 
 const char *lock_name(lock_id_t id);

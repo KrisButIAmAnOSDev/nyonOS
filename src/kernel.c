@@ -47,6 +47,68 @@ static volatile uint64_t limine_requests_start_marker[] = LIMINE_REQUESTS_START_
 __attribute__((used, section(".limine_requests_end")))
 static volatile uint64_t limine_requests_end_marker[] = LIMINE_REQUESTS_END_MARKER;
 
+extern uint8_t user_test_entry[];
+
+static void validate_spawn(vaddr_t entry_rip, size_t code_bytes, size_t code_pages) {
+    paddr_t code_phys, results_phys;
+
+    if (!pmm_alloc(&code_phys, code_pages) || !pmm_alloc(&results_phys, 1)) {
+        kprintf(PRINT_SERIAL, "SYSCALL test: alloc failed\n");
+        return;
+    }
+
+    volatile uint8_t *dst = (volatile uint8_t *)(vmm_hhdm_offset + code_phys);
+    for (size_t i = 0; i < code_bytes; i++) dst[i] = user_test_entry[i];
+
+    volatile uint64_t *res = (volatile uint64_t *)(vmm_hhdm_offset + results_phys);
+    for (int i = 0; i < 10; i++) res[i] = 0xdeadbeefdeadbeefULL;
+
+    struct task *t = task_spawn_ring3("ring3validate", code_phys, code_pages, TASK_USER_CODE_VIRT, entry_rip, results_phys, 0x60000000ULL);
+    if (!t) {
+        pmm_free(code_phys, code_pages);
+        pmm_free(results_phys, 1);
+        kprintf(PRINT_SERIAL, "SYSCALL test: spawn failed\n");
+        return;
+    }
+
+    for (int i = 0; i < 300 && res[9] == 0xdeadbeefdeadbeefULL; i++) pit_sleep(10);
+
+    if (res[9] == 0xdeadbeefdeadbeefULL) {
+        kprintf(PRINT_SERIAL, "SYSCALL test: validation task never reported\n");
+        pmm_free(code_phys, code_pages);
+        pmm_free(results_phys, 1);
+        return;
+    }
+
+    int64_t expect[9] = { 4, SYS_EINVAL, SYS_EINVAL, SYS_EINVAL, SYS_EFAULT, SYS_EFAULT, SYS_EFAULT, SYS_EFAULT, SYS_ENOSYS };
+    const char *what[9] = {
+        "valid write returns byte count",
+        "bad destination rejected",
+        "null buffer rejected",
+        "zero length rejected",
+        "kernel pointer rejected",
+        "unmapped user pointer rejected",
+        "range running past mapped page rejected",
+        "page boundary straddling the user stack rejected",
+        "unknown syscall number rejected"
+    };
+
+    int bad = 0;
+    for (int i = 0; i < 9; i++) {
+        int64_t got = (int64_t)res[i];
+        if (got == expect[i]) continue;
+        bad++;
+        kprintf(PRINT_SERIAL, "  %s: got %lld expected %lld\n", what[i], (long long)got, (long long)expect[i]);
+    }
+
+    kprintf(PRINT_SERIAL, "SYSCALL test: ring 3 write validation, %d of 9 correct: ", 9 - bad);
+    kprintchar(bad == 0 ? 'Y' : 'N', PRINT_SERIAL);
+    kprintchar('\n', PRINT_SERIAL);
+
+    pmm_free(code_phys, code_pages);
+    pmm_free(results_phys, 1);
+}
+
 static void busy_wait_ms(uint64_t ms) {
     uint64_t start = pit_get_ticks();
     while (pit_get_ticks() - start < ms) __asm__ volatile("hlt");
@@ -341,25 +403,68 @@ void kmain(void) {
     kprintf(PRINT_SERIAL, "ululululululelelleelele uleeelle nyon -another kawkaw\n");
 
     {
-        extern uint8_t user_test_entry[];
+        extern uint8_t user_fault_entry[];
+        extern uint8_t user_validate_entry[];
         extern uint8_t user_test_end[];
 
-        paddr_t uphys;
-        vaddr_t uvirt = 0x0000000000400000ULL;
         size_t code_bytes = (size_t)(user_test_end - user_test_entry);
         size_t code_pages = (code_bytes + PAGE_SIZE - 1) / PAGE_SIZE;
+        vaddr_t fault_rip = TASK_USER_CODE_VIRT + (size_t)(user_fault_entry - user_test_entry);
+        vaddr_t validate_rip = TASK_USER_CODE_VIRT + (size_t)(user_validate_entry - user_test_entry);
 
-        if (pmm_alloc(&uphys, code_pages) && vmm_map(uvirt, uphys, code_pages, VMM_USER_FLAGS)) {
-            volatile uint8_t *dst = (volatile uint8_t *)(uvirt);
-            for (size_t i = 0; i < code_bytes; i++) dst[i] = user_test_entry[i];
-            task_spawn_ring3("ring3", uvirt);
-        } else {
-            kprintf(PRINT_SERIAL, "RING3 test: FAILED to map user code\n");
+        size_t free_before = pmm_free_pages();
+        int spawned = 0;
+
+        for (int i = 0; i < 2; i++) {
+            paddr_t uphys;
+            if (!pmm_alloc(&uphys, code_pages)) break;
+
+            volatile uint8_t *dst = (volatile uint8_t *)(vmm_hhdm_offset + uphys);
+            for (size_t k = 0; k < code_bytes; k++) dst[k] = user_test_entry[k];
+
+            if (!task_spawn_ring3("ring3", uphys, code_pages, TASK_USER_CODE_VIRT, TASK_USER_CODE_VIRT, 0, 0)) {
+                pmm_free(uphys, code_pages);
+                break;
+            }
+            spawned++;
         }
+
+        kprintf(PRINT_SERIAL, "RING3 test: spawned %d of 2 concurrent ring 3 tasks: ", spawned);
+        kprintchar(spawned == 2 ? 'Y' : 'N', PRINT_SERIAL);
+        kprintchar('\n', PRINT_SERIAL);
+
+        {
+            paddr_t uphys;
+            if (pmm_alloc(&uphys, code_pages)) {
+                volatile uint8_t *dst = (volatile uint8_t *)(vmm_hhdm_offset + uphys);
+                for (size_t k = 0; k < code_bytes; k++) dst[k] = user_test_entry[k];
+                if (!task_spawn_ring3("ring3fault", uphys, code_pages, TASK_USER_CODE_VIRT, fault_rip, 0, 0)) {
+                    pmm_free(uphys, code_pages);
+                    kprintf(PRINT_SERIAL, "RING3 test: fault task spawn FAILED\n");
+                } else {
+                    kprintf(PRINT_SERIAL, "RING3 test: fault task spawned\n");
+                }
+            } else {
+                kprintf(PRINT_SERIAL, "RING3 test: fault task alloc FAILED\n");
+            }
+        }
+
+        kprintf(PRINT_SERIAL, "RING3 test: free pages before=%u\n", (unsigned)free_before);
+
+        pit_sleep(800);
+
+        size_t free_after = pmm_free_pages();
+        kprintf(PRINT_SERIAL, "RING3 test: kernel survived the fault: ");
+        kprintchar(task_switch_count() > 0 ? 'Y' : 'N', PRINT_SERIAL);
+        kprintf(PRINT_SERIAL, "  free pages after=%u reclaimed: ", (unsigned)free_after);
+        kprintchar(free_after >= free_before ? 'Y' : 'N', PRINT_SERIAL);
+        kprintchar('\n', PRINT_SERIAL);
+
+        validate_spawn(validate_rip, code_bytes, code_pages);
     }
 
     for (;;) {
         keyboard_process_buffer();
-        __asm__ volatile("hlt");
+        task_block_current();
     }
 }

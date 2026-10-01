@@ -7,7 +7,7 @@
 #include "boot/limine/limine.h"
 #include <stddef.h>
 
-extern __attribute__((used, section(".limine_requests")))
+extern __attribute__((section(".limine_requests")))
 struct limine_framebuffer_request framebuffer_request;
 
 static const char* exception_names[32] = {

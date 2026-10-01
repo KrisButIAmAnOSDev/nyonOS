@@ -11,7 +11,7 @@ gdt_load:
     push 0x08
     lea rax, [rip + .reload_cs]
     push rax
-    lretq
+    retfq
 
 .reload_cs:
     mov ax, 0x10

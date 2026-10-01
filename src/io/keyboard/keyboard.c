@@ -1,14 +1,8 @@
 #include "keyboard.h"
 #include "io/kprintf/kprintf.h"
 #include "arch/x86_64/pic/pic.h"
-#include "io/serial/serial.h"
-#include "graphics/video/video.h"
-#include "graphics/font/font.h"
-#include "boot/limine/limine.h"
+#include "kernel/multitask/task.h"
 #include <stdbool.h>
-
-__attribute__((used, section(".limine_requests")))
-extern volatile struct limine_framebuffer_request framebuffer_request;
 
 static uint8_t keyboard_buffer[256];
 static size_t buffer_head = 0;
@@ -72,18 +66,7 @@ static const uint8_t scancode_set1_shift[] = {
 };
 
 static uint8_t scancode_to_ascii(uint8_t scancode) {
-    bool extended = false;
-    static bool extended_prev = false;
-
-    if (scancode == 0xE0) {
-        extended_prev = true;
-        return 0;
-    }
-
-    if (extended_prev) {
-        extended_prev = false;
-        extended = true;
-    }
+    if (scancode == 0xE0) return 0;
 
     if (scancode & 0x80) {
         uint8_t released = scancode & 0x7F;
@@ -113,67 +96,25 @@ void keyboard_handler(struct isr_frame *frame) {
     keyboard_wait_output();
     uint8_t scancode = inb(0x60);
     keyboard_buffer_push(scancode);
+
+    task_unblock_all();
 }
 
-static uint32_t cursor_x = 0;
-static uint32_t cursor_y = 0;
-static bool framebuffer_ready = false;
+bool keyboard_try_pop(char *out) {
+    uint8_t scancode;
+    if (!keyboard_buffer_pop(&scancode)) return false;
 
-static void put_char_fb(char c) {
-    if (!framebuffer_ready) return;
+    char c = (char)scancode_to_ascii(scancode);
+    if (!c) return false;
 
-    struct limine_framebuffer *fb = framebuffer_request.response->framebuffers[0];
-    volatile uint32_t *fb_ptr = (volatile uint32_t *)fb->address;
-    uint32_t width = fb->width;
-    uint32_t height = fb->height;
-
-    if (c == '\n') {
-        cursor_x = 0;
-        cursor_y += 16;
-    } else if (c == '\b') {
-        if (cursor_x >= 8) {
-            cursor_x -= 8;
-            draw_char(fb_ptr, ' ', cursor_x, cursor_y, 0x000000, width, height);
-        }
-    } else if (c >= 32 && c <= 126) {
-        draw_char(fb_ptr, c, cursor_x, cursor_y, 0xffffff, width, height);
-        cursor_x += 8;
-    }
-
-    if (cursor_x >= width - 8) {
-        cursor_x = 0;
-        cursor_y += 16;
-    }
-    if (cursor_y >= height - 16) {
-        cursor_y = 0;
-        for (uint32_t y = 0; y < height; y++) {
-            for (uint32_t x = 0; x < width; x++) {
-                fb_ptr[y * width + x] = 0x000000;
-            }
-        }
-    }
+    *out = c;
+    return true;
 }
 
 void keyboard_process_buffer(void) {
-    if (!framebuffer_ready) {
-        if (framebuffer_request.response && framebuffer_request.response->framebuffer_count > 0) {
-            framebuffer_ready = true;
-            cursor_x = 0;
-            cursor_y = 200;
-        }
-    }
-
-    uint8_t scancode;
-    while (keyboard_buffer_pop(&scancode)) {
-        kprintf(PRINT_SERIAL, "SC: 0x");
-        kprintchar("0123456789abcdef"[(scancode >> 4) & 0xf], PRINT_SERIAL);
-        kprintchar("0123456789abcdef"[scancode & 0xf], PRINT_SERIAL);
-        kprintf(PRINT_SERIAL, "\n");
-
-        uint8_t ascii = scancode_to_ascii(scancode);
-        if (ascii) {
-            put_char_fb(ascii);
-        }
+    char c;
+    while (keyboard_try_pop(&c)) {
+        kprintf(KATTR(PRINT_SCREEN, COLOR_WHITE), "%c", c);
     }
 }
 

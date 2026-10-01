@@ -4,10 +4,6 @@
 .extern irq_dispatch
 .extern keyboard_handler
 
-.global debug_str_isr
-debug_str_isr:
-    .asciz "isr_common called!\n"
-
 .macro ISR_NOERRCODE num
 .global isr_stub_\num
 isr_stub_\num:

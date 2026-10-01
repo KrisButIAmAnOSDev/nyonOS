@@ -34,8 +34,3 @@ void tss_set_rsp0(uint64_t rsp) {
 uint64_t tss_addr(void) {
     return (uint64_t)&tss;
 }
-
-uint64_t tss_get_ist(int index) {
-    if (index < 0 || index >= TSS_IST_COUNT) return 0;
-    return tss.ist[index];
-}

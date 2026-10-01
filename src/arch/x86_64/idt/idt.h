@@ -6,11 +6,9 @@
 
 #define IDT_SIZE 256
 
-#define IDT_FIRST_EXC 0
 #define IDT_FIRST_IRQ 32
 #define IRQ_COUNT 16
 
-#define IDT_ATTR_PRESENT 0x8E
 #define IDT_ATTR_DPL3 0xEE
 
 struct idt_entry {

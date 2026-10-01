@@ -58,6 +58,15 @@ static void screen_char(char c, uint32_t color) {
     if (!fb) return;
     if (c == '\n') { screen_newline(); return; }
     if (c == '\r') return;
+
+    if (c == '\b') {
+        if (cur_x >= home_x + GLYPH_W) {
+            cur_x -= GLYPH_W;
+            draw_char(fb, ' ', cur_x, cur_y, 0x000000, fb_w, fb_h);
+        }
+        return;
+    }
+
     if (c < 32 || c > 126) return;
 
     if (cur_x + GLYPH_W > fb_w) screen_newline();
