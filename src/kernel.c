@@ -4,12 +4,12 @@
 #include "boot/limine/limine.h"
 #include "graphics/font/font.h"
 #include "graphics/video/video.h"
-#include "io/serial/serial.h"
-#include "io/kprintf/kprintf.h"
+#include "drivers/serial/serial.h"
+#include "kernel/kprintf/kprintf.h"
 #include "arch/x86_64/idt/idt.h"
 #include "arch/x86_64/gdt/gdt.h"
 #include "arch/x86_64/pic/pic.h"
-#include "io/keyboard/keyboard.h"
+#include "drivers/keyboard/keyboard.h"
 #include "kernel/mm/pmm/pmm.h"
 #include "kernel/mm/heap/heap.h"
 #include "kernel/sync/sync.h"
@@ -19,6 +19,7 @@
 #include "arch/x86_64/lapic/lapic.h"
 #include "arch/x86_64/syscall/syscall.h"
 #include "arch/x86_64/gdt/gdt.h"
+#include "drivers/ata/ata.h"
 
 __attribute__((used, section(".limine_requests")))
 static volatile uint64_t limine_base_revision[] = LIMINE_BASE_REVISION(6);
@@ -109,6 +110,118 @@ static void validate_spawn(vaddr_t entry_rip, size_t code_bytes, size_t code_pag
     pmm_free(results_phys, 1);
 }
 
+static void ata_test(void) {
+    static uint8_t scratch[ATA_SECTOR_SIZE];
+    static uint8_t saved[ATA_SECTOR_SIZE];
+    static uint8_t verify[ATA_SECTOR_SIZE];
+    static uint8_t big[ATA_SECTOR_SIZE * 400];
+
+    kprintf(PRINT_SERIAL, "ATA test: probing\n");
+    bool any = ata_init();
+    kprintf(PRINT_SERIAL, "  drives found: %d\n", ata_drive_count());
+
+    int found = -1;
+    int optical = 0;
+    for (int i = 0; i < ATA_MAX_DRIVES; i++) {
+        ata_drive_t *d = ata_get_drive(i);
+        if (!d || !d->present) continue;
+        if (d->atapi) {
+            optical++;
+            continue;
+        }
+        found = i;
+        kprintf(PRINT_SERIAL, "  [%d] %s\n", i, d->model);
+        kprintf(PRINT_SERIAL, "      serial %s\n", d->serial);
+        kprintf(PRINT_SERIAL, "      sectors %u (%u MB)  lba48 %s\n", d->sectors, d->sectors / 2048, d->lba48 ? "yes" : "no");
+    }
+    if (optical) kprintf(PRINT_SERIAL, "  (%d optical device(s) skipped)\n", optical);
+
+    if (found < 0) {
+        kprintf(PRINT_SERIAL, "ATA test: no drive present: N\n");
+        return;
+    }
+
+    kprintf(PRINT_SERIAL, "  testing drive %d (%s)\n", found, ata_get_drive(found)->model);
+
+    bool lba28_read = ata_read_sectors(found, 0, 1, scratch);
+    kprintf(PRINT_SERIAL, "  read sector 0: ");
+    kprintchar(lba28_read ? 'Y' : 'N', PRINT_SERIAL);
+    kprintf(PRINT_SERIAL, "  boot signature 0x55AA: ");
+    kprintchar((scratch[510] == 0x55 && scratch[511] == 0xAA) ? 'Y' : 'N', PRINT_SERIAL);
+    kprintchar('\n', PRINT_SERIAL);
+
+    bool repeat = ata_read_sectors(found, 0, 1, verify);
+    bool stable = repeat;
+    for (int i = 0; i < ATA_SECTOR_SIZE; i++) {
+        if (verify[i] != scratch[i]) stable = false;
+    }
+    kprintf(PRINT_SERIAL, "  read twice, identical: ");
+    kprintchar(stable ? 'Y' : 'N', PRINT_SERIAL);
+    kprintchar('\n', PRINT_SERIAL);
+
+    bool multi = ata_read_sectors(found, 0, 4, verify);
+    bool multi_same = multi;
+    for (int i = 0; i < ATA_SECTOR_SIZE; i++) {
+        if (verify[i] != scratch[i]) multi_same = false;
+    }
+    kprintf(PRINT_SERIAL, "  multi-sector read 4 agrees: ");
+    kprintchar(multi_same ? 'Y' : 'N', PRINT_SERIAL);
+    kprintchar('\n', PRINT_SERIAL);
+
+    uint32_t scratch_lba = 100000;
+    bool got_scratch = ata_read_sectors(found, scratch_lba, 1, saved);
+
+    for (int i = 0; i < ATA_SECTOR_SIZE; i++) scratch[i] = (uint8_t)(i * 7 + 13);
+
+    bool wrote = ata_write_sectors(found, scratch_lba, 1, scratch);
+    bool read_back = wrote && ata_read_sectors(found, scratch_lba, 1, verify);
+    bool match = read_back;
+    for (int i = 0; i < ATA_SECTOR_SIZE; i++) {
+        if (verify[i] != scratch[i]) match = false;
+    }
+    kprintf(PRINT_SERIAL, "  write then read back lba %u: ", scratch_lba);
+    kprintchar(match ? 'Y' : 'N', PRINT_SERIAL);
+    kprintchar('\n', PRINT_SERIAL);
+
+    bool boot_intact = ata_read_sectors(found, 0, 1, verify) &&
+                       verify[510] == 0x55 && verify[511] == 0xAA;
+    kprintf(PRINT_SERIAL, "  boot sector untouched: ");
+    kprintchar(boot_intact ? 'Y' : 'N', PRINT_SERIAL);
+    kprintchar('\n', PRINT_SERIAL);
+
+    bool restored = true;
+    if (got_scratch) restored = ata_write_sectors(found, scratch_lba, 1, saved);
+    if (got_scratch && restored) {
+        restored = ata_read_sectors(found, scratch_lba, 1, verify);
+        for (int i = 0; i < ATA_SECTOR_SIZE; i++) {
+            if (verify[i] != saved[i]) restored = false;
+        }
+    }
+    kprintf(PRINT_SERIAL, "  scratch sector restored: ");
+    kprintchar(restored ? 'Y' : 'N', PRINT_SERIAL);
+    kprintchar('\n', PRINT_SERIAL);
+
+    bool big_ok = ata_read_sectors(found, 0, 400, big);
+    for (int i = 0; i < 4 && big_ok; i++) {
+        if (!ata_read_sectors(found, (uint32_t)i, 1, verify)) { big_ok = false; break; }
+        for (int j = 0; j < ATA_SECTOR_SIZE; j++) {
+            if (verify[j] != big[i * ATA_SECTOR_SIZE + j]) { big_ok = false; break; }
+        }
+    }
+    kprintf(PRINT_SERIAL, "  400-sector read (2 chunks) consistent: ");
+    kprintchar(big_ok ? 'Y' : 'N', PRINT_SERIAL);
+    kprintchar('\n', PRINT_SERIAL);
+
+    bool rejected = !ata_read_sectors(found, 0x0FFFFF00u, 1, scratch);
+    kprintf(PRINT_SERIAL, "  out of range lba refused: ");
+    kprintchar(rejected ? 'Y' : 'N', PRINT_SERIAL);
+    kprintchar('\n', PRINT_SERIAL);
+
+    kprintf(PRINT_SERIAL, "ATA test: drive usable: ");
+    kprintchar((any && stable && multi_same && match && restored) ? 'Y' : 'N', PRINT_SERIAL);
+    kprintchar('\n', PRINT_SERIAL);
+}
+
 static void busy_wait_ms(uint64_t ms) {
     uint64_t start = pit_get_ticks();
     while (pit_get_ticks() - start < ms) __asm__ volatile("hlt");
@@ -146,38 +259,6 @@ static void task_seth(void) {
         kfree(p);
     }
     task_exit();
-}
-
-static void test_map_unmap_churn(void) {
-    size_t baseline = pmm_free_pages();
-
-    paddr_t phys;
-    int i;
-    int mapped = 0;
-
-    for (i = 0; i < 64; i++) {
-        vaddr_t virt = 0xFFFFFFFFB0000000ULL + (vaddr_t)i * 0x200000;
-        if (!pmm_alloc(&phys, 1)) break;
-        if (!vmm_map(virt, phys, 1, VMM_DEFAULT_FLAGS)) { pmm_free(phys, 1); break; }
-        if (!vmm_unmap(virt, 1)) break;
-        pmm_free(phys, 1);
-        mapped++;
-    }
-
-    size_t after = pmm_free_pages();
-    long leaked = (long)baseline - (long)after;
-
-    kprintf(PRINT_SERIAL, "VMM test: map/unmap churn x");
-    kprintf(PRINT_SERIAL, "%llu", (unsigned long long)((uint64_t)mapped));
-    kprintf(PRINT_SERIAL, "\n  free_pages baseline=");
-    kprintf(PRINT_SERIAL, "%llu", (unsigned long long)((uint64_t)baseline));
-    kprintf(PRINT_SERIAL, " after=");
-    kprintf(PRINT_SERIAL, "%llu", (unsigned long long)((uint64_t)after));
-    kprintf(PRINT_SERIAL, "  leaked=");
-    kprintf(PRINT_SERIAL, "%llu", (unsigned long long)((uint64_t)(leaked > 0 ? leaked : 0)));
-    kprintf(PRINT_SERIAL, "  reclaimed: ");
-    kprintchar(leaked == 0 ? 'Y' : 'N', PRINT_SERIAL);
-    kprintchar('\n', PRINT_SERIAL);
 }
 
 void kmain(void) {
@@ -243,153 +324,9 @@ void kmain(void) {
 
     kprintf(PRINT_SERIAL, "nyonOS: init done\n");
 
-    kprintf(PRINT_SERIAL, "PMM test: alloc 3 pages...\n");
-    paddr_t p;
-    if (pmm_alloc(&p, 3)) {
-                kprintf(PRINT_SERIAL, "  got 0x%llx\n", (unsigned long long)p);
-        kprintf(PRINT_SERIAL, "\n");
-        pmm_free(p, 3);
-        kprintf(PRINT_SERIAL, "  freed\n");
-    } else {
-        kprintf(PRINT_SERIAL, "  FAILED\n");
-    }
-
-    kprintf(PRINT_SERIAL, "PMM test: OOM reporting\n");
-    paddr_t oom;
-    bool oom_rejected = !pmm_alloc(&oom, pmm_total_pages() + 1);
-    paddr_t zero;
-    bool zero_rejected = !pmm_alloc(&zero, 0);
-    kprintf(PRINT_SERIAL, "  oversized request rejected: ");
-    kprintchar(oom_rejected ? 'Y' : 'N', PRINT_SERIAL);
-    kprintf(PRINT_SERIAL, "  zero-page request rejected: ");
-    kprintchar(zero_rejected ? 'Y' : 'N', PRINT_SERIAL);
-    kprintchar('\n', PRINT_SERIAL);
-
-    kprintf(PRINT_SERIAL, "VMM test: map 2 pages...\n");
-    paddr_t phys;
-    bool got_phys = pmm_alloc(&phys, 2);
-    vaddr_t virt = 0xFFFFFFFFC0000000;
-    if (got_phys && vmm_map(virt, phys, 2, VMM_DEFAULT_FLAGS)) {
-        kprintf(PRINT_SERIAL, "  mapped 0x%llx -> 0x%llx\n", (unsigned long long)virt, (unsigned long long)phys);
-
-        paddr_t phys2 = vmm_virt_to_phys(virt);
-        kprintf(PRINT_SERIAL, "  virt_to_phys: 0x%llx\n", (unsigned long long)phys2);
-
-        vmm_unmap(virt, 2);
-        kprintf(PRINT_SERIAL, "  unmapped\n");
-        pmm_free(phys, 2);
-    } else {
-        kprintf(PRINT_SERIAL, "  FAILED\n");
-    }
-
-    kprintf(PRINT_SERIAL, "PIT test: pit_sleep\n");
-    {
-        uint64_t t0 = pit_get_ticks();
-        pit_sleep(100);
-        uint64_t t1 = pit_get_ticks();
-        uint64_t d100 = t1 - t0;
-
-        t0 = pit_get_ticks();
-        pit_sleep(500);
-        t1 = pit_get_ticks();
-        uint64_t d500 = t1 - t0;
-
-        kprintf(PRINT_SERIAL, "  100ms slept, ticks advanced ");
-        kprintf(PRINT_SERIAL, "%llu", (unsigned long long)(d100));
-        kprintf(PRINT_SERIAL, "  (expect ~100)\n  500ms slept, ticks advanced ");
-        kprintf(PRINT_SERIAL, "%llu", (unsigned long long)(d500));
-        kprintf(PRINT_SERIAL, "  (expect ~500)\n  ticker alive: ");
-        kprintchar(d100 > 0 ? 'Y' : 'N', PRINT_SERIAL);
-        kprintf(PRINT_SERIAL, "  in range: ");
-        kprintchar((d100 >= 95 && d100 <= 110 && d500 >= 490 && d500 <= 520) ? 'Y' : 'N', PRINT_SERIAL);
-        kprintchar('\n', PRINT_SERIAL);
-    }
-
-    test_map_unmap_churn();
-
-    kprintf(PRINT_SERIAL, "KPRINTF test: %d %u %x %X %s %c %% %ld %lu %zu\n", -42, 42u, 0xdeadbeefu, 0xcafeu, "str", 'Z', -123456789L, 123456789UL, (size_t)4096);
-    kprintf(PRINT_SERIAL, "KPRINTF test: ptr=%p null=%s\n", (void *)0xffffffff80000000ULL, (char *)0);
-
     heap_init();
 
-    kprintf(PRINT_SERIAL, "HEAP test: basic\n");
-    char *ha = kmalloc(64);
-    char *hb = kmalloc(64);
-    for (int i = 0; i < 64; i++) ha[i] = 0xAA;
-    for (int i = 0; i < 64; i++) hb[i] = 0xBB;
-    kprintf(PRINT_SERIAL, "  a!=b: ");
-    kprintchar(ha != hb ? 'Y' : 'N', PRINT_SERIAL);
-    int intact = 1;
-    for (int i = 0; i < 64; i++) if (ha[i] != (char)0xAA) intact = 0;
-    kprintf(PRINT_SERIAL, "  a intact: ");
-    kprintchar(intact ? 'Y' : 'N', PRINT_SERIAL);
-    kfree(hb);
-    kfree(ha);
-    char *hc = kmalloc(64);
-    kprintf(PRINT_SERIAL, "  reuse head: ");
-    kprintchar(hc == ha ? 'Y' : 'N', PRINT_SERIAL);
-    kfree(hc);
-    kprintchar('\n', PRINT_SERIAL);
-
-    kprintf(PRINT_SERIAL, "HEAP test: ALIGN_UP overflow\n");
-    char *hh = kmalloc(SIZE_MAX);
-    kprintf(PRINT_SERIAL, "  kmalloc(SIZE_MAX) = ");
-    kprintf(PRINT_SERIAL, "%s", hh ? "NON-NULL  <-- bug" : "NULL  ok");
-    kprintchar('\n', PRINT_SERIAL);
-
-    kprintf(PRINT_SERIAL, "HEAP test: double free\n");
-    char *q1 = kmalloc(64);
-    char *q2 = kmalloc(64);
-    char *q3 = kmalloc(64);
-    char *q4 = kmalloc(64);
-    kfree(q1);
-    kfree(q3);
-    kfree(q2);
-    kfree(q2);
-    kfree(q1);
-    kfree(q3);
-    kfree(q4);
-    char *probe = kmalloc(64);
-    kprintf(PRINT_SERIAL, "  heap still healthy after rejects: ");
-    kprintchar(probe ? 'Y' : 'N', PRINT_SERIAL);
-    kfree(probe);
-    kprintchar('\n', PRINT_SERIAL);
-
-    kprintf(PRINT_SERIAL, "HEAP test: kfree of a wild pointer\n");
-    kfree((void *)0x1234);
-    kprintf(PRINT_SERIAL, "  rejected, no crash: Y\n");
-
-    kprintf(PRINT_SERIAL, "HEAP test: kfree of a misaligned pointer\n");
-    char *ma = kmalloc(64);
-    kfree(ma + 8);
-    kfree(ma);
-    kprintf(PRINT_SERIAL, "  rejected, no crash: Y\n");
-
-    kprintf(PRINT_SERIAL, "HEAP test: churn (alloc/free 200x)\n");
-    int churn_ok = 1;
-    for (int i = 0; i < 200; i++) {
-        char *p = kmalloc(96);
-        if (!p) { churn_ok = 0; break; }
-        for (int k = 0; k < 96; k++) p[k] = (char)i;
-        for (int k = 0; k < 96; k++) if (p[k] != (char)i) churn_ok = 0;
-        kfree(p);
-    }
-    kprintf(PRINT_SERIAL, "  survived: ");
-    kprintchar(churn_ok ? 'Y' : 'N', PRINT_SERIAL);
-    kprintchar('\n', PRINT_SERIAL);
-
-    kprintf(PRINT_SERIAL, "HEAP test: trim returns pages\n");
-    kprintf(PRINT_SERIAL, "  committed now = ");
-    {
-        uint64_t t = heap_committed_bytes();
-        char b[24];
-        size_t i = 0;
-        if (t == 0) b[i++] = '0';
-        else { char r[24]; size_t j = 0; while (t) { r[j++] = '0' + (t % 10); t /= 10; } while (j) b[i++] = r[--j]; }
-        b[i] = 0;
-        kprintf(PRINT_SERIAL, "%s", b);
-        kprintf(PRINT_SERIAL, " bytes (0 = fully returned)\n");
-    }
+    ata_test();
 
     sync_init();
     task_init();

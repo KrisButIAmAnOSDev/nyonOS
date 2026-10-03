@@ -1,8 +1,8 @@
 #include "kernel/panic/panic.h"
 #include "kernel/multitask/task.h"
 #include "kernel/mm/vmm/vmm.h"
-#include "io/serial/serial.h"
-#include "io/kprintf/kprintf.h"
+#include "drivers/serial/serial.h"
+#include "kernel/kprintf/kprintf.h"
 #include "graphics/video/video.h"
 #include "boot/limine/limine.h"
 #include <stddef.h>

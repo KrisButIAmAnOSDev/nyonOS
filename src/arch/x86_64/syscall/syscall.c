@@ -1,5 +1,5 @@
 #include "syscall.h"
-#include "io/kprintf/kprintf.h"
+#include "kernel/kprintf/kprintf.h"
 #include "kernel/panic/panic.h"
 #include "kernel/usermode.h"
 #include "kernel/mm/vmm/vmm.h"

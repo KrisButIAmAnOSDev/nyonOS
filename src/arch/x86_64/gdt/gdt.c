@@ -1,7 +1,7 @@
 #include "gdt.h"
 #include "tss.h"
-#include "io/serial/serial.h"
-#include "io/kprintf/kprintf.h"
+#include "drivers/serial/serial.h"
+#include "kernel/kprintf/kprintf.h"
 #include <stddef.h>
 
 static uint8_t gdt[GDT_ENTRIES * 8];

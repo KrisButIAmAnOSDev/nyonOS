@@ -2,3 +2,4 @@ bin/
 obj/
 nyonOS.img
 qemu.log
+fat16.img

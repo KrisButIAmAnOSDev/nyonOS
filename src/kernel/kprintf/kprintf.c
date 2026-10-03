@@ -1,6 +1,6 @@
 #include "kprintf.h"
 #include <stdbool.h>
-#include "io/serial/serial.h"
+#include "drivers/serial/serial.h"
 #include "graphics/video/video.h"
 #include "kernel/sync/preempt.h"
 

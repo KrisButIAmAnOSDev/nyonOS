@@ -1,6 +1,6 @@
 #include "idt.h"
-#include "io/kprintf/kprintf.h"
-#include "io/serial/serial.h"
+#include "kernel/kprintf/kprintf.h"
+#include "drivers/serial/serial.h"
 #include "kernel/panic/panic.h"
 #include "kernel/multitask/task.h"
 #include "arch/x86_64/pic/pic.h"

@@ -1,6 +1,6 @@
 #include "tss.h"
-#include "io/kprintf/kprintf.h"
-#include "io/serial/serial.h"
+#include "kernel/kprintf/kprintf.h"
+#include "drivers/serial/serial.h"
 #include "kernel/mm/pmm/pmm.h"
 
 static struct tss tss;

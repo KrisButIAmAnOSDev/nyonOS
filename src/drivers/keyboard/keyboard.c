@@ -1,5 +1,5 @@
 #include "keyboard.h"
-#include "io/kprintf/kprintf.h"
+#include "kernel/kprintf/kprintf.h"
 #include "arch/x86_64/pic/pic.h"
 #include "kernel/multitask/task.h"
 #include <stdbool.h>

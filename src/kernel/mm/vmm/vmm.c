@@ -1,7 +1,7 @@
 #include "vmm.h"
-#include "io/kprintf/kprintf.h"
+#include "kernel/kprintf/kprintf.h"
 #include "kernel/mm/pmm/pmm.h"
-#include "io/serial/serial.h"
+#include "drivers/serial/serial.h"
 #include "kernel/sync/sync.h"
 
 static spinlock_t vmm_lock = SPINLOCK_INIT;
@@ -231,49 +231,12 @@ bool vmm_range_present_in(struct page_table *root, vaddr_t addr, size_t len) {
     return true;
 }
 
-bool vmm_range_present(vaddr_t addr, size_t len) {
-    return vmm_range_present_in(kernel_pml4, addr, len);
-}
-
-paddr_t vmm_virt_to_phys(vaddr_t vaddr) {
-    uint64_t *entry = walk_page_table(kernel_pml4, vaddr, vmm_5level ? 5 : 4, false, 0);
-    if (!entry || !(*entry & PAGE_PRESENT)) return 0;
-    return (*entry & 0x000FFFFFFFFFF000ULL) | (vaddr & (PAGE_SIZE - 1));
-}
-
 uint64_t vmm_query(vaddr_t vaddr) {
     uint64_t *entry = walk_page_table(kernel_pml4, vaddr, vmm_5level ? 5 : 4, false, 0);
     if (!entry) return 0;
     return *entry;
 }
 
-bool vmm_is_mapped_in(struct page_table *root, vaddr_t vaddr) {
-    uint64_t *entry = walk_page_table(root, vaddr, vmm_5level ? 5 : 4, false, 0);
-    return entry && (*entry & PAGE_PRESENT);
-}
-
-bool vmm_is_mapped(vaddr_t vaddr) {
-    return vmm_is_mapped_in(kernel_pml4, vaddr);
-}
-
-bool vmm_is_user_present_in(struct page_table *root, vaddr_t addr, size_t len) {
-    if (len == 0) return false;
-    if (addr > VMM_HIGHER_HALF) return false;
-    if (len > VMM_HIGHER_HALF - addr) return false;
-
-    vaddr_t first = addr & ~(vaddr_t)(PAGE_SIZE - 1);
-    vaddr_t last = (addr + len - 1) & ~(vaddr_t)(PAGE_SIZE - 1);
-
-    int levels = vmm_5level ? 5 : 4;
-
-    for (vaddr_t v = first; v <= last; v += PAGE_SIZE) {
-        uint64_t *entry = walk_page_table(root, v, levels, false, 0);
-        if (!entry) return false;
-        if (!(*entry & PAGE_PRESENT)) return false;
-    }
-
-    return true;
-}
 
 static bool table_freeable(struct page_table *table, int level) {
     if (table_is_empty(table)) return true;

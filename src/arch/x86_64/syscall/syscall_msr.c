@@ -1,6 +1,6 @@
 
 #include "syscall_msr.h"
-#include "io/kprintf/kprintf.h"
+#include "kernel/kprintf/kprintf.h"
 #include "arch/x86_64/gdt/gdt.h"
 
 extern void syscall_entry(void);

@@ -1,9 +1,9 @@
 #include "heap.h"
-#include "io/kprintf/kprintf.h"
+#include "kernel/kprintf/kprintf.h"
 #include "kernel/mm/vmm/vmm.h"
 #include "kernel/mm/pmm/pmm.h"
 #include "kernel/sync/sync.h"
-#include "io/serial/serial.h"
+#include "drivers/serial/serial.h"
 
 #define HEAP_VIRT_BASE 0xFFFFFFFFD0000000ULL
 #define HEAP_MAX_PERCENT 50
@@ -250,6 +250,3 @@ void kfree(void *ptr) {
     }
 }
 
-uint64_t heap_committed_bytes(void) {
-    return heap_committed;
-}

@@ -1,6 +1,6 @@
 #include "arch/x86_64/pic/pic.h"
-#include "io/kprintf/kprintf.h"
-#include "io/serial/serial.h"
+#include "kernel/kprintf/kprintf.h"
+#include "drivers/serial/serial.h"
 
 static inline void outb(uint16_t port, uint8_t val) {
     __asm__ volatile("outb %0, %1" : : "a"(val), "Nd"(port));
@@ -59,6 +59,13 @@ void pic_remap(uint8_t offset1, uint8_t offset2) {
 void pic_send_eoi(uint8_t irq) {
     if (irq >= 8) outb(PIC2_CMD, PIC_EOI);
     outb(PIC1_CMD, PIC_EOI);
+}
+
+void pic_set_mask(uint8_t irq) {
+    uint16_t port = (irq < 8) ? PIC1_DATA : PIC2_DATA;
+    uint8_t irq_num = irq % 8;
+    uint8_t mask = inb(port) | (1 << irq_num);
+    outb(port, mask);
 }
 
 void pic_clear_mask(uint8_t irq) {

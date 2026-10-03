@@ -46,10 +46,10 @@ run:
 	$(MAKE) clean
 	$(MAKE) kernel
 	./build.sh
-	qemu-system-x86_64 -drive format=raw,file=nyonOS.img -d int,cpu_reset -D qemu.log -serial stdio -no-reboot -k en-us
+	qemu-system-x86_64 -drive format=raw,file=nyonOS.img -drive format=raw,file=fat16.img -d int,cpu_reset -D qemu.log -serial stdio -no-reboot -k en-us
 
 run-ihatedisplay: image
-	qemu-system-x86_64 -drive format=raw,file=nyonOS.img -d int,cpu_reset -D qemu.log -serial stdio -no-reboot -k en-us -display none
+	qemu-system-x86_64 -drive format=raw,file=nyonOS.img -drive format=raw,file=fat16.img -d int,cpu_reset -D qemu.log -serial stdio -no-reboot -k en-us -display none
 
 clean:
 	rm -rf bin obj

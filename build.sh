@@ -16,6 +16,11 @@ fi
 echo "Creating bootable disk image..."
 dd if=/dev/zero bs=1M count=64 of=nyonOS.img
 
+if [ ! -f fat16.img ]; then
+    dd if=/dev/zero bs=1M count=64 of=fat16.img
+    mformat -i fat16.img -T 131072 -h 64 -s 32 ::
+fi
+
 PATH=$PATH:/usr/sbin:/sbin sgdisk nyonOS.img -n 1:2048 -t 1:ef00 -m 1
 
 mformat -i nyonOS.img@@1M -T 126976 -h 64 -s 32 ::
@@ -35,4 +40,4 @@ mcopy -i nyonOS.img@@1M /tmp/limine-binary/BOOTIA32.EFI ::/EFI/BOOT/
 /tmp/limine-binary/limine bios-install nyonOS.img
 
 echo "=== Build Complete ==="
-echo "Boot with: qemu-system-x86_64 -drive format=raw,file=nyonOS.img"
+echo "Boot with: qemu-system-x86_64 -drive format=raw,file=nyonOS.img -drive format=raw,file=fat16.img"

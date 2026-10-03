@@ -1,10 +1,10 @@
 #include "arch/x86_64/pit/pit.h"
-#include "io/kprintf/kprintf.h"
+#include "kernel/kprintf/kprintf.h"
 #include "arch/x86_64/idt/idt.h"
 #include "kernel/multitask/task.h"
 #include "kernel/sync/preempt.h"
 #include "arch/x86_64/pic/pic.h"
-#include "io/serial/serial.h"
+#include "drivers/serial/serial.h"
 
 static volatile uint64_t pit_ticks = 0;
 static uint32_t pit_frequency = 0;

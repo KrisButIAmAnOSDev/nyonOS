@@ -1,7 +1,7 @@
 #include "sync.h"
-#include "io/kprintf/kprintf.h"
+#include "kernel/kprintf/kprintf.h"
 #include "kernel/panic/panic.h"
-#include "io/serial/serial.h"
+#include "drivers/serial/serial.h"
 
 static uint32_t held_mask = 0;
 static uint32_t lock_depth = 0;

@@ -42,7 +42,6 @@ void task_schedule(struct isr_frame *frame);
 void task_exit(void);
 void task_exit_code(uint64_t code);
 void task_block_current(void);
-void task_unblock(struct task *t);
 void task_unblock_all(void);
 struct task *task_current(void);
 struct page_table *task_current_pml4(void);

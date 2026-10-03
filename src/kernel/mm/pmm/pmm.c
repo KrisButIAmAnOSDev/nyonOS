@@ -1,6 +1,6 @@
 #include "pmm.h"
-#include "io/kprintf/kprintf.h"
-#include "io/serial/serial.h"
+#include "kernel/kprintf/kprintf.h"
+#include "drivers/serial/serial.h"
 #include "kernel/sync/sync.h"
 
 #define MAX_REGIONS 128

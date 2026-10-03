@@ -1,6 +1,6 @@
 #include "task.h"
-#include "io/kprintf/kprintf.h"
-#include "io/serial/serial.h"
+#include "kernel/kprintf/kprintf.h"
+#include "drivers/serial/serial.h"
 #include "kernel/sync/sync.h"
 #include "kernel/panic/panic.h"
 #include "kernel/mm/pmm/pmm.h"
@@ -379,15 +379,6 @@ void task_block_current(void) {
     }
 }
 
-void task_unblock(struct task *t) {
-    if (!t) return;
-
-    __asm__ volatile("cli" ::: "memory");
-
-    lock_acquire(LOCK_SCHED, &sched_lock);
-    t->blocked = false;
-    lock_release(LOCK_SCHED, &sched_lock);
-}
 
 void task_unblock_all(void) {
     __asm__ volatile("cli" ::: "memory");
