@@ -17,6 +17,7 @@
 #define PAGE_HUGE       (1ULL << 7)
 #define PAGE_GLOBAL     (1ULL << 8)
 #define PAGE_NX         (1ULL << 63)
+#define PAGE_OWNED      (1ULL << 9)
 
 extern uint64_t vmm_hhdm_offset;
 #define VMM_HIGHER_HALF 0xFFFF800000000000

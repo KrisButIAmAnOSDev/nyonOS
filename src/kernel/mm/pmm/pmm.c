@@ -33,15 +33,29 @@ static size_t bitmap_find_free(size_t count) {
     size_t consecutive = 0;
     size_t start = 0;
 
-    for (size_t i = 0; i < total_pages; i++) {
-        if (!bitmap_test(i)) {
-            if (consecutive == 0) start = i;
+    for (size_t i = 0; i < total_pages; i += 64) {
+        uint64_t word = pmm_bitmap[i / 64];
+
+        size_t remaining = total_pages - i;
+        if (remaining < 64) word |= ~((1ULL << remaining) - 1);
+
+        uint64_t avail = ~word;
+        if (!avail) {
+            consecutive = 0;
+            continue;
+        }
+
+        while (avail) {
+            size_t page = i + (size_t)__builtin_ctzll(avail);
+
+            if (consecutive == 0) start = page;
             consecutive++;
             if (consecutive == count) return start;
-        } else {
-            consecutive = 0;
+
+            avail &= avail - 1;
         }
     }
+
     return SIZE_MAX;
 }
 

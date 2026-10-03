@@ -60,8 +60,11 @@ static int level_shift(int level) {
 }
 
 static bool table_is_empty(struct page_table *pt) {
-    for (size_t i = 0; i < VMM_PT_ENTRIES; i++) {
-        if (pt->entries[i]) return false;
+    const uint64_t *e = pt->entries;
+    for (size_t i = 0; i < VMM_PT_ENTRIES; i += 8) {
+        uint64_t any = e[i] | e[i + 1] | e[i + 2] | e[i + 3] |
+                       e[i + 4] | e[i + 5] | e[i + 6] | e[i + 7];
+        if (any) return false;
     }
     return true;
 }
@@ -151,12 +154,12 @@ static bool vmm_map_in(struct page_table *root, vaddr_t vaddr, paddr_t paddr, si
     for (size_t i = 0; i < pages; i++) {
         uint64_t *entry = walk_page_table(root, vaddr + i * PAGE_SIZE, levels, true, flags);
         if (!entry) {
-            reclaim_range(root, vaddr, pages, levels);
+            reclaim_range(root, vaddr, i + 1, levels);
             lock_release(LOCK_VMM, &vmm_lock);
             return false;
         }
         if (*entry & PAGE_PRESENT) {
-            reclaim_range(root, vaddr, pages, levels);
+            reclaim_range(root, vaddr, i + 1, levels);
             lock_release(LOCK_VMM, &vmm_lock);
             return false;
         }
@@ -284,7 +287,7 @@ struct page_table *vmm_create_address_space(void) {
 }
 
 bool vmm_map_user(struct page_table *root, vaddr_t vaddr, paddr_t paddr, size_t pages, uint64_t flags) {
-    return vmm_map_in(root, vaddr, paddr, pages, flags | PAGE_USER);
+    return vmm_map_in(root, vaddr, paddr, pages, flags | PAGE_USER | PAGE_OWNED);
 }
 
 bool vmm_unmap_from(struct page_table *root, vaddr_t vaddr, size_t pages) {
@@ -295,6 +298,25 @@ void vmm_switch_address_space(struct page_table *pml4) {
     __asm__ volatile("mov %0, %%cr3" :: "r"((uint64_t)pml4 - vmm_hhdm_offset) : "memory");
 }
 
+static void reclaim_owned_frames(struct page_table *table, int level, uint32_t *freed) {
+    for (size_t i = 0; i < VMM_PT_ENTRIES; i++) {
+        uint64_t entry = table->entries[i];
+        if (!(entry & PAGE_PRESENT)) continue;
+
+        if (level == 1) {
+            if (entry & PAGE_OWNED) {
+                pmm_free(entry & VMM_PT_ADDR_MASK, 1);
+                (*freed)++;
+            }
+            table->entries[i] = 0;
+            continue;
+        }
+
+        struct page_table *child = (struct page_table *)(vmm_hhdm_offset + (entry & VMM_PT_ADDR_MASK));
+        reclaim_owned_frames(child, level - 1, freed);
+    }
+}
+
 void vmm_destroy_address_space(struct page_table *pml4) {
     if (!pml4) return;
 
@@ -302,21 +324,35 @@ void vmm_destroy_address_space(struct page_table *pml4) {
 
     lock_acquire(LOCK_VMM, &vmm_lock);
 
+    size_t stranded = 0;
+    uint32_t freed = 0;
+
     for (size_t i = 0; i < 256; i++) {
         uint64_t entry = pml4->entries[i];
         if (!(entry & PAGE_PRESENT)) continue;
 
         struct page_table *table = (struct page_table *)(vmm_hhdm_offset + (entry & VMM_PT_ADDR_MASK));
 
-        if (table_freeable(table, levels - 1)) {
-            table_free(table, levels - 1);
+        reclaim_owned_frames(table, levels - 1, &freed);
+
+        if (!table_freeable(table, levels - 1)) {
+            stranded++;
+            continue;
         }
 
+        table_free(table, levels - 1);
+
         pml4->entries[i] = 0;
-        invlpg((vaddr_t)(i << 39));
+        invlpg((vaddr_t)i << level_shift(levels));
     }
 
-    pmm_free((paddr_t)((uint64_t)pml4 - vmm_hhdm_offset), 1);
+    if (stranded) {
+        kprintf(PRINT_SERIAL, "VMM: %u subtree(s) still referenced, address space not released\n", (unsigned)stranded);
+    } else {
+        pmm_free((paddr_t)((uint64_t)pml4 - vmm_hhdm_offset), 1);
+    }
 
     lock_release(LOCK_VMM, &vmm_lock);
+
+    if (freed) kprintf(PRINT_SERIAL, "VMM: address space released, %u frame(s) reclaimed\n", (unsigned)freed);
 }

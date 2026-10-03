@@ -36,29 +36,26 @@ struct heap_segment {
 };
 
 static struct block_header *heap_head = NULL;
+static struct block_header *heap_tail_block = NULL;
 static struct heap_segment segments[HEAP_MAX_SEGMENTS];
 static size_t segment_count = 0;
 static uint64_t heap_committed = 0;
 static uint64_t heap_max_bytes = 0;
 
-static struct block_header *heap_tail(void) {
-    struct block_header *b = heap_head;
-    if (!b) return NULL;
-    while (b->next) b = b->next;
-    return b;
-}
-
 static void coalesce(struct block_header *b) {
     while (b->next && b->next->free) {
-        b->size += sizeof(struct block_header) + b->next->size;
-        b->next = b->next->next;
+        struct block_header *n = b->next;
+        b->size += sizeof(struct block_header) + n->size;
+        b->next = n->next;
         if (b->next) b->next->prev = b;
+        if (n == heap_tail_block) heap_tail_block = b;
     }
     while (b->prev && b->prev->free) {
         struct block_header *p = b->prev;
         p->size += sizeof(struct block_header) + b->size;
         p->next = b->next;
         if (b->next) b->next->prev = p;
+        if (b == heap_tail_block) heap_tail_block = p;
         b = p;
     }
 }
@@ -66,7 +63,7 @@ static void coalesce(struct block_header *b) {
 static void heap_trim(void) {
     while (segment_count > 0) {
         struct heap_segment *seg = &segments[segment_count - 1];
-        struct block_header *tail = heap_tail();
+        struct block_header *tail = heap_tail_block;
         if (!tail || !tail->free) return;
 
         vaddr_t seg_end = seg->vaddr + seg->pages * PAGE_SIZE;
@@ -76,16 +73,14 @@ static void heap_trim(void) {
 
         if (bend != (uint8_t *)seg_end) return;
 
-        if (bstart > (uint8_t *)seg->vaddr) return;
+        if (bstart != (uint8_t *)seg->vaddr) return;
 
-        if (bstart < (uint8_t *)seg->vaddr) {
-            tail->size -= seg->pages * PAGE_SIZE;
+        if (tail->prev) {
+            tail->prev->next = NULL;
+            heap_tail_block = tail->prev;
         } else {
-            if (tail->prev) {
-                tail->prev->next = NULL;
-            } else {
-                heap_head = NULL;
-            }
+            heap_head = NULL;
+            heap_tail_block = NULL;
         }
 
         vmm_unmap(seg->vaddr, seg->pages);
@@ -124,7 +119,7 @@ static bool heap_grow(size_t min_extra) {
     segments[segment_count].pages = pages;
     segment_count++;
 
-    struct block_header *tail = heap_tail();
+    struct block_header *tail = heap_tail_block;
 
     struct block_header *new_block = (struct block_header *)vaddr;
     new_block->size = chunk - sizeof(struct block_header);
@@ -138,6 +133,7 @@ static bool heap_grow(size_t min_extra) {
     } else {
         heap_head = new_block;
     }
+    heap_tail_block = new_block;
 
     heap_committed += chunk;
     return true;
@@ -145,6 +141,7 @@ static bool heap_grow(size_t min_extra) {
 
 void heap_init(void) {
     heap_head = NULL;
+    heap_tail_block = NULL;
     segment_count = 0;
     heap_committed = 0;
 
@@ -173,6 +170,7 @@ static void split_block(struct block_header *b, size_t size) {
     if (b->next) b->next->prev = new_block;
     b->next = new_block;
     b->size = size;
+    if (b == heap_tail_block) heap_tail_block = new_block;
 }
 
 static void *kmalloc_locked(size_t size) {

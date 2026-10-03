@@ -20,6 +20,8 @@
 #include "arch/x86_64/syscall/syscall.h"
 #include "arch/x86_64/gdt/gdt.h"
 #include "drivers/ata/ata.h"
+#include "kernel/block/block.h"
+#include "kernel/fs/fs.h"
 
 __attribute__((used, section(".limine_requests")))
 static volatile uint64_t limine_base_revision[] = LIMINE_BASE_REVISION(6);
@@ -110,115 +112,173 @@ static void validate_spawn(vaddr_t entry_rip, size_t code_bytes, size_t code_pag
     pmm_free(results_phys, 1);
 }
 
-static void ata_test(void) {
-    static uint8_t scratch[ATA_SECTOR_SIZE];
-    static uint8_t saved[ATA_SECTOR_SIZE];
-    static uint8_t verify[ATA_SECTOR_SIZE];
-    static uint8_t big[ATA_SECTOR_SIZE * 400];
+static bool mount_first_fat(int *out_drive) {
+    static block_device_t whole;
+    static mbr_entry_t ents[BLOCK_MAX_PARTITIONS];
+    static partition_t part;
 
-    kprintf(PRINT_SERIAL, "ATA test: probing\n");
-    bool any = ata_init();
-    kprintf(PRINT_SERIAL, "  drives found: %d\n", ata_drive_count());
-
-    int found = -1;
-    int optical = 0;
     for (int i = 0; i < ATA_MAX_DRIVES; i++) {
         ata_drive_t *d = ata_get_drive(i);
-        if (!d || !d->present) continue;
-        if (d->atapi) {
-            optical++;
-            continue;
-        }
-        found = i;
-        kprintf(PRINT_SERIAL, "  [%d] %s\n", i, d->model);
-        kprintf(PRINT_SERIAL, "      serial %s\n", d->serial);
-        kprintf(PRINT_SERIAL, "      sectors %u (%u MB)  lba48 %s\n", d->sectors, d->sectors / 2048, d->lba48 ? "yes" : "no");
-    }
-    if (optical) kprintf(PRINT_SERIAL, "  (%d optical device(s) skipped)\n", optical);
+        if (!d || !d->present || d->atapi) continue;
+        if (!block_bind_ata(&whole, i)) continue;
 
-    if (found < 0) {
-        kprintf(PRINT_SERIAL, "ATA test: no drive present: N\n");
+        int nparts = mbr_parse(&whole, ents, BLOCK_MAX_PARTITIONS);
+        block_device_t *target = &whole;
+        bool via_part = false;
+
+        for (int p = 0; p < nparts; p++) {
+            if (!mbr_is_fat(ents[p].type)) continue;
+            if (!partition_init(&part, &whole, ents[p].start_lba, ents[p].sector_count)) continue;
+            target = &part.dev;
+            via_part = true;
+            break;
+        }
+
+        if (!fs_mount(target)) continue;
+
+        *out_drive = i;
+        kprintf(PRINT_SERIAL, "  drive %d: %d mbr entries, mounted %s\n",
+                i, nparts, via_part ? "FAT partition" : "whole device");
+        return true;
+    }
+
+    return false;
+}
+
+static char txt_byte(uint32_t i) {
+    static const char head[] = "that my jarona";
+    uint32_t hl = sizeof(head) - 1;
+    if (i < hl) return head[i];
+    return '.';
+}
+
+static void fs_test(void) {
+    static char buf[4096] __attribute__((aligned(4)));
+    static uint8_t bigbuf[4096] __attribute__((aligned(4)));
+    static const char inner_expect[] = "inner payload\n";
+
+    kprintf(PRINT_SERIAL, "FS test: probing disks for a FAT volume\n");
+
+    int drv = -1;
+    if (!mount_first_fat(&drv)) {
+        kprintf(PRINT_SERIAL, "  no FAT volume found\n");
         return;
     }
 
-    kprintf(PRINT_SERIAL, "  testing drive %d (%s)\n", found, ata_get_drive(found)->model);
-
-    bool lba28_read = ata_read_sectors(found, 0, 1, scratch);
-    kprintf(PRINT_SERIAL, "  read sector 0: ");
-    kprintchar(lba28_read ? 'Y' : 'N', PRINT_SERIAL);
-    kprintf(PRINT_SERIAL, "  boot signature 0x55AA: ");
-    kprintchar((scratch[510] == 0x55 && scratch[511] == 0xAA) ? 'Y' : 'N', PRINT_SERIAL);
+    bool m = true;
+    kprintf(PRINT_SERIAL, "  mounted: ");
+    kprintchar(m ? 'Y' : 'N', PRINT_SERIAL);
     kprintchar('\n', PRINT_SERIAL);
+    if (!m) return;
 
-    bool repeat = ata_read_sectors(found, 0, 1, verify);
-    bool stable = repeat;
-    for (int i = 0; i < ATA_SECTOR_SIZE; i++) {
-        if (verify[i] != scratch[i]) stable = false;
+    fs_volume_t *f = fs_get();
+    kprintf(PRINT_SERIAL, "  %s label '%s' bpbsig '%s'\n", fs_fat_name(f->cluster_count), f->label, f->fs_type);
+    kprintf(PRINT_SERIAL, "  bytes/sector %u sectors/cluster %u fats %u root entries %u\n",
+            f->bytes_per_sector, f->sectors_per_cluster, f->fat_count, f->root_entry_count);
+    kprintf(PRINT_SERIAL, "  total sectors %u sectors/fat %u data_start %u clusters %u\n",
+            f->total_sectors, f->sectors_per_fat, f->data_start, f->cluster_count);
+
+    fs_node_t root;
+    if (!fs_lookup("/", &root)) {
+        kprintf(PRINT_SERIAL, "  root node: N\n");
+        return;
     }
-    kprintf(PRINT_SERIAL, "  read twice, identical: ");
-    kprintchar(stable ? 'Y' : 'N', PRINT_SERIAL);
-    kprintchar('\n', PRINT_SERIAL);
 
-    bool multi = ata_read_sectors(found, 0, 4, verify);
-    bool multi_same = multi;
-    for (int i = 0; i < ATA_SECTOR_SIZE; i++) {
-        if (verify[i] != scratch[i]) multi_same = false;
+    uint32_t n = 0;
+    fs_node_t e;
+    while (n < 8 && fs_iterate(&root, n, &e)) {
+        kprintf(PRINT_SERIAL, "  [%u] %s %s cluster %u size %u\n", n, e.name, e.is_dir ? "DIR" : "FILE", e.cluster, e.size);
+        n++;
     }
-    kprintf(PRINT_SERIAL, "  multi-sector read 4 agrees: ");
-    kprintchar(multi_same ? 'Y' : 'N', PRINT_SERIAL);
+    kprintf(PRINT_SERIAL, "  root entries listed: %u\n", n);
+
+    fs_node_t file;
+    bool got = fs_lookup("/TEST.TXT", &file);
+    kprintf(PRINT_SERIAL, "  lookup /TEST.TXT: ");
+    kprintchar(got ? 'Y' : 'N', PRINT_SERIAL);
     kprintchar('\n', PRINT_SERIAL);
+    if (!got) return;
 
-    uint32_t scratch_lba = 100000;
-    bool got_scratch = ata_read_sectors(found, scratch_lba, 1, saved);
-
-    for (int i = 0; i < ATA_SECTOR_SIZE; i++) scratch[i] = (uint8_t)(i * 7 + 13);
-
-    bool wrote = ata_write_sectors(found, scratch_lba, 1, scratch);
-    bool read_back = wrote && ata_read_sectors(found, scratch_lba, 1, verify);
-    bool match = read_back;
-    for (int i = 0; i < ATA_SECTOR_SIZE; i++) {
-        if (verify[i] != scratch[i]) match = false;
+    uint32_t read = fs_node_read_all(&file, bigbuf, sizeof(bigbuf));
+    bool size_ok = read == file.size && read == 3000;
+    bool content_ok = size_ok;
+    for (uint32_t i = 0; content_ok && i < read; i++) {
+        if (bigbuf[i] != (uint8_t)txt_byte(i)) content_ok = false;
     }
-    kprintf(PRINT_SERIAL, "  write then read back lba %u: ", scratch_lba);
-    kprintchar(match ? 'Y' : 'N', PRINT_SERIAL);
+    kprintf(PRINT_SERIAL, "  size %u (dir says %u): ", read, file.size);
+    kprintchar(size_ok ? 'Y' : 'N', PRINT_SERIAL);
+    kprintf(PRINT_SERIAL, "  content matches: ");
+    kprintchar(content_ok ? 'Y' : 'N', PRINT_SERIAL);
     kprintchar('\n', PRINT_SERIAL);
 
-    bool boot_intact = ata_read_sectors(found, 0, 1, verify) &&
-                       verify[510] == 0x55 && verify[511] == 0xAA;
-    kprintf(PRINT_SERIAL, "  boot sector untouched: ");
-    kprintchar(boot_intact ? 'Y' : 'N', PRINT_SERIAL);
+    uint32_t shown = read < 20 ? read : 20;
+    kprintf(PRINT_SERIAL, "  contents: ");
+    for (uint32_t i = 0; i < shown; i++) kprintchar((char)bigbuf[i], PRINT_SERIAL);
+    if (read > shown) kprintf(PRINT_SERIAL, "... (%u bytes total)", read);
     kprintchar('\n', PRINT_SERIAL);
 
-    bool restored = true;
-    if (got_scratch) restored = ata_write_sectors(found, scratch_lba, 1, saved);
-    if (got_scratch && restored) {
-        restored = ata_read_sectors(found, scratch_lba, 1, verify);
-        for (int i = 0; i < ATA_SECTOR_SIZE; i++) {
-            if (verify[i] != saved[i]) restored = false;
-        }
+    uint32_t clus_size = (uint32_t)fs_get()->sectors_per_cluster * fs_get()->bytes_per_sector;
+    char edge[16];
+    bool edge_ok = fs_node_read(&file, clus_size - 4, edge, 16);
+    for (int i = 0; edge_ok && i < 16; i++) {
+        if ((uint8_t)edge[i] != (uint8_t)txt_byte(clus_size - 4 + (uint32_t)i)) edge_ok = false;
     }
-    kprintf(PRINT_SERIAL, "  scratch sector restored: ");
-    kprintchar(restored ? 'Y' : 'N', PRINT_SERIAL);
+    kprintf(PRINT_SERIAL, "  spans %u clusters, boundary read: ", (read + clus_size - 1) / clus_size);
+    kprintchar(edge_ok ? 'Y' : 'N', PRINT_SERIAL);
     kprintchar('\n', PRINT_SERIAL);
 
-    bool big_ok = ata_read_sectors(found, 0, 400, big);
-    for (int i = 0; i < 4 && big_ok; i++) {
-        if (!ata_read_sectors(found, (uint32_t)i, 1, verify)) { big_ok = false; break; }
-        for (int j = 0; j < ATA_SECTOR_SIZE; j++) {
-            if (verify[j] != big[i * ATA_SECTOR_SIZE + j]) { big_ok = false; break; }
-        }
+    char partial[8];
+    bool p1 = fs_node_read(&file, 5, partial, 4);
+    bool p2 = p1 && partial[0] == 'm' && partial[1] == 'y' && partial[2] == ' ' && partial[3] == 'j';
+    bool oob = !fs_node_read(&file, file.size, partial, 1);
+    bool missing = !fs_lookup("/NOPE.TXT", &e);
+    kprintf(PRINT_SERIAL, "  offset read of 'my j': ");
+    kprintchar(p2 ? 'Y' : 'N', PRINT_SERIAL);
+    kprintf(PRINT_SERIAL, "  read past eof refused: ");
+    kprintchar(oob ? 'Y' : 'N', PRINT_SERIAL);
+    kprintf(PRINT_SERIAL, "  missing file refused: ");
+    kprintchar(missing ? 'Y' : 'N', PRINT_SERIAL);
+    kprintchar('\n', PRINT_SERIAL);
+
+    fs_node_t sub;
+    bool got_sub = fs_lookup("/SUB", &sub) && sub.is_dir;
+    uint32_t sub_count = 0;
+    fs_node_t it;
+    while (got_sub && fs_iterate(&sub, sub_count, &it)) {
+        kprintf(PRINT_SERIAL, "    SUB[%u] %s %s %u\n", sub_count, it.name, it.is_dir ? "DIR" : "FILE", it.size);
+        sub_count++;
     }
-    kprintf(PRINT_SERIAL, "  400-sector read (2 chunks) consistent: ");
-    kprintchar(big_ok ? 'Y' : 'N', PRINT_SERIAL);
+    kprintf(PRINT_SERIAL, "  /SUB is a dir: ");
+    kprintchar(got_sub ? 'Y' : 'N', PRINT_SERIAL);
+    kprintf(PRINT_SERIAL, "  entries (dot skipped): %u\n", sub_count);
+
+    fs_node_t inner;
+    bool got_inner = fs_lookup("/SUB/INNER.TXT", &inner);
+    uint32_t inner_read = got_inner ? fs_node_read_all(&inner, buf, sizeof(buf)) : 0;
+    bool inner_ok = got_inner && inner_read == sizeof(inner_expect) - 1;
+    for (uint32_t i = 0; inner_ok && i < inner_read; i++) {
+        if (buf[i] != inner_expect[i]) inner_ok = false;
+    }
+    kprintf(PRINT_SERIAL, "  /SUB/INNER.TXT content: ");
+    kprintchar(inner_ok ? 'Y' : 'N', PRINT_SERIAL);
     kprintchar('\n', PRINT_SERIAL);
 
-    bool rejected = !ata_read_sectors(found, 0x0FFFFF00u, 1, scratch);
-    kprintf(PRINT_SERIAL, "  out of range lba refused: ");
-    kprintchar(rejected ? 'Y' : 'N', PRINT_SERIAL);
+    if (inner_read && inner_read < sizeof(buf)) {
+        buf[inner_read] = 0;
+        kprintf(PRINT_SERIAL, "  contents: %s\n", buf);
+    }
+
+    bool bad_path = !fs_lookup("/SUB/NOPE.TXT", &it) && !fs_lookup("/TESTTX.TXT", &it);
+    bool dir_read_refused = !fs_node_read(&sub, 0, buf, 16);
+    kprintf(PRINT_SERIAL, "  bad paths refused: ");
+    kprintchar(bad_path ? 'Y' : 'N', PRINT_SERIAL);
+    kprintf(PRINT_SERIAL, "  read on a directory refused: ");
+    kprintchar(dir_read_refused ? 'Y' : 'N', PRINT_SERIAL);
     kprintchar('\n', PRINT_SERIAL);
 
-    kprintf(PRINT_SERIAL, "ATA test: drive usable: ");
-    kprintchar((any && stable && multi_same && match && restored) ? 'Y' : 'N', PRINT_SERIAL);
+    kprintf(PRINT_SERIAL, "FS test: usable: ");
+    kprintchar((n == 2 && size_ok && content_ok && edge_ok && p2 && oob && missing &&
+                got_sub && sub_count == 1 && inner_ok && bad_path && dir_read_refused) ? 'Y' : 'N', PRINT_SERIAL);
     kprintchar('\n', PRINT_SERIAL);
 }
 
@@ -326,12 +386,14 @@ void kmain(void) {
 
     heap_init();
 
-    ata_test();
+    if (!ata_init()) kprintf(PRINT_SERIAL, "ATA: no drive found\n");
 
     sync_init();
     task_init();
     task_spawn("aqua", task_aqua);
     task_spawn("seth", task_seth);
+
+    fs_test();
 
     kprintf_clear();
     kprintf_home(0, 0);

@@ -17,8 +17,14 @@ echo "Creating bootable disk image..."
 dd if=/dev/zero bs=1M count=64 of=nyonOS.img
 
 if [ ! -f fat16.img ]; then
-    dd if=/dev/zero bs=1M count=64 of=fat16.img
-    mformat -i fat16.img -T 131072 -h 64 -s 32 ::
+    dd if=/dev/zero bs=1M count=128 of=fat16.img
+    printf 'label: dos\nunit: sectors\n\nstart=2048, type=0e, bootable\n' | sfdisk --no-reread --no-tell-kernel fat16.img >/dev/null
+    mformat -i fat16.img@@1M -T 260096 -h 64 -s 32 ::
+    awk 'BEGIN{printf "that my jarona"; for(i=0;i<2986;i++) printf "."}' > /tmp/nyonos-fs-test.txt
+    mcopy -i fat16.img@@1M /tmp/nyonos-fs-test.txt ::/TEST.TXT
+    mmd -i fat16.img@@1M ::/SUB
+    printf 'inner payload\n' > /tmp/nyonos-fs-inner.txt
+    mcopy -i fat16.img@@1M /tmp/nyonos-fs-inner.txt ::/SUB/INNER.TXT
 fi
 
 PATH=$PATH:/usr/sbin:/sbin sgdisk nyonOS.img -n 1:2048 -t 1:ef00 -m 1
