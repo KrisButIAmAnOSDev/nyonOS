@@ -1,25 +1,34 @@
 .intel_syntax noprefix
 
-.set SYS_WRITE,    1
-.set SYS_EXIT,     2
-.set SYS_OPEN,     3
-.set SYS_CLOSE,    4
-.set SYS_READ,     5
-.set SYS_FD_WRITE, 6
-.set SYS_LSEEK,    7
-.set SYS_DUP,      8
+.set SYS_READ,          1
+.set SYS_WRITE,         2
+.set SYS_PREAD,         3
+.set SYS_OPEN,          4
+.set SYS_CLOSE,         5
+.set SYS_LSEEK,         6
+.set SYS_DUP,           7
+.set SYS_FSTAT,         8
+.set SYS_ISATTY,       10
+.set SYS_STAT,         11
+.set SYS_EXIT,         16
+.set SYS_GETPID,       17
+.set SYS_SLEEP,        18
+.set SYS_CONSOLE_WRITE, 240
+.set SYS_DEBUG_PRINT,  241
 
 .set O_RDONLY,  1
 .set SEEK_SET,  0
 
-.set EBADF,  -9
-.set ENOENT, -2
-.set EFAULT, -14
-.set EISDIR, -21
+.set EBADF,    -9
+.set EPERM,    -1
+.set ENOENT,   -2
+.set EFAULT,  -14
+.set EISDIR,  -21
 
 .set RIGHT_READ, 1
 
 .set RES, 0x60000000
+.set WANT_SIZE, 3000
 
 .macro PASS n
     mov qword ptr [RES + \n*8], 1
@@ -55,16 +64,97 @@ user_zfd_entry:
     lea rsi, [rip + want]
     lea rdi, [rip + fdbuf]
     xor ecx, ecx
-.cmp_loop:
+.cmp_read:
     mov al, [rdi + rcx]
     cmp al, [rsi + rcx]
     jne .fail_content
     test al, al
-    jz .cmp_done
+    jz .cmp_read_done
     inc rcx
-    jmp .cmp_loop
-.cmp_done:
+    jmp .cmp_read
+.cmp_read_done:
     PASS 2
+
+    mov rax, SYS_PREAD
+    mov rdi, r12
+    lea rsi, [rip + fdbuf]
+    mov rdx, 14
+    mov r10, 0
+    int 0x80
+    cmp rax, 14
+    jne .fail_preadlen
+    PASS 16
+
+    lea rsi, [rip + want]
+    lea rdi, [rip + fdbuf]
+    xor ecx, ecx
+.cmp_pread:
+    mov al, [rdi + rcx]
+    cmp al, [rsi + rcx]
+    jne .fail_preadcontent
+    test al, al
+    jz .cmp_pread_done
+    inc ecx
+    jmp .cmp_pread
+.cmp_pread_done:
+    PASS 17
+
+    mov rax, SYS_FSTAT
+    mov rdi, r12
+    lea rsi, [rip + stbuf]
+    int 0x80
+    test rax, rax
+    jnz .fail_fstat
+    mov rax, [rip + stbuf]
+    cmp rax, WANT_SIZE
+    jne .fail_fstatsize
+    PASS 18
+
+    mov rax, SYS_STAT
+    lea rdi, [rip + path_test]
+    lea rsi, [rip + stbuf]
+    int 0x80
+    test rax, rax
+    jnz .fail_stat
+    mov rax, [rip + stbuf]
+    cmp rax, WANT_SIZE
+    jne .fail_statsize
+    PASS 19
+
+    mov rax, SYS_ISATTY
+    mov rdi, r12
+    int 0x80
+    cmp rax, 0
+    jne .fail_isattyfile
+    PASS 20
+
+    mov rax, SYS_ISATTY
+    mov rdi, 1
+    int 0x80
+    cmp rax, 1
+    jne .fail_isattytty
+    PASS 21
+
+    mov rax, SYS_GETPID
+    int 0x80
+    test rax, rax
+    jz .fail_getpid
+    PASS 22
+
+    mov rax, SYS_SLEEP
+    mov rdi, 1
+    int 0x80
+    test rax, rax
+    jnz .fail_sleep
+    PASS 23
+
+    mov rax, SYS_DEBUG_PRINT
+    lea rdi, [rip + msg_x]
+    mov rsi, 1
+    int 0x80
+    cmp rax, EPERM
+    jne .fail_dbgprint
+    PASS 24
 
     mov rax, SYS_LSEEK
     mov rdi, r12
@@ -89,7 +179,7 @@ user_zfd_entry:
     mov rsi, 999999
     mov rdx, SEEK_SET
     int 0x80
-    cmp rax, 3000
+    cmp rax, WANT_SIZE
     jne .fail_clampeof
     PASS 5
 
@@ -112,7 +202,7 @@ user_zfd_entry:
     js .fail_dup
     PASS 7
 
-    mov rax, SYS_FD_WRITE
+    mov rax, SYS_WRITE
     mov rdi, r14
     lea rsi, [rip + msg_x]
     mov rdx, 1
@@ -175,7 +265,7 @@ user_zfd_entry:
     jne .fail_efault
     PASS 14
 
-    mov rax, SYS_FD_WRITE
+    mov rax, SYS_WRITE
     mov rdi, 1
     lea rsi, [rip + msg_hello]
     mov rdx, 6
@@ -184,7 +274,7 @@ user_zfd_entry:
     jne .fail_stdout
     PASS 15
 
-    mov rax, SYS_WRITE
+    mov rax, SYS_CONSOLE_WRITE
     mov rdi, 2
     mov rsi, 0x00ffff
     lea rdx, [rip + msg_done]
@@ -197,29 +287,42 @@ user_zfd_entry:
     xor rdi, rdi
     int 0x80
 
-.fail_open:      FAIL 0
-.fail_readlen:   FAIL 1
-.fail_content:   FAIL 2
-.fail_seek:      FAIL 3
-.fail_reread:    FAIL 4
-.fail_clampeof:  FAIL 5
-.fail_eofzero:   FAIL 6
-.fail_dup:       FAIL 7
-.fail_rights:    FAIL 8
-.fail_close:     FAIL 9
-.fail_close2:    FAIL 10
-.fail_stale:     FAIL 10
-.fail_dblclose:  FAIL 11
-.fail_enoent:    FAIL 12
-.fail_eisdir:    FAIL 13
-.fail_efault:    FAIL 14
-.fail_stdout:    FAIL 15
+.fail_open:         FAIL 0
+.fail_readlen:      FAIL 1
+.fail_content:      FAIL 2
+.fail_seek:         FAIL 3
+.fail_reread:       FAIL 4
+.fail_clampeof:     FAIL 5
+.fail_eofzero:      FAIL 6
+.fail_dup:          FAIL 7
+.fail_rights:       FAIL 8
+.fail_close:        FAIL 9
+.fail_close2:       FAIL 10
+.fail_stale:        FAIL 10
+.fail_dblclose:     FAIL 11
+.fail_enoent:       FAIL 12
+.fail_eisdir:       FAIL 13
+.fail_efault:       FAIL 14
+.fail_stdout:       FAIL 15
+.fail_preadlen:     FAIL 16
+.fail_preadcontent: FAIL 17
+.fail_fstat:        FAIL 18
+.fail_fstatsize:    FAIL 18
+.fail_stat:         FAIL 19
+.fail_statsize:     FAIL 19
+.fail_isattyfile:   FAIL 20
+.fail_isattytty:    FAIL 21
+.fail_getpid:       FAIL 22
+.fail_sleep:        FAIL 23
+.fail_dbgprint:     FAIL 24
 
 report:
-    mov rax, SYS_FD_WRITE
-    mov rdi, 1
-    lea rsi, [rip + msg_fail]
-    mov rdx, 8
+    mov rax, SYS_CONSOLE_WRITE
+    mov rdi, 2
+    mov rsi, 0x00ffff
+    lea rdx, [rip + msg_fail]
+    lea r10, [rip + msg_fail_end]
+    sub r10, rdx
     int 0x80
 
     mov qword ptr [RES + 39*8], 2
@@ -230,6 +333,8 @@ report:
     .align 16
 fdbuf:
     .space 256
+stbuf:
+    .space 64
 
 path_test:
     .asciz "/TEST.TXT"
@@ -248,6 +353,7 @@ msg_done:
 msg_done_end:
 msg_fail:
     .ascii "fd FAIL\n"
+msg_fail_end:
 
 .size user_zfd_entry, . - user_zfd_entry
 

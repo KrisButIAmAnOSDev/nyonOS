@@ -1,7 +1,7 @@
 .intel_syntax noprefix
 
 .macro WRITE dest, colour, begin, end
-    mov rax, 1
+    mov rax, 240
     mov rdi, \dest
     mov rsi, \colour
     lea rdx, [rip + \begin]
@@ -11,7 +11,7 @@
 .endm
 
 .macro WRITE_LEN dest, colour, begin, length
-    mov rax, 1
+    mov rax, 240
     mov rdi, \dest
     mov rsi, \colour
     lea rdx, [rip + \begin]
@@ -25,7 +25,7 @@ user_test_entry:
 
     WRITE 2, 0x00ffff, msg, msg_end
 
-    mov rax, 2
+    mov rax, 16
     mov rdi, 0
     int 0x80
 
@@ -33,7 +33,7 @@ user_test_entry:
 .type user_validate_entry,@function
 user_validate_entry:
 
-    mov rax, 1
+    mov rax, 240
     mov rdi, 0
     mov rsi, 0xffffff
     lea rdx, [rip + vmsg]
@@ -42,7 +42,7 @@ user_validate_entry:
 
     mov qword ptr [0x60000000 + 0], rax
 
-    mov rax, 1
+    mov rax, 240
     mov rdi, 9
     mov rsi, 0xffffff
     lea rdx, [rip + vmsg]
@@ -51,7 +51,7 @@ user_validate_entry:
 
     mov qword ptr [0x60000000 + 8], rax
 
-    mov rax, 1
+    mov rax, 240
     mov rdi, 0
     mov rsi, 0xffffff
     xor rdx, rdx
@@ -60,7 +60,7 @@ user_validate_entry:
 
     mov qword ptr [0x60000000 + 16], rax
 
-    mov rax, 1
+    mov rax, 240
     mov rdi, 0
     mov rsi, 0xffffff
     lea rdx, [rip + vmsg]
@@ -69,7 +69,7 @@ user_validate_entry:
 
     mov qword ptr [0x60000000 + 24], rax
 
-    mov rax, 1
+    mov rax, 240
     mov rdi, 0
     mov rsi, 0xffffff
     mov rdx, 0xffffffff80000000
@@ -78,7 +78,7 @@ user_validate_entry:
 
     mov qword ptr [0x60000000 + 32], rax
 
-    mov rax, 1
+    mov rax, 240
     mov rdi, 0
     mov rsi, 0xffffff
     mov rdx, 0x10
@@ -87,7 +87,7 @@ user_validate_entry:
 
     mov qword ptr [0x60000000 + 40], rax
 
-    mov rax, 1
+    mov rax, 240
     mov rdi, 0
     mov rsi, 0xffffff
     lea rdx, [rip + vmsg]
@@ -96,7 +96,7 @@ user_validate_entry:
 
     mov qword ptr [0x60000000 + 48], rax
 
-    mov rax, 1
+    mov rax, 240
     mov rdi, 0
     mov rsi, 0xffffff
     mov rdx, 0x3fffffff
@@ -114,7 +114,7 @@ user_validate_entry:
 
     WRITE 2, 0x00ffff, vdone, vdone_end
 
-    mov rax, 2
+    mov rax, 16
     mov rdi, 0
     int 0x80
 
@@ -142,7 +142,7 @@ user_fault_entry:
     mov rax, 0
     mov rbx, [rax]
 
-    mov rax, 2
+    mov rax, 16
     mov rdi, 0
     int 0x80
 

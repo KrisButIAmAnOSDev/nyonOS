@@ -6,15 +6,16 @@
 #include "kernel/multitask/task.h"
 #include "kernel/sync/preempt.h"
 #include "kernel/fd/fd.h"
+#include "kernel/fs/fs.h"
+#include "arch/x86_64/pit/pit.h"
 
 extern void isr_stub_syscall(void);
 
-// ring-0 stack top for the SYSCALL entry stub; republished on every switch
 uint64_t syscall_kstack_top;
 
 typedef uint64_t (*syscall_handler_t)(struct isr_frame *f);
 
-static uint64_t sys_write(struct isr_frame *f) {
+static uint64_t sys_console_write(struct isr_frame *f) {
     uint32_t dest = (uint32_t)f->rdi;
     uint32_t color = (uint32_t)f->rsi;
     const char *buf = (const char *)f->rdx;
@@ -123,7 +124,7 @@ static uint64_t sys_read(struct isr_frame *f) {
     return (uint64_t)fd_read(t, (int)f->rdi, buf, len);
 }
 
-static uint64_t sys_fd_write(struct isr_frame *f) {
+static uint64_t sys_write(struct isr_frame *f) {
     struct task *t = task_current();
     if (!t) return SYS_ENOSYS;
 
@@ -149,15 +150,162 @@ static uint64_t sys_dup(struct isr_frame *f) {
     return (uint64_t)(int64_t)fd_dup(t, (int)f->rdi, rights);
 }
 
-static syscall_handler_t handlers[SYSCALL_NR_MAX] = {
-    [SYS_WRITE] = sys_write,
-    [SYS_EXIT] = sys_exit,
-    [SYS_OPEN] = sys_open,
-    [SYS_CLOSE] = sys_close,
-    [SYS_READ] = sys_read,
-    [SYS_FD_WRITE] = sys_fd_write,
-    [SYS_LSEEK] = sys_lseek,
-    [SYS_DUP] = sys_dup,
+static uint64_t sys_pread(struct isr_frame *f) {
+    struct task *t = task_current();
+    if (!t) return SYS_ENOSYS;
+
+    void *buf = (void *)(uintptr_t)f->rsi;
+    uint32_t len = (uint32_t)f->rdx;
+    int64_t off = (int64_t)f->r10;
+    if (len > SYS_MAX_IO) len = SYS_MAX_IO;
+    if (off < 0) return SYS_EINVAL;
+    if (!buf_writable(f, (uint64_t)(uintptr_t)buf, len)) return SYS_EFAULT;
+
+    struct kobject *o = fd_get_checked(t, (int)f->rdi, KOBJ_TYPE_ANY, FD_RIGHT_READ);
+    if (!o) return SYS_EBADF;
+    if (!o->ops || !o->ops->read_at) { kobject_put(o); return SYS_EBADF; }
+
+    int64_t r = o->ops->read_at(o, buf, len, (uint64_t)off);
+    kobject_put(o);
+    return (uint64_t)r;
+}
+
+static void fill_stat(struct sys_stat *out, const fs_node_t *n) {
+    out->size = n->size;
+    out->cluster = n->cluster;
+    out->attr = n->attr;
+    out->is_dir = n->is_dir ? 1 : 0;
+    for (unsigned i = 0; i < SYS_MAX_NAME; i++) out->name[i] = (i < FS_MAX_NAME) ? n->name[i] : 0;
+}
+
+static uint64_t sys_fstat(struct isr_frame *f) {
+    struct task *t = task_current();
+    if (!t) return SYS_ENOSYS;
+
+    struct sys_stat *out = (struct sys_stat *)(uintptr_t)f->rsi;
+    if (!buf_writable(f, (uint64_t)(uintptr_t)out, sizeof(*out))) return SYS_EFAULT;
+
+    struct kobject *o = fd_get_checked(t, (int)f->rdi, KOBJ_TYPE_ANY, FD_RIGHT_READ);
+    if (!o) return SYS_EBADF;
+    if (o->type != KOBJ_FILE) { kobject_put(o); return SYS_EBADF; }
+
+    fill_stat(out, &((struct file *)o)->node);
+    kobject_put(o);
+    return 0;
+}
+
+static uint64_t sys_stat(struct isr_frame *f) {
+    struct task *t = task_current();
+    if (!t) return SYS_ENOSYS;
+
+    const char *up = (const char *)(uintptr_t)f->rdi;
+    struct sys_stat *out = (struct sys_stat *)(uintptr_t)f->rsi;
+    if (!up) return SYS_EFAULT;
+    if (!buf_writable(f, (uint64_t)(uintptr_t)out, sizeof(*out))) return SYS_EFAULT;
+
+    char path[256];
+    if (copy_path(f, up, path, sizeof(path)) != 0) return SYS_EFAULT;
+
+    fs_node_t n;
+    if (!fs_lookup(path, &n)) return SYS_ENOENT;
+
+    fill_stat(out, &n);
+    return 0;
+}
+
+static uint64_t sys_getdents(struct isr_frame *f) {
+    struct task *t = task_current();
+    if (!t) return SYS_ENOSYS;
+
+    uint32_t index = (uint32_t)f->rsi;
+    struct sys_dirent *out = (struct sys_dirent *)(uintptr_t)f->rdx;
+    if (!buf_writable(f, (uint64_t)(uintptr_t)out, sizeof(*out))) return SYS_EFAULT;
+
+    struct kobject *o = fd_get_checked(t, (int)f->rdi, KOBJ_TYPE_ANY, FD_RIGHT_READ);
+    if (!o) return SYS_EBADF;
+    if (o->type != KOBJ_FILE) { kobject_put(o); return SYS_EBADF; }
+
+    struct file *fl = (struct file *)o;
+    int64_t ret = SYS_EINVAL;
+    if (fl->node.is_dir) {
+        fs_node_t n;
+        if (fs_iterate(&fl->node, index, &n)) {
+            out->size = n.size;
+            out->cluster = n.cluster;
+            out->attr = n.attr;
+            out->is_dir = n.is_dir ? 1 : 0;
+            for (unsigned i = 0; i < SYS_MAX_NAME; i++) out->name[i] = (i < FS_MAX_NAME) ? n.name[i] : 0;
+            ret = 1;
+        } else {
+            ret = 0;
+        }
+    }
+
+    kobject_put(o);
+    return (uint64_t)ret;
+}
+
+static uint64_t sys_isatty(struct isr_frame *f) {
+    struct task *t = task_current();
+    if (!t) return SYS_ENOSYS;
+
+    struct kobject *o = fd_get_checked(t, (int)f->rdi, KOBJ_TYPE_ANY, 0);
+    if (!o) return SYS_EBADF;
+
+    bool tty = (o->type == KOBJ_CONSOLE);
+    kobject_put(o);
+    return tty ? 1 : 0;
+}
+
+static uint64_t sys_getpid(struct isr_frame *f) {
+    (void)f;
+    struct task *t = task_current();
+    if (!t) return SYS_ENOSYS;
+    return t->pid;
+}
+
+static uint64_t sys_sleep(struct isr_frame *f) {
+    uint64_t ms = f->rdi;
+    if (ms > 60000) ms = 60000;
+
+    __asm__ volatile("sti" ::: "memory");
+    pit_sleep(ms);
+    __asm__ volatile("cli" ::: "memory");
+
+    return 0;
+}
+
+static uint64_t sys_debug_print(struct isr_frame *f) {
+    struct task *t = task_current();
+    if (!t) return SYS_ENOSYS;
+    if (!t->debug_log) return SYS_EPERM;
+
+    const char *buf = (const char *)(uintptr_t)f->rdi;
+    uint32_t len = (uint32_t)f->rsi;
+    if (len > 512) len = 512;
+    if (!buf) return SYS_EFAULT;
+    if (!buf_readable(f, (uint64_t)(uintptr_t)buf, len)) return SYS_EFAULT;
+
+    for (uint32_t i = 0; i < len; i++) kprintchar(buf[i], PRINT_SERIAL);
+    return len;
+}
+
+static syscall_handler_t handlers[SYSCALL_NR_MAX] = {    [SYS_READ]           = sys_read,
+    [SYS_WRITE]          = sys_write,
+    [SYS_PREAD]          = sys_pread,
+    [SYS_OPEN]           = sys_open,
+    [SYS_CLOSE]          = sys_close,
+    [SYS_LSEEK]          = sys_lseek,
+    [SYS_DUP]            = sys_dup,
+    [SYS_FSTAT]          = sys_fstat,
+    [SYS_STAT]           = sys_stat,
+    [SYS_GETDENTS]       = sys_getdents,
+    [SYS_ISATTY]         = sys_isatty,
+    [SYS_EXIT]           = sys_exit,
+    [SYS_GETPID]         = sys_getpid,
+    [SYS_SLEEP]          = sys_sleep,
+    [SYS_CONSOLE_WRITE]  = sys_console_write,
+    [SYS_DEBUG_PRINT]    = sys_debug_print,
 };
 
 void syscall_init(void) {

@@ -31,6 +31,7 @@ _Static_assert(sizeof(struct isr_frame) == 176, "frame layout");
 static struct task tasks[TASK_MAX];
 static size_t current_slot = 0;
 static volatile uint64_t wake_seq = 0;
+static uint32_t next_pid = 1;
 static bool in_scheduler = false;
 static bool sched_enabled = false;
 static uint64_t switch_count = 0;
@@ -117,6 +118,8 @@ void task_init(void) {
     tasks[0].stack_top = boot_rsp;
     tasks[0].in_use = true;
     tasks[0].name = "kmain";
+    tasks[0].pid = 0;
+    tasks[0].debug_log = true;
     fd_install_stdio(&tasks[0]);
     task_kstack_update();
     sched_enabled = true;
@@ -170,6 +173,8 @@ struct task *task_spawn(const char *name, void (*entry)(void)) {
     t->frame = f;
     t->in_use = true;
     t->zombie = false;
+    t->debug_log = false;
+    t->pid = next_pid++;
     t->name = name;
 
     lock_release(LOCK_SCHED, &sched_lock);
@@ -265,6 +270,8 @@ struct task *task_spawn_ring3(const char *name, paddr_t code_phys, size_t code_p
 
     t->frame = f;
     t->in_use = true;
+    t->debug_log = false;
+    t->pid = next_pid++;
     t->name = name;
     fd_table_init(t);
     fd_install_stdio(t);

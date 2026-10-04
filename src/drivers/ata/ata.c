@@ -142,7 +142,6 @@ static bool wait_status(uint16_t base, uint8_t want, uint64_t timeout_ms) {
             if (status & want) return true;
         }
 
-        // syscalls run with IF=0, so PIT ticks stop advancing: bound on spins too
         if (pit_get_ticks() >= deadline || ++spins > ATA_SPIN_LIMIT) {
             detail("status timeout");
             return fail(ATA_ETIMEOUT);
@@ -170,7 +169,6 @@ static void reset_channel(uint16_t base) {
     outb(DEVCTL(base), 0x00);
     for (int i = 0; i < 8; i++) io_wait();
 
-    // ATAPI and empty channels never assert DRDY, so only wait for BSY to drop
     for (uint64_t i = 0; i < ATA_RESET_SPINS; i++) {
         if (!(status_of(base) & ST_BSY)) break;
         io_wait();

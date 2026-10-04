@@ -33,6 +33,8 @@ struct task {
     bool zombie;
     bool blocked;
     bool expect_fault;
+    bool debug_log;
+    uint32_t pid;
     const char *name;
     struct fd_table fds;
 };
