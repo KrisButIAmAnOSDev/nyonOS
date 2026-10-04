@@ -21,6 +21,7 @@ bool block_read(block_device_t *dev, uint64_t lba, uint32_t count, void *buf) {
 }
 
 bool block_write(block_device_t *dev, uint64_t lba, uint32_t count, const void *buf) {
+    if (!dev) return false;
     if (dev->read_only) return false;
     if (!dev->write) return false;
     if (!block_valid(dev, lba, count)) return false;
@@ -28,6 +29,7 @@ bool block_write(block_device_t *dev, uint64_t lba, uint32_t count, const void *
 }
 
 bool block_flush(block_device_t *dev) {
+    if (!dev) return true;
     if (dev->read_only || !dev->flush) return true;
     return dev->flush(dev->ctx);
 }

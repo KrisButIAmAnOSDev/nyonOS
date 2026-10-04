@@ -6,6 +6,7 @@
 #include <stdbool.h>
 #include "kernel/mm/vmm/vmm.h"
 #include "arch/x86_64/idt/idt.h"
+#include "kernel/fd/fd.h"
 
 #define TASK_MAX 16
 #define TASK_STACK_PAGES 4
@@ -31,7 +32,9 @@ struct task {
     bool in_use;
     bool zombie;
     bool blocked;
+    bool expect_fault;
     const char *name;
+    struct fd_table fds;
 };
 
 void task_resume_asm(struct isr_frame *frame);
@@ -41,7 +44,8 @@ struct task *task_spawn_ring3(const char *name, paddr_t code_phys, size_t code_p
 void task_schedule(struct isr_frame *frame);
 void task_exit(void);
 void task_exit_code(uint64_t code);
-void task_block_current(void);
+void task_block_current(uint64_t seen_seq);
+uint64_t task_wake_seq(void);
 void task_unblock_all(void);
 struct task *task_current(void);
 struct page_table *task_current_pml4(void);

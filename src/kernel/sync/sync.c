@@ -7,7 +7,7 @@ static uint32_t held_mask = 0;
 static uint32_t lock_depth = 0;
 
 static const char *lock_names[LOCK_COUNT] = {
-    "none", "ata_lock", "sched_lock", "heap_lock", "vmm_lock", "pmm_lock"
+    "none", "ata_lock", "sched_lock", "fd_lock", "heap_lock", "vmm_lock", "pmm_lock"
 };
 
 const char *lock_name(lock_id_t id) {

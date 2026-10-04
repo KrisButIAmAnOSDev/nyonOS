@@ -4,19 +4,14 @@
 .type syscall_entry,@function
 syscall_entry:
 
-    push rax
-    mov  rax, rsp
-    sub  rax, 8
-    mov  [rip + syscall_user_rsp], rax
-    pop  rax
+    mov  [rip + syscall_user_rsp], rsp
 
-    mov  rdx, [rip + tss_rsp0_ptr]
-    mov  rsp, [rdx + 4]
+    mov  rsp, [rip + syscall_kstack_top]
 
-    push 0x18
+    push 0x1b
     push qword ptr [rip + syscall_user_rsp]
     push r11
-    push 0x20
+    push 0x23
     push rcx
     push 0
     push 0x80

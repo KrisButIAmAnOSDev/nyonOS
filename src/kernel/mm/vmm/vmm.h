@@ -45,6 +45,7 @@ bool vmm_map_user(struct page_table *root, vaddr_t vaddr, paddr_t paddr, size_t 
 bool vmm_unmap_from(struct page_table *root, vaddr_t vaddr, size_t pages);
 
 bool vmm_range_present_in(struct page_table *root, vaddr_t addr, size_t len);
+bool vmm_range_writable_in(struct page_table *root, vaddr_t addr, size_t len);
 
 #define VMM_DEFAULT_FLAGS (PAGE_PRESENT | PAGE_WRITE | PAGE_GLOBAL)
 #define VMM_USER_FLAGS (PAGE_PRESENT | PAGE_WRITE | PAGE_USER)

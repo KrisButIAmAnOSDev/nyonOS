@@ -13,6 +13,7 @@ typedef enum {
     LOCK_NONE = 0,
     LOCK_ATA,
     LOCK_SCHED,
+    LOCK_FD,
     LOCK_HEAP,
     LOCK_VMM,
     LOCK_PMM,

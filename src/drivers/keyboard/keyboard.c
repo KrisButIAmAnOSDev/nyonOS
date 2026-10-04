@@ -5,8 +5,8 @@
 #include <stdbool.h>
 
 static uint8_t keyboard_buffer[256];
-static size_t buffer_head = 0;
-static size_t buffer_tail = 0;
+static volatile size_t buffer_head = 0;
+static volatile size_t buffer_tail = 0;
 static bool shift_pressed = false;
 static bool caps_lock = false;
 static bool ctrl_pressed = false;
@@ -93,7 +93,7 @@ static uint8_t scancode_to_ascii(uint8_t scancode) {
 
 void keyboard_handler(struct isr_frame *frame) {
     (void)frame;
-    keyboard_wait_output();
+    if (!(inb(0x64) & 0x01)) return;
     uint8_t scancode = inb(0x60);
     keyboard_buffer_push(scancode);
 
@@ -102,13 +102,14 @@ void keyboard_handler(struct isr_frame *frame) {
 
 bool keyboard_try_pop(char *out) {
     uint8_t scancode;
-    if (!keyboard_buffer_pop(&scancode)) return false;
-
-    char c = (char)scancode_to_ascii(scancode);
-    if (!c) return false;
-
-    *out = c;
-    return true;
+    while (keyboard_buffer_pop(&scancode)) {
+        char c = (char)scancode_to_ascii(scancode);
+        if (c) {
+            *out = c;
+            return true;
+        }
+    }
+    return false;
 }
 
 void keyboard_process_buffer(void) {

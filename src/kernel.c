@@ -20,6 +20,7 @@
 #include "arch/x86_64/syscall/syscall.h"
 #include "arch/x86_64/gdt/gdt.h"
 #include "drivers/ata/ata.h"
+#include "kernel/fd/fd.h"
 #include "kernel/block/block.h"
 #include "kernel/fs/fs.h"
 
@@ -78,8 +79,6 @@ static void validate_spawn(vaddr_t entry_rip, size_t code_bytes, size_t code_pag
 
     if (res[9] == 0xdeadbeefdeadbeefULL) {
         kprintf(PRINT_SERIAL, "SYSCALL test: validation task never reported\n");
-        pmm_free(code_phys, code_pages);
-        pmm_free(results_phys, 1);
         return;
     }
 
@@ -108,7 +107,6 @@ static void validate_spawn(vaddr_t entry_rip, size_t code_bytes, size_t code_pag
     kprintchar(bad == 0 ? 'Y' : 'N', PRINT_SERIAL);
     kprintchar('\n', PRINT_SERIAL);
 
-    pmm_free(code_phys, code_pages);
     pmm_free(results_phys, 1);
 }
 
@@ -282,6 +280,67 @@ static void fs_test(void) {
     kprintchar('\n', PRINT_SERIAL);
 }
 
+static void fd_spawn(vaddr_t entry_rip, size_t code_bytes, size_t code_pages) {
+    paddr_t code_phys, results_phys;
+
+    if (!pmm_alloc(&code_phys, code_pages) || !pmm_alloc(&results_phys, 1)) {
+        kprintf(PRINT_SERIAL, "FD ring3: alloc failed\n");
+        return;
+    }
+
+    volatile uint8_t *dst = (volatile uint8_t *)(vmm_hhdm_offset + code_phys);
+    for (size_t i = 0; i < code_bytes; i++) dst[i] = user_test_entry[i];
+
+    volatile uint64_t *res = (volatile uint64_t *)(vmm_hhdm_offset + results_phys);
+    for (int i = 0; i < FD_RES_SLOTS; i++) res[i] = 0xdeadbeefdeadbeefULL;
+
+    struct task *t = task_spawn_ring3("ring3fd", code_phys, code_pages, TASK_USER_CODE_VIRT,
+                                      entry_rip, results_phys, 0x60000000ULL);
+    if (!t) {
+        pmm_free(code_phys, code_pages);
+        pmm_free(results_phys, 1);
+        kprintf(PRINT_SERIAL, "FD ring3: spawn failed\n");
+        return;
+    }
+
+    for (int i = 0; i < 400 && res[FD_RES_DONE] == 0xdeadbeefdeadbeefULL; i++) pit_sleep(10);
+
+    if (res[FD_RES_DONE] == 0xdeadbeefdeadbeefULL) {
+        kprintf(PRINT_SERIAL, "FD ring3: task never reported\n");
+        return;
+    }
+
+    static const char *what[FD_CHECKS] = {
+        "open /TEST.TXT returns an fd",
+        "read 14 bytes from ring 3",
+        "content matches that my jarona",
+        "lseek SET 0 resets position",
+        "re-read after lseek returns 4",
+        "lseek past end clamps to file size",
+        "read at EOF returns 0",
+        "dup with narrowed rights",
+        "write through read-only fd refused",
+        "close returns 0",
+        "stale fd after close refused",
+        "double close refused",
+        "open missing file returns ENOENT",
+        "open directory returns EISDIR",
+        "kernel pointer to read rejected",
+        "write to stdout via fd 1"
+    };
+
+    int bad = 0;
+    for (int i = 0; i < FD_CHECKS; i++) {
+        if (res[i] != 1) { bad++; kprintf(PRINT_SERIAL, "    FAIL %s\n", what[i]); }
+    }
+
+    kprintf(PRINT_SERIAL, "FD ring3: %d of %d checks passed: ", FD_CHECKS - bad, FD_CHECKS);
+    kprintchar(bad == 0 ? 'Y' : 'N', PRINT_SERIAL);
+    kprintchar('\n', PRINT_SERIAL);
+
+    pmm_free(results_phys, 1);
+}
+
 static void busy_wait_ms(uint64_t ms) {
     uint64_t start = pit_get_ticks();
     while (pit_get_ticks() - start < ms) __asm__ volatile("hlt");
@@ -323,27 +382,23 @@ static void task_seth(void) {
 
 void kmain(void) {
     serial_init();
-    kprintf(PRINT_SERIAL, "nyonOS: Kernel loaded!\n");
 
     if (LIMINE_BASE_REVISION_SUPPORTED(limine_base_revision) == false) {
         kprintf(PRINT_SERIAL, "nyonOS: Limine revision not supported!\n");
         for (;;) __asm__ volatile("hlt");
     }
-    kprintf(PRINT_SERIAL, "nyonOS: Limine revision OK!\n");
 
     if (framebuffer_request.response == NULL
      || framebuffer_request.response->framebuffer_count < 1) {
         kprintf(PRINT_SERIAL, "nyonOS: No framebuffer!\n");
         for (;;) __asm__ volatile("hlt");
     }
-    kprintf(PRINT_SERIAL, "nyonOS: Framebuffer found!\n");
 
     struct limine_framebuffer *fb = framebuffer_request.response->framebuffers[0];
     if (fb->memory_model != LIMINE_FRAMEBUFFER_RGB || fb->bpp != 32) {
         kprintf(PRINT_SERIAL, "nyonOS: Wrong framebuffer format!\n");
         for (;;) __asm__ volatile("hlt");
     }
-    kprintf(PRINT_SERIAL, "nyonOS: Framebuffer format OK!\n");
 
     kprintf_attach((volatile uint32_t *)fb->address, fb->width, fb->height);
 
@@ -363,7 +418,6 @@ void kmain(void) {
     vmm_init(hhdm_offset);
 
     gdt_init(hhdm_offset);
-    gdt_dump();
 
     paddr_t lapic_phys = 0xFEE00000;
     vaddr_t lapic_virt = hhdm_offset + lapic_phys;
@@ -384,11 +438,11 @@ void kmain(void) {
 
     kprintf(PRINT_SERIAL, "nyonOS: init done\n");
 
+    sync_init();
     heap_init();
 
     if (!ata_init()) kprintf(PRINT_SERIAL, "ATA: no drive found\n");
 
-    sync_init();
     task_init();
     task_spawn("aqua", task_aqua);
     task_spawn("seth", task_seth);
@@ -404,9 +458,10 @@ void kmain(void) {
     {
         extern uint8_t user_fault_entry[];
         extern uint8_t user_validate_entry[];
-        extern uint8_t user_test_end[];
+        extern uint8_t user_zfd_entry[];
+        extern uint8_t user_zfd_end[];
 
-        size_t code_bytes = (size_t)(user_test_end - user_test_entry);
+        size_t code_bytes = (size_t)(user_zfd_end - user_test_entry);
         size_t code_pages = (code_bytes + PAGE_SIZE - 1) / PAGE_SIZE;
         vaddr_t fault_rip = TASK_USER_CODE_VIRT + (size_t)(user_fault_entry - user_test_entry);
         vaddr_t validate_rip = TASK_USER_CODE_VIRT + (size_t)(user_validate_entry - user_test_entry);
@@ -437,10 +492,12 @@ void kmain(void) {
             if (pmm_alloc(&uphys, code_pages)) {
                 volatile uint8_t *dst = (volatile uint8_t *)(vmm_hhdm_offset + uphys);
                 for (size_t k = 0; k < code_bytes; k++) dst[k] = user_test_entry[k];
-                if (!task_spawn_ring3("ring3fault", uphys, code_pages, TASK_USER_CODE_VIRT, fault_rip, 0, 0)) {
+                struct task *ft = task_spawn_ring3("ring3fault", uphys, code_pages, TASK_USER_CODE_VIRT, fault_rip, 0, 0);
+                if (!ft) {
                     pmm_free(uphys, code_pages);
                     kprintf(PRINT_SERIAL, "RING3 test: fault task spawn FAILED\n");
                 } else {
+                    ft->expect_fault = true;
                     kprintf(PRINT_SERIAL, "RING3 test: fault task spawned\n");
                 }
             } else {
@@ -460,10 +517,63 @@ void kmain(void) {
         kprintchar('\n', PRINT_SERIAL);
 
         validate_spawn(validate_rip, code_bytes, code_pages);
+
+        {
+            vaddr_t fd_rip = TASK_USER_CODE_VIRT + (size_t)(user_zfd_entry - user_test_entry);
+            fd_spawn(fd_rip, code_bytes, code_pages);
+        }
+
+        {
+            struct task *ft = task_current();
+            int base = 0;
+            int many[40];
+            int opened = 0;
+            for (int i = 0; i < 40; i++) {
+                many[i] = fd_open(ft, "/TEST.TXT", FD_OPEN_READ);
+                if (many[i] < 0) break;
+                opened++;
+            }
+            for (int i = 0; i < opened; i++) fd_close(ft, many[i]);
+            kprintf(PRINT_SERIAL, "FD kernel: %d concurrent fds past inline %d: ", opened, FD_INLINE);
+            kprintchar(opened > FD_INLINE ? 'Y' : 'N', PRINT_SERIAL);
+            kprintchar('\n', PRINT_SERIAL);
+
+            struct kobject *o0 = fd_get_checked(ft, 0, KOBJ_TYPE_ANY, FD_RIGHT_READ);
+            struct kobject *o1 = fd_get_checked(ft, 1, KOBJ_TYPE_ANY, FD_RIGHT_WRITE);
+            struct kobject *o2 = fd_get_checked(ft, 2, KOBJ_TYPE_ANY, FD_RIGHT_WRITE);
+            if (o0) fd_put(o0);
+            if (o1) fd_put(o1);
+            if (o2) fd_put(o2);
+            kprintf(PRINT_SERIAL, "FD kernel: stdio survives table growth: ");
+            kprintchar((o0 && o1 && o2) ? 'Y' : 'N', PRINT_SERIAL);
+            kprintchar('\n', PRINT_SERIAL);
+            (void)base;
+        }
+
+        {
+            struct task tmp;
+            size_t before = pmm_free_pages();
+
+            int cycles = 3000;
+            fd_table_init(&tmp);
+            for (int i = 0; i < cycles; i++) {
+                int a = fd_open(&tmp, "/TEST.TXT", FD_OPEN_READ);
+                if (a >= 0) fd_close(&tmp, a);
+                int b = fd_open(&tmp, "/TEST.TXT", FD_OPEN_READ);
+                if (b >= 0) fd_table_clear(&tmp);
+                fd_table_init(&tmp);
+            }
+
+            size_t after = pmm_free_pages();
+            kprintf(PRINT_SERIAL, "FD kernel: teardown leak check, %d cycles: ", cycles);
+            kprintchar(after >= before ? 'Y' : 'N', PRINT_SERIAL);
+            kprintf(PRINT_SERIAL, " (%zu -> %zu)\n", before, after);
+        }
     }
 
     for (;;) {
+        uint64_t seq = task_wake_seq();
         keyboard_process_buffer();
-        task_block_current();
+        task_block_current(seq);
     }
 }

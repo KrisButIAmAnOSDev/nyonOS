@@ -234,6 +234,26 @@ bool vmm_range_present_in(struct page_table *root, vaddr_t addr, size_t len) {
     return true;
 }
 
+bool vmm_range_writable_in(struct page_table *root, vaddr_t addr, size_t len) {
+    if (len == 0) return false;
+    if (addr > VMM_HIGHER_HALF) return false;
+    if (len > VMM_HIGHER_HALF - addr) return false;
+
+    vaddr_t first = addr & ~(vaddr_t)(PAGE_SIZE - 1);
+    vaddr_t last = (addr + len - 1) & ~(vaddr_t)(PAGE_SIZE - 1);
+
+    int levels = vmm_5level ? 5 : 4;
+
+    for (vaddr_t v = first; v <= last; v += PAGE_SIZE) {
+        uint64_t *entry = walk_page_table(root, v, levels, false, 0);
+        if (!entry) return false;
+        if (!(*entry & PAGE_PRESENT)) return false;
+        if (!(*entry & PAGE_WRITE)) return false;
+    }
+
+    return true;
+}
+
 uint64_t vmm_query(vaddr_t vaddr) {
     uint64_t *entry = walk_page_table(kernel_pml4, vaddr, vmm_5level ? 5 : 4, false, 0);
     if (!entry) return 0;

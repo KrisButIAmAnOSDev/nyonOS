@@ -20,8 +20,12 @@
 
 #define ST_BSY  0x80
 #define ST_DRDY 0x40
+#define ST_DF   0x20
 #define ST_DRQ  0x08
 #define ST_ERR  0x01
+
+#define ATA_SPIN_LIMIT    20000000ULL
+#define ATA_RESET_SPINS   2000000ULL
 
 #define ERR_AMNF  0x01
 #define ERR_TK0NF 0x02
@@ -126,15 +130,20 @@ static uint8_t status_of(uint16_t base) {
 
 static bool wait_status(uint16_t base, uint8_t want, uint64_t timeout_ms) {
     uint64_t deadline = pit_get_ticks() + timeout_ms;
+    uint64_t spins = 0;
     for (;;) {
         uint8_t status = status_of(base);
 
-        if (status & ST_ERR) {
-            decode_err(inb(base + REG_ERR));
-            return fail(ATA_EIO);
+        if (!(status & ST_BSY)) {
+            if (status & (ST_ERR | ST_DF)) {
+                decode_err(inb(base + REG_ERR));
+                return fail(ATA_EIO);
+            }
+            if (status & want) return true;
         }
-        if ((status & want) && !(status & ST_BSY)) return true;
-        if (pit_get_ticks() >= deadline) {
+
+        // syscalls run with IF=0, so PIT ticks stop advancing: bound on spins too
+        if (pit_get_ticks() >= deadline || ++spins > ATA_SPIN_LIMIT) {
             detail("status timeout");
             return fail(ATA_ETIMEOUT);
         }
@@ -160,7 +169,12 @@ static void reset_channel(uint16_t base) {
     for (int i = 0; i < 8; i++) io_wait();
     outb(DEVCTL(base), 0x00);
     for (int i = 0; i < 8; i++) io_wait();
-    (void)wait_status(base, ST_DRDY, READY_TIMEOUT_MS);
+
+    // ATAPI and empty channels never assert DRDY, so only wait for BSY to drop
+    for (uint64_t i = 0; i < ATA_RESET_SPINS; i++) {
+        if (!(status_of(base) & ST_BSY)) break;
+        io_wait();
+    }
 }
 
 static bool recover(uint16_t base) {
@@ -179,15 +193,7 @@ static void swap_words(char *dst, const uint16_t *src, int words) {
     }
 }
 
-static uint64_t lba28_capacity(uint16_t *data) {
-    uint32_t lo = data[60] | ((uint32_t)data[61] << 16);
-    uint32_t hi = data[82] & 0x0F;
-    hi |= (data[83] & 0x10) ? ((uint32_t)(data[86] & 0x0F) << 16) : 0;
 
-    if (hi && ((hi << 16) | lo) != 0) return ((uint64_t)hi << 32) | lo;
-    if (lo) return lo;
-    return data[60];
-}
 
 static bool ata_identify(int index) {
     uint16_t base = port_for(index);
@@ -196,6 +202,10 @@ static bool ata_identify(int index) {
     select_drive(base, head_for(index));
 
     uint8_t st = status_of(base);
+    for (uint64_t i = 0; st == 0x00 && i < ATA_RESET_SPINS; i++) {
+        io_wait();
+        st = status_of(base);
+    }
     if (st == 0xFF || st == 0x00) return fail(ATA_ENODEV);
 
     if (st & ST_BSY) {
@@ -237,7 +247,14 @@ static bool ata_identify(int index) {
     trim_trailing(d->model, 39);
 
     d->lba48 = (data[83] & 0x10) != 0 && (data[82] & 0x10) != 0;
-    d->sectors = lba28_capacity(data);
+
+    uint32_t cap_lo = (uint32_t)data[60] | ((uint32_t)data[61] << 16);
+    uint32_t cap_hi = data[82] & 0x0F;
+    cap_hi |= (data[83] & 0x10) ? ((uint32_t)(data[86] & 0x0F) << 16) : 0;
+    d->sectors = (cap_hi && ((cap_hi << 16) | cap_lo) != 0)
+                     ? (((uint64_t)cap_hi << 32) | cap_lo)
+                     : (cap_lo ? (uint64_t)cap_lo : (uint64_t)data[60]);
+
     d->lba48_sectors = d->lba48
         ? ((uint64_t)data[100]) | ((uint64_t)data[101] << 16) |
           ((uint64_t)data[102] << 32) | ((uint64_t)data[103] << 48)
@@ -257,7 +274,8 @@ bool ata_init(void) {
     pic_set_mask(15);
 
     for (int i = 0; i < ATA_MAX_DRIVES; i++) {
-        if (ata_identify(i)) drive_count++;
+        bool ok = ata_identify(i);
+        if (ok) drive_count++;
     }
 
     lock_release(LOCK_ATA, &ata_lock);

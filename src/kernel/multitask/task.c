@@ -8,6 +8,7 @@
 #include "arch/x86_64/pit/pit.h"
 #include "arch/x86_64/gdt/gdt.h"
 #include "arch/x86_64/gdt/tss.h"
+#include "arch/x86_64/syscall/syscall.h"
 #include "kernel/usermode.h"
 
 #define QW_RIP 17
@@ -29,6 +30,7 @@ _Static_assert(sizeof(struct isr_frame) == 176, "frame layout");
 
 static struct task tasks[TASK_MAX];
 static size_t current_slot = 0;
+static volatile uint64_t wake_seq = 0;
 static bool in_scheduler = false;
 static bool sched_enabled = false;
 static uint64_t switch_count = 0;
@@ -36,6 +38,7 @@ static spinlock_t sched_lock = SPINLOCK_INIT;
 
 static void task_kstack_update(void) {
     tss_set_rsp0(tasks[current_slot].stack_top);
+    syscall_kstack_top = tasks[current_slot].stack_top;
 }
 
 static void task_aspace_update(void) {
@@ -44,6 +47,8 @@ static void task_aspace_update(void) {
 }
 
 static void task_release(struct task *t) {
+    fd_table_clear(t);
+
     if (t->pml4) {
         if (t->user_stack_base) vmm_unmap_from(t->pml4, t->user_stack_base, TASK_USER_STACK_PAGES);
         if (t->user_code_base) vmm_unmap_from(t->pml4, t->user_code_base, t->user_code_pages);
@@ -103,6 +108,7 @@ void task_init(void) {
         tasks[i].exit_code = 0;
         tasks[i].blocked = false;
         tasks[i].name = NULL;
+        fd_table_init(&tasks[i]);
     }
 
     uint64_t boot_rsp;
@@ -111,6 +117,7 @@ void task_init(void) {
     tasks[0].stack_top = boot_rsp;
     tasks[0].in_use = true;
     tasks[0].name = "kmain";
+    fd_install_stdio(&tasks[0]);
     task_kstack_update();
     sched_enabled = true;
 }
@@ -164,7 +171,6 @@ struct task *task_spawn(const char *name, void (*entry)(void)) {
     t->in_use = true;
     t->zombie = false;
     t->name = name;
-    tss_set_rsp0(t->stack_top);
 
     lock_release(LOCK_SCHED, &sched_lock);
 
@@ -237,6 +243,7 @@ struct task *task_spawn_ring3(const char *name, paddr_t code_phys, size_t code_p
     t->user_stack_phys = uphys;
     t->user_stack_base = TASK_USER_STACK_VIRT;
     t->user_stack_top = TASK_USER_STACK_VIRT + TASK_USER_STACK_PAGES * PAGE_SIZE;
+    t->expect_fault = false;
     t->user_code_phys = code_phys;
     t->user_code_base = code_virt;
     t->user_code_pages = code_pages;
@@ -259,6 +266,8 @@ struct task *task_spawn_ring3(const char *name, paddr_t code_phys, size_t code_p
     t->frame = f;
     t->in_use = true;
     t->name = name;
+    fd_table_init(t);
+    fd_install_stdio(t);
 
     lock_release(LOCK_SCHED, &sched_lock);
 
@@ -317,7 +326,8 @@ void task_exit_code(uint64_t code) {
 
     self->exit_code = code;
 
-    kprintf(PRINT_SERIAL, "task: %s exited with code %llu\n", self->name, (unsigned long long)code);
+    if (!self->expect_fault)
+        kprintf(PRINT_SERIAL, "task: %s exited with code %llu\n", self->name, (unsigned long long)code);
 
     __asm__ volatile("cli" ::: "memory");
 
@@ -335,7 +345,7 @@ void task_exit_code(uint64_t code) {
     lock_release(LOCK_SCHED, &sched_lock);
 
     if (!next) {
-        for (;;) __asm__ volatile("hlt");
+        for (;;) __asm__ volatile("sti; hlt" ::: "memory");
     }
 
     task_resume(tasks[current_slot].frame);
@@ -345,23 +355,13 @@ void task_exit(void) {
     task_exit_code(0);
 }
 
-void task_block_current(void) {
+void task_block_current(uint64_t seen_seq) {
+    if (__atomic_load_n(&wake_seq, __ATOMIC_ACQUIRE) != seen_seq) return;
+
     __asm__ volatile("cli" ::: "memory");
 
     lock_acquire(LOCK_SCHED, &sched_lock);
-
     tasks[current_slot].blocked = true;
-    struct task *next = pick_next();
-
-    if (next) {
-        current_slot = (size_t)(next - tasks);
-        switch_count++;
-        task_kstack_update();
-        task_aspace_update();
-        lock_release(LOCK_SCHED, &sched_lock);
-        task_resume(tasks[current_slot].frame);
-    }
-
     lock_release(LOCK_SCHED, &sched_lock);
 
     for (;;) {
@@ -380,17 +380,20 @@ void task_block_current(void) {
 }
 
 
-void task_unblock_all(void) {
-    __asm__ volatile("cli" ::: "memory");
+uint64_t task_wake_seq(void) {
+    return __atomic_load_n(&wake_seq, __ATOMIC_ACQUIRE);
+}
 
-    lock_acquire(LOCK_SCHED, &sched_lock);
+void task_unblock_all(void) {
+    // called from the keyboard ISR: taking LOCK_SCHED here would trip the
+    // held_mask checker (or self-deadlock) if the interrupted code held a lock
+    __atomic_add_fetch(&wake_seq, 1, __ATOMIC_RELEASE);
 
     // 0, not 1: slot 0 is kmain, and kmain is the task parked on input. Every
     // other loop over tasks[] starts at 1, so this one looks like a nyonpo (only comment in the whole os btw)
     for (size_t i = 0; i < TASK_MAX; i++) {
-        if (tasks[i].in_use && tasks[i].blocked) tasks[i].blocked = false;
+        if (tasks[i].in_use) __atomic_store_n(&tasks[i].blocked, false, __ATOMIC_RELEASE);
     }
-    lock_release(LOCK_SCHED, &sched_lock);
 }
 
 struct task *task_current(void) {

@@ -105,8 +105,10 @@ void exception_handler(struct isr_frame* frame) {
         uint64_t vector = frame->interrupt_number;
         int signal = exception_signal(vector);
 
-        kprintf(PRINT_BOTH, "\ntask %s killed by CPU exception, vector 0x%llx\n", name, (unsigned long long)vector);
-        kprintf(PRINT_BOTH, "  faulting rip=0x%llx err=0x%llx cr2=0x%llx signal=%d\n", (unsigned long long)frame->rip, (unsigned long long)frame->error_code, (unsigned long long)read_cr2(), signal);
+        if (!t || !t->expect_fault) {
+            kprintf(PRINT_BOTH, "\ntask %s killed by CPU exception, vector 0x%llx\n", name, (unsigned long long)vector);
+            kprintf(PRINT_BOTH, "  faulting rip=0x%llx err=0x%llx cr2=0x%llx signal=%d\n", (unsigned long long)frame->rip, (unsigned long long)frame->error_code, (unsigned long long)read_cr2(), signal);
+        }
 
         task_exit_code(128 + signal);
     }

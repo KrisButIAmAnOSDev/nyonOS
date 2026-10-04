@@ -310,6 +310,7 @@ bool fs_lookup(const char *path, fs_node_t *out) {
 bool fs_node_read_inner(const fs_node_t *node, uint32_t offset, void *buf, uint32_t len) {
     if (!fs.mounted || !node || !buf) return false;
     if (node->is_dir) return false;
+    if (len == 0) return true;
     if (offset >= node->size) return false;
     if (node->cluster < FS_FIRST_CLUSTER || node->cluster >= FS_BAD_CLUSTER) return false;
 
@@ -337,7 +338,7 @@ bool fs_node_read_inner(const fs_node_t *node, uint32_t offset, void *buf, uint3
         len -= chunk;
         within += chunk;
 
-        if (within == cluster_size) {
+        if (len && within == cluster_size) {
             within = 0;
             uint32_t nx;
             if (!fat_next(cluster, &nx)) return false;
