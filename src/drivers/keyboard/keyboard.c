@@ -3,8 +3,9 @@
 #include "arch/x86_64/pic/pic.h"
 #include "kernel/multitask/task.h"
 #include <stdbool.h>
+#include "kernel/sync/preempt.h"
 
-static uint8_t keyboard_buffer[256];
+static char keyboard_buffer[256];
 static volatile size_t buffer_head = 0;
 static volatile size_t buffer_tail = 0;
 static bool shift_pressed = false;
@@ -30,17 +31,17 @@ static void keyboard_wait_output(void) {
     while (!(inb(0x64) & 0x01));
 }
 
-static void keyboard_buffer_push(uint8_t scancode) {
+static void keyboard_buffer_push(char c) {
     size_t next = (buffer_head + 1) % 256;
     if (next != buffer_tail) {
-        keyboard_buffer[buffer_head] = scancode;
+        keyboard_buffer[buffer_head] = c;
         buffer_head = next;
     }
 }
 
-static bool keyboard_buffer_pop(uint8_t *scancode) {
+static bool keyboard_buffer_pop(char *c) {
     if (buffer_head == buffer_tail) return false;
-    *scancode = keyboard_buffer[buffer_tail];
+    *c = keyboard_buffer[buffer_tail];
     buffer_tail = (buffer_tail + 1) % 256;
     return true;
 }
@@ -91,19 +92,31 @@ static uint8_t scancode_to_ascii(uint8_t scancode) {
     return ascii;
 }
 
+static volatile bool stdin_owned = false;
+
+void keyboard_claim_stdin(void) {
+    stdin_owned = true;
+}
+
+bool keyboard_stdin_owned(void) {
+    return stdin_owned;
+}
+
 void keyboard_handler(struct isr_frame *frame) {
     (void)frame;
     if (!(inb(0x64) & 0x01)) return;
-    uint8_t scancode = inb(0x60);
-    keyboard_buffer_push(scancode);
+    uint8_t sc = inb(0x60);
+    char c = (char)scancode_to_ascii(sc);
+    keyboard_buffer_push(c);
+
+    if (c && !kprintf_busy()) kprintf(PRINT_SCREEN, "%c", c);
 
     task_unblock_all();
 }
 
 bool keyboard_try_pop(char *out) {
-    uint8_t scancode;
-    while (keyboard_buffer_pop(&scancode)) {
-        char c = (char)scancode_to_ascii(scancode);
+    char c;
+    while (keyboard_buffer_pop(&c)) {
         if (c) {
             *out = c;
             return true;
@@ -112,7 +125,16 @@ bool keyboard_try_pop(char *out) {
     return false;
 }
 
+bool keyboard_inject_char(char c) {
+    preempt_disable();
+    keyboard_buffer_push(c);
+    preempt_enable();
+    return true;
+}
+
 void keyboard_process_buffer(void) {
+    if (stdin_owned) return;
+
     char c;
     while (keyboard_try_pop(&c)) {
         kprintf(KATTR(PRINT_SCREEN, COLOR_WHITE), "%c", c);

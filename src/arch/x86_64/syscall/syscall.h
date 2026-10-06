@@ -27,6 +27,9 @@ extern uint64_t syscall_kstack_top;
 #define SYS_GETDENTS    9
 #define SYS_ISATTY     10
 #define SYS_STAT       11
+#define SYS_DUP2       12
+#define SYS_FCNTL      13
+#define SYS_IOCTL      14
 
 #define SYS_EXIT       16
 #define SYS_GETPID     17
@@ -54,6 +57,7 @@ struct sys_dirent {
 
 #define SYS_EPERM   (-1)
 #define SYS_EBADF   (-9)
+#define SYS_EAGAIN  (-11)
 #define SYS_EFAULT  (-14)
 #define SYS_EINVAL  (-22)
 #define SYS_ENOSYS  (-38)
@@ -63,20 +67,16 @@ struct sys_dirent {
 
 #define FD_OPEN_READ  0x1
 #define FD_OPEN_WRITE 0x2
+#define FD_OPEN_DIR   0x10
 
 #define FD_SEEK_SET 0
 #define FD_SEEK_CUR 1
 #define FD_SEEK_END 2
 
-#define FD_RIGHT_READ     (1u << 0)
-#define FD_RIGHT_WRITE    (1u << 1)
-#define FD_RIGHT_DUP      (1u << 2)
-#define FD_RIGHT_TRANSFER (1u << 3)
-#define FD_RIGHTS_ALL     0x0F
-
-#define FD_RES_SLOTS 40
-#define FD_RES_DONE  39
-#define FD_CHECKS    25
+#define FD_RES_SLOTS 144
+#define FD_RES_DONE  57
+#define FD_RES_FAIL  65
+#define FD_CHECKS    49
 
 void syscall_init(void);
 void syscall_dispatch(struct isr_frame *frame);

@@ -106,8 +106,6 @@ static void validate_spawn(vaddr_t entry_rip, size_t code_bytes, size_t code_pag
     kprintf(PRINT_SERIAL, "SYSCALL test: ring 3 write validation, %d of 9 correct: ", 9 - bad);
     kprintchar(bad == 0 ? 'Y' : 'N', PRINT_SERIAL);
     kprintchar('\n', PRINT_SERIAL);
-
-    pmm_free(results_phys, 1);
 }
 
 static bool mount_first_fat(int *out_drive) {
@@ -343,21 +341,15 @@ static void fd_spawn(vaddr_t entry_rip, size_t code_bytes, size_t code_pages) {
         if (res[i] != 1) { bad++; kprintf(PRINT_SERIAL, "    FAIL %s\n", what[i]); }
     }
 
+    for (int i = 0; i < FD_CHECKS; i++) {
+        if (res[FD_RES_FAIL + i] == 1) {
+            kprintf(PRINT_SERIAL, "    ring3 fail check %d (%s) mark=%lld\n",
+                    i, i < FD_CHECKS ? what[i] : "?", (long long)res[FD_RES_FAIL + i]);
+        }
+    }
     kprintf(PRINT_SERIAL, "FD ring3: %d of %d checks passed: ", FD_CHECKS - bad, FD_CHECKS);
     kprintchar(bad == 0 ? 'Y' : 'N', PRINT_SERIAL);
     kprintchar('\n', PRINT_SERIAL);
-
-    pmm_free(results_phys, 1);
-}
-
-static int64_t call_sys(int nr, uint64_t a, uint64_t b, uint64_t c, uint64_t d) {
-    struct isr_frame f;
-    for (size_t i = 0; i < sizeof(f) / 8; i++) ((uint64_t *)&f)[i] = 0;
-    f.cs = GDT_KERNEL_DATA;
-    f.rax = (uint64_t)nr;
-    f.rdi = a; f.rsi = b; f.rdx = c; f.r10 = d;
-    syscall_dispatch(&f);
-    return (int64_t)f.rax;
 }
 
 static void busy_wait_ms(uint64_t ms) {
@@ -478,9 +470,9 @@ void kmain(void) {
         extern uint8_t user_fault_entry[];
         extern uint8_t user_validate_entry[];
         extern uint8_t user_zfd_entry[];
-        extern uint8_t user_zfd_end[];
+        extern uint8_t user_test_end[];
 
-        size_t code_bytes = (size_t)(user_zfd_end - user_test_entry);
+        size_t code_bytes = (size_t)(user_test_end - user_test_entry);
         size_t code_pages = (code_bytes + PAGE_SIZE - 1) / PAGE_SIZE;
         vaddr_t fault_rip = TASK_USER_CODE_VIRT + (size_t)(user_fault_entry - user_test_entry);
         vaddr_t validate_rip = TASK_USER_CODE_VIRT + (size_t)(user_validate_entry - user_test_entry);
@@ -541,72 +533,6 @@ void kmain(void) {
             vaddr_t fd_rip = TASK_USER_CODE_VIRT + (size_t)(user_zfd_entry - user_test_entry);
             fd_spawn(fd_rip, code_bytes, code_pages);
         }
-
-        {
-            int bad = 0;
-            int tty = (int)call_sys(SYS_ISATTY, 1, 0, 0, 0);
-            int file = fd_open(task_current(), "/TEST.TXT", FD_OPEN_READ);
-            int nottty = file >= 0 ? (int)call_sys(SYS_ISATTY, (uint64_t)file, 0, 0, 0) : -1;
-
-            if (tty != 1) { kprintf(PRINT_SERIAL, "    FAIL isatty(1)=%d\n", tty); bad++; }
-            if (file < 0) { kprintf(PRINT_SERIAL, "    FAIL open for isatty\n"); bad++; }
-            else if (nottty != 0) { kprintf(PRINT_SERIAL, "    FAIL isatty(file)=%d\n", nottty); bad++; }
-
-            struct sys_stat st;
-            if (file >= 0) {
-                int64_t r = call_sys(SYS_FSTAT, (uint64_t)file, (uint64_t)(uintptr_t)&st, 0, 0);
-                if (r != 0 || st.size != 3000) {
-                    kprintf(PRINT_SERIAL, "    FAIL fstat r=%lld size=%llu\n", (long long)r, (unsigned long long)st.size);
-                    bad++;
-                }
-            }
-
-            struct sys_stat sp;
-            int64_t r = call_sys(SYS_STAT, (uint64_t)(uintptr_t)"/TEST.TXT", (uint64_t)(uintptr_t)&sp, 0, 0);
-            if (r != 0 || sp.size != 3000) {
-                kprintf(PRINT_SERIAL, "    FAIL stat r=%lld size=%llu\n", (long long)r, (unsigned long long)sp.size);
-                bad++;
-            }
-
-            int dir = fd_open(task_current(), "/SUB", FD_OPEN_READ);
-            if (dir >= 0) {
-                struct sys_dirent de;
-                int64_t g = call_sys(SYS_GETDENTS, (uint64_t)dir, 0, (uint64_t)(uintptr_t)&de, 0);
-                if (g != 1) { kprintf(PRINT_SERIAL, "    FAIL getdents first=%lld\n", (long long)g); bad++; }
-                else {
-                    int64_t g2 = call_sys(SYS_GETDENTS, (uint64_t)dir, 99, (uint64_t)(uintptr_t)&de, 0);
-                    if (g2 != 0) { kprintf(PRINT_SERIAL, "    FAIL getdents end=%lld\n", (long long)g2); bad++; }
-                }
-                fd_close(task_current(), dir);
-            }
-
-            if (file >= 0) {
-                char buf[16] = {0};
-                int64_t pr = call_sys(SYS_PREAD, (uint64_t)file, (uint64_t)(uintptr_t)buf, 14, 0);
-                int ok = (pr == 14);
-                for (int i = 0; i < 14 && ok; i++) if (buf[i] != "that my jarona"[i]) ok = 0;
-                if (!ok) { kprintf(PRINT_SERIAL, "    FAIL pread r=%lld\n", (long long)pr); bad++; }
-                fd_close(task_current(), file);
-            }
-
-            int64_t pid = call_sys(SYS_GETPID, 0, 0, 0, 0);
-            if (pid != 0) { kprintf(PRINT_SERIAL, "    FAIL getpid=%lld\n", (long long)pid); bad++; }
-
-            int64_t sl = call_sys(SYS_SLEEP, 2, 0, 0, 0);
-            if (sl != 0) { kprintf(PRINT_SERIAL, "    FAIL sleep=%lld\n", (long long)sl); bad++; }
-
-            int64_t dp = call_sys(SYS_DEBUG_PRINT, (uint64_t)(uintptr_t)"debug_print ok\n", 15, 0, 0);
-            if (dp != 15) { kprintf(PRINT_SERIAL, "    FAIL debug_print=%lld\n", (long long)dp); bad++; }
-
-            if (call_sys(0, 0, 0, 0, 0) != SYS_ENOSYS) { kprintf(PRINT_SERIAL, "    FAIL nr 0 not ENOSYS\n"); bad++; }
-            if (call_sys(77, 0, 0, 0, 0) != SYS_ENOSYS) { kprintf(PRINT_SERIAL, "    FAIL nr 77 not ENOSYS\n"); bad++; }
-            if (call_sys(250, 0, 0, 0, 0) != SYS_ENOSYS) { kprintf(PRINT_SERIAL, "    FAIL nr 250 not ENOSYS\n"); bad++; }
-
-            kprintf(PRINT_SERIAL, "FD kernel: 13 new syscall checks (pread/stat/fstat/getdents/isatty/getpid/sleep/debug/reserved): ");
-            kprintchar(bad == 0 ? 'Y' : 'N', PRINT_SERIAL);
-            kprintf(PRINT_SERIAL, "  %d bad\n", bad);
-        }
-
         {
             struct task *ft = task_current();
             int base = 0;

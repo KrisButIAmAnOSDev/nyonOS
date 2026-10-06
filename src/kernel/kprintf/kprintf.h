@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <stdarg.h>
+#include <stdbool.h>
 
 #define PRINT_SERIAL 0
 #define PRINT_SCREEN 1
@@ -21,6 +22,7 @@
 #define KATTR(flags, color) ((uint32_t)(flags) | ((uint32_t)(color) << 8))
 
 void kprintchar(char c, uint32_t attr);
+bool kprintf_busy(void);
 void kprintf(uint32_t attr, const char *fmt, ...);
 void kvprintf(uint32_t attr, const char *fmt, va_list args);
 

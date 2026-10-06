@@ -16,7 +16,8 @@
 #define FD_RIGHT_WRITE    (1u << 1)
 #define FD_RIGHT_DUP      (1u << 2)
 #define FD_RIGHT_TRANSFER (1u << 3)
-#define FD_RIGHTS_ALL     0x0F
+#define FD_RIGHT_GETDENT  (1u << 4)
+#define FD_RIGHTS_ALL     0x1F
 
 #define FD_FLAG_CLOEXEC  (1u << 0)
 #define FD_FLAG_NONBLOCK (1u << 1)
@@ -24,7 +25,8 @@
 #define FD_OPEN_READ   0x1
 #define FD_OPEN_WRITE  0x2
 #define FD_OPEN_CREATE 0x4
-#define FD_OPEN_TRUNC  0x8
+#define FD_OPEN_TRUNC   0x8
+#define FD_OPEN_DIR    0x10
 
 #define FD_SEEK_SET 0
 #define FD_SEEK_CUR 1
@@ -46,6 +48,7 @@
 #define FD_ENOTDIR  (-20)
 #define FD_EISDIR   (-21)
 #define FD_EIO      (-5)
+#define FD_EAGAIN   (-11)
 
 #define KOBJ_TYPE_ANY 0
 #define KOBJ_FILE    1
@@ -77,6 +80,7 @@ struct file {
 
 struct console {
     struct kobject obj;
+    uint32_t dest;
 };
 
 struct fd_entry {
@@ -109,6 +113,16 @@ int fd_alloc(struct task *t, struct kobject *obj, uint32_t rights, uint32_t flag
 int fd_install_stdio(struct task *t);
 int fd_close(struct task *t, int fd);
 int fd_dup(struct task *t, int fd, uint32_t rights);
+int fd_dup2(struct task *t, int oldfd, int newfd, uint32_t flags);
+int fd_dup_min(struct task *t, int oldfd, uint32_t min);
+int fd_slot_in_use(struct task *t, int idx);
+int fd_get_rights(struct task *t, int fd, uint16_t *rights);
+int fd_get_status(struct task *t, int fd, uint16_t *flags);
+int fd_set_status(struct task *t, int fd, uint16_t flags);
+int fd_set_cloexec(struct task *t, int fd, bool on);
+int fd_get_cloexec(struct task *t, int fd, bool *on);
+int fd_console_dest(int fd, struct task *t, uint32_t *dest);
+int fd_console_set_dest(int fd, struct task *t, uint32_t dest);
 
 struct kobject *fd_get_checked(struct task *t, int fd, uint32_t type, uint32_t needed);
 void fd_put(struct kobject *o);

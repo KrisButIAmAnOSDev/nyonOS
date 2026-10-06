@@ -5,8 +5,11 @@
 #include "kernel/sync/sync.h"
 #include "kernel/sync/preempt.h"
 #include "kernel/multitask/task.h"
+#include "drivers/keyboard/keyboard.h"
 
-static struct console the_console;
+static struct console the_ttyin;
+static struct console the_ttyout;
+static struct console the_ttyerr;
 
 void kobject_init(struct kobject *o, uint32_t type, uint32_t max_rights,
                   const struct kobject_ops *ops) {
@@ -45,7 +48,7 @@ void kobject_put(struct kobject *o) {
 
     if (o->ops && o->ops->close) o->ops->close(o);
 
-    if (o == &the_console.obj) return;
+    if (o == &the_ttyin.obj || o == &the_ttyout.obj || o == &the_ttyerr.obj) return;
 
     o->magic = KOBJ_MAGIC_FREE;
     o->type = 0;
@@ -245,6 +248,150 @@ int fd_dup(struct task *t, int fd, uint32_t rights) {
     return fd_alloc(t, o, keep, fl);
 }
 
+int fd_get_rights(struct task *t, int fd, uint16_t *rights) {
+    preempt_disable();
+    struct fd_table *ft = &t->fds;
+    uint32_t idx = (uint32_t)fd & FD_INDEX_MASK;
+    uint8_t gen = (uint8_t)(((uint32_t)fd >> FD_GEN_SHIFT) & FD_GEN_MASK);
+    int r = FD_EBADF;
+    if (fd >= 0 && idx < ft->capacity) {
+        struct fd_entry *e = slot(ft, idx);
+        if (e->obj && e->generation == gen) { *rights = e->rights; r = 0; }
+    }
+    preempt_enable();
+    return r;
+}
+
+int fd_set_cloexec(struct task *t, int fd, bool on) {
+    preempt_disable();
+    struct fd_table *ft = &t->fds;
+    uint32_t idx = (uint32_t)fd & FD_INDEX_MASK;
+    uint8_t gen = (uint8_t)(((uint32_t)fd >> FD_GEN_SHIFT) & FD_GEN_MASK);
+    int r = FD_EBADF;
+    if (fd >= 0 && idx < ft->capacity) {
+        struct fd_entry *e = slot(ft, idx);
+        if (e->obj && e->generation == gen) {
+            e->flags = on ? (e->flags | FD_FLAG_CLOEXEC) : (e->flags & ~FD_FLAG_CLOEXEC);
+            r = 0;
+        }
+    }
+    preempt_enable();
+    return r;
+}
+
+int fd_get_cloexec(struct task *t, int fd, bool *on) {
+    uint16_t f = 0;
+    if (fd_get_status(t, fd, &f)) return FD_EBADF;
+    *on = (f & FD_FLAG_CLOEXEC) != 0;
+    return 0;
+}
+
+int fd_get_status(struct task *t, int fd, uint16_t *flags) {
+    preempt_disable();
+    struct fd_table *ft = &t->fds;
+    uint32_t idx = (uint32_t)fd & FD_INDEX_MASK;
+    uint8_t gen = (uint8_t)(((uint32_t)fd >> FD_GEN_SHIFT) & FD_GEN_MASK);
+    int r = FD_EBADF;
+    if (fd >= 0 && idx < ft->capacity) {
+        struct fd_entry *e = slot(ft, idx);
+        if (e->obj && e->generation == gen) { *flags = e->flags; r = 0; }
+    }
+    preempt_enable();
+    return r;
+}
+
+int fd_set_status(struct task *t, int fd, uint16_t flags) {
+    preempt_disable();
+    struct fd_table *ft = &t->fds;
+    uint32_t idx = (uint32_t)fd & FD_INDEX_MASK;
+    uint8_t gen = (uint8_t)(((uint32_t)fd >> FD_GEN_SHIFT) & FD_GEN_MASK);
+    int r = FD_EBADF;
+    if (fd >= 0 && idx < ft->capacity) {
+        struct fd_entry *e = slot(ft, idx);
+        if (e->obj && e->generation == gen) {
+            e->flags = flags | FD_FLAG_CLOEXEC;
+            r = 0;
+        }
+    }
+    preempt_enable();
+    return r;
+}
+
+int fd_slot_in_use(struct task *t, int idx) {
+    struct fd_table *ft = &t->fds;
+    if (idx < 0 || (uint32_t)idx >= ft->capacity) return 0;
+    return slot(ft, (uint32_t)idx)->obj != NULL;
+}
+
+int fd_dup2(struct task *t, int oldfd, int newfd, uint32_t flags) {
+    if (oldfd == newfd) return newfd;
+
+    preempt_disable();
+
+    struct fd_table *ft = &t->fds;
+    uint32_t oidx = (uint32_t)oldfd & FD_INDEX_MASK;
+    uint8_t ogen = (uint8_t)(((uint32_t)oldfd >> FD_GEN_SHIFT) & FD_GEN_MASK);
+    uint32_t nidx = (uint32_t)newfd & FD_INDEX_MASK;
+
+    struct kobject *o = NULL;
+    uint16_t old_rights = 0;
+    uint8_t old_gen = 0;
+    bool found = false;
+
+    if (oldfd >= 0 && oidx < ft->capacity) {
+        struct fd_entry *e = slot(ft, oidx);
+        if (e->obj && e->generation == ogen) {
+            o = e->obj;
+            old_rights = e->rights;
+            old_gen = e->generation;
+            found = true;
+        }
+    }
+
+    if (!found || newfd < 0 || newfd >= FD_MAX_TOTAL) {
+        preempt_enable();
+        return FD_EBADF;
+    }
+
+    if (newfd >= (int)ft->capacity && !fd_grow(ft)) {
+        preempt_enable();
+        return FD_EMFILE;
+    }
+
+    struct fd_entry *target = slot(ft, nidx);
+    if (target->obj) {
+        struct kobject *old = target->obj;
+        target->obj = NULL;
+        target->rights = 0;
+        target->flags = FD_FLAG_CLOEXEC;
+        target->generation++;
+        mark_free(ft, nidx);
+        kobject_put(old);
+    }
+
+    mark_used(ft, nidx);
+    kobject_get(o);
+    target->obj = o;
+    target->rights = old_rights;
+    target->flags = (uint16_t)(flags | FD_FLAG_CLOEXEC);
+    target->generation = old_gen;
+
+    preempt_enable();
+    return newfd;
+}
+
+int fd_dup_min(struct task *t, int oldfd, uint32_t min) {
+    uint16_t keep = FD_RIGHTS_ALL;
+    if (fd_get_rights(t, oldfd, &keep)) return FD_EBADF;
+    if (min >= FD_MAX_TOTAL) return FD_EINVAL;
+
+    for (uint32_t i = min; i < FD_MAX_TOTAL; i++) {
+        if (fd_slot_in_use(t, (int)i)) continue;
+        return fd_dup2(t, oldfd, (int)i, 0);
+    }
+    return FD_EMFILE;
+}
+
 struct kobject *fd_get_checked(struct task *t, int fd, uint32_t type, uint32_t needed) {
     preempt_disable();
 
@@ -277,6 +424,12 @@ int64_t fd_read(struct task *t, int fd, void *ubuf, uint32_t len) {
     struct kobject *o = fd_get_checked(t, fd, KOBJ_TYPE_ANY, FD_RIGHT_READ);
     if (!o) return FD_EBADF;
     if (!o->ops || !o->ops->read_at) { kobject_put(o); return FD_EBADF; }
+
+    if (o->type != KOBJ_FILE) {
+        int64_t r = o->ops->read_at(o, ubuf, len, 0);
+        kobject_put(o);
+        return r;
+    }
 
     struct file *f = (struct file *)o;
     int64_t r = o->ops->read_at(o, ubuf, len, f->pos);
@@ -343,9 +496,10 @@ static int64_t file_lseek(struct kobject *o, int64_t off, int whence) {
 }
 
 static int64_t console_write_at(struct kobject *o, const void *ubuf, uint32_t len, uint64_t off) {
-    (void)o; (void)off;
+    (void)off;
+    const struct console *c = (const struct console *)o;
     const char *s = (const char *)ubuf;
-    for (uint32_t i = 0; i < len; i++) kprintchar(s[i], PRINT_BOTH);
+    for (uint32_t i = 0; i < len; i++) kprintchar(s[i], c->dest);
     return (int64_t)len;
 }
 
@@ -356,7 +510,60 @@ static const struct kobject_ops file_ops = {
     .close = NULL,
 };
 
-static const struct kobject_ops console_ops = {
+int fd_console_dest(int fd, struct task *t, uint32_t *dest) {
+    struct kobject *o = fd_get_checked(t, fd, KOBJ_CONSOLE, FD_RIGHT_WRITE);
+    if (!o) return FD_EBADF;
+    *dest = ((struct console *)o)->dest;
+    kobject_put(o);
+    return 0;
+}
+
+int fd_console_set_dest(int fd, struct task *t, uint32_t dest) {
+    if (dest > PRINT_BOTH) return FD_EINVAL;
+    struct kobject *o = fd_get_checked(t, fd, KOBJ_CONSOLE, FD_RIGHT_WRITE);
+    if (!o) return FD_EBADF;
+    ((struct console *)o)->dest = dest;
+    kobject_put(o);
+    return 0;
+}
+
+static int64_t console_read_at(struct kobject *o, void *ubuf, uint32_t len, uint64_t off) {
+    (void)o; (void)off;
+    if (!ubuf || !len) return 0;
+
+    keyboard_claim_stdin();
+
+    char *s = (char *)ubuf;
+    uint32_t i = 0;
+
+    preempt_disable();
+    while (i < len) {
+        char c;
+        if (!keyboard_try_pop(&c)) break;
+        s[i++] = c;
+        if (c == '\n') break;
+    }
+    preempt_enable();
+
+    if (i == 0) return FD_EAGAIN;
+    return (int64_t)i;
+}
+
+static const struct kobject_ops tty_in_ops = {
+    .read_at = console_read_at,
+    .write_at = NULL,
+    .lseek = NULL,
+    .close = NULL,
+};
+
+static const struct kobject_ops tty_out_ops = {
+    .read_at = NULL,
+    .write_at = console_write_at,
+    .lseek = NULL,
+    .close = NULL,
+};
+
+static const struct kobject_ops tty_err_ops = {
     .read_at = NULL,
     .write_at = console_write_at,
     .lseek = NULL,
@@ -367,13 +574,21 @@ int fd_install_stdio(struct task *t) {
     static bool console_ready = false;
 
     if (!console_ready) {
-        kobject_init(&the_console.obj, KOBJ_CONSOLE, FD_RIGHT_READ | FD_RIGHT_WRITE, &console_ops);
+        kobject_init(&the_ttyin.obj, KOBJ_CONSOLE, FD_RIGHT_READ | FD_RIGHT_DUP, &tty_in_ops);
+        the_ttyin.dest = PRINT_BOTH;
+
+        kobject_init(&the_ttyout.obj, KOBJ_CONSOLE, FD_RIGHT_WRITE | FD_RIGHT_DUP, &tty_out_ops);
+        the_ttyout.dest = PRINT_BOTH;
+
+        kobject_init(&the_ttyerr.obj, KOBJ_CONSOLE, FD_RIGHT_WRITE | FD_RIGHT_DUP, &tty_err_ops);
+        the_ttyerr.dest = PRINT_SERIAL;
+
         console_ready = true;
     }
 
-    int in = fd_alloc(t, &the_console.obj, FD_RIGHT_READ, FD_FLAG_CLOEXEC);
-    int out = fd_alloc(t, &the_console.obj, FD_RIGHT_WRITE, FD_FLAG_CLOEXEC);
-    int err = fd_alloc(t, &the_console.obj, FD_RIGHT_WRITE, FD_FLAG_CLOEXEC);
+    int in = fd_alloc(t, &the_ttyin.obj, FD_RIGHT_READ, FD_FLAG_CLOEXEC);
+    int out = fd_alloc(t, &the_ttyout.obj, FD_RIGHT_WRITE, FD_FLAG_CLOEXEC);
+    int err = fd_alloc(t, &the_ttyerr.obj, FD_RIGHT_WRITE, FD_FLAG_CLOEXEC);
 
     if (in < 0 || out < 0 || err < 0) {
         if (in >= 0) fd_close(t, in);
@@ -388,10 +603,11 @@ int fd_install_stdio(struct task *t) {
 int fd_open(struct task *t, const char *path, uint32_t oflags) {
     fs_node_t node;
     if (!fs_lookup(path, &node)) return FD_ENOENT;
-    if (node.is_dir) return FD_EISDIR;
+    if (node.is_dir && !(oflags & FD_OPEN_DIR)) return FD_EISDIR;
 
     uint32_t rights = 0;
-    if (oflags & FD_OPEN_WRITE) rights |= FD_RIGHT_WRITE;
+    if (node.is_dir) rights |= FD_RIGHT_GETDENT;
+    else if (oflags & FD_OPEN_WRITE) rights |= FD_RIGHT_WRITE;
     else rights |= FD_RIGHT_READ;
     rights |= FD_RIGHT_DUP;
 

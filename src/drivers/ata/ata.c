@@ -244,21 +244,56 @@ static bool ata_identify(int index) {
     trim_trailing(d->serial, 19);
     trim_trailing(d->model, 39);
 
-    d->lba48 = (data[83] & 0x10) != 0 && (data[82] & 0x10) != 0;
+    d->lba48 = (data[83] & (1u << 10)) != 0;
 
-    uint32_t cap_lo = (uint32_t)data[60] | ((uint32_t)data[61] << 16);
-    uint32_t cap_hi = data[82] & 0x0F;
-    cap_hi |= (data[83] & 0x10) ? ((uint32_t)(data[86] & 0x0F) << 16) : 0;
-    d->sectors = (cap_hi && ((cap_hi << 16) | cap_lo) != 0)
-                     ? (((uint64_t)cap_hi << 32) | cap_lo)
-                     : (cap_lo ? (uint64_t)cap_lo : (uint64_t)data[60]);
+    uint64_t cap28 = (uint64_t)data[60] | ((uint64_t)data[61] << 16);
+    uint64_t cap48 = ((uint64_t)data[100]) | ((uint64_t)data[101] << 16) |
+                     ((uint64_t)data[102] << 32) | ((uint64_t)data[103] << 48);
 
-    d->lba48_sectors = d->lba48
-        ? ((uint64_t)data[100]) | ((uint64_t)data[101] << 16) |
-          ((uint64_t)data[102] << 32) | ((uint64_t)data[103] << 48)
-        : d->sectors;
+    d->sectors = (d->lba48 && cap48) ? cap48 : cap28;
+    d->lba48_sectors = d->sectors;
 
     return true;
+}
+
+static void ata_probe_size(int index, ata_drive_t *d) {
+    static uint8_t buf[512];
+    uint64_t reported = d->sectors;
+
+    if (!d->present || d->atapi || !reported) return;
+
+    d->sectors = ATA_MAX_LBA28;
+
+    uint64_t good = 0;
+    uint64_t bad = ATA_MAX_LBA28 + 1;
+
+    for (uint64_t step = reported ? reported : 1; step < ATA_MAX_LBA28;) {
+        if (!ata_read_sectors(index, (uint32_t)(step - 1), 1, buf)) {
+            bad = step;
+            break;
+        }
+        good = step;
+        step = step < 4096 ? step * 2 : step + (step / 2);
+    }
+
+    if (bad == ATA_MAX_LBA28 + 1) {
+        if (ata_read_sectors(index, (uint32_t)(ATA_MAX_LBA28 - 1), 1, buf)) good = ATA_MAX_LBA28;
+        else bad = ATA_MAX_LBA28;
+    }
+
+    while (good + 1 < bad) {
+        uint64_t mid = good + (bad - good) / 2;
+        if (ata_read_sectors(index, (uint32_t)(mid - 1), 1, buf)) good = mid;
+        else bad = mid;
+    }
+
+    d->sectors = good;
+    d->lba48_sectors = good;
+
+    if (good != reported) {
+        kprintf(PRINT_SERIAL, "ATA: drive %d identify said %llu, probe says %llu sectors\n",
+                index, (unsigned long long)reported, (unsigned long long)good);
+    }
 }
 
 bool ata_init(void) {
@@ -277,6 +312,8 @@ bool ata_init(void) {
     }
 
     lock_release(LOCK_ATA, &ata_lock);
+
+    for (int i = 0; i < ATA_MAX_DRIVES; i++) ata_probe_size(i, &drives[i]);
 
     return drive_count > 0;
 }

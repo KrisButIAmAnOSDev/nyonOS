@@ -222,12 +222,26 @@ void kvprintf(uint32_t attr, const char *fmt, va_list args) {
     }
 }
 
+static volatile bool printing;
+
+bool kprintf_busy(void) {
+    return printing;
+}
+
 void kprintf(uint32_t attr, const char *fmt, ...) {
     va_list args;
 
     preempt_disable();
+    if (printing) {
+        preempt_enable();
+        return;
+    }
+    printing = true;
+
     va_start(args, fmt);
     kvprintf(attr, fmt, args);
     va_end(args);
+
+    printing = false;
     preempt_enable();
 }

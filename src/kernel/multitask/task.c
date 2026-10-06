@@ -57,8 +57,6 @@ static void task_release(struct task *t) {
         t->pml4 = NULL;
     }
 
-    if (t->user_stack_phys) pmm_free(t->user_stack_phys, TASK_USER_STACK_PAGES);
-    if (t->user_code_phys) pmm_free(t->user_code_phys, t->user_code_pages);
     if (t->stack_base) pmm_free(t->stack_base - vmm_hhdm_offset, TASK_STACK_PAGES);
 
     t->user_stack_phys = 0;

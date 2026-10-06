@@ -221,7 +221,7 @@ static uint64_t sys_getdents(struct isr_frame *f) {
     struct sys_dirent *out = (struct sys_dirent *)(uintptr_t)f->rdx;
     if (!buf_writable(f, (uint64_t)(uintptr_t)out, sizeof(*out))) return SYS_EFAULT;
 
-    struct kobject *o = fd_get_checked(t, (int)f->rdi, KOBJ_TYPE_ANY, FD_RIGHT_READ);
+    struct kobject *o = fd_get_checked(t, (int)f->rdi, KOBJ_TYPE_ANY, FD_RIGHT_GETDENT);
     if (!o) return SYS_EBADF;
     if (o->type != KOBJ_FILE) { kobject_put(o); return SYS_EBADF; }
 
@@ -290,6 +290,55 @@ static uint64_t sys_debug_print(struct isr_frame *f) {
     return len;
 }
 
+static uint64_t sys_dup2(struct isr_frame *f) {
+    struct task *t = task_current();
+    if (!t) return SYS_ENOSYS;
+    int r = fd_dup2(t, (int)f->rdi, (int)f->rsi, (uint32_t)f->rdx);
+    if (r < 0) return (uint64_t)(int64_t)r;
+    return (uint64_t)r;
+}
+
+static uint64_t sys_fcntl(struct isr_frame *f) {
+    struct task *t = task_current();
+    if (!t) return SYS_ENOSYS;
+
+    int fd = (int)f->rdi;
+    uint32_t cmd = (uint32_t)f->rsi;
+    uint32_t arg = (uint32_t)f->rdx;
+
+    switch (cmd) {
+        case 0: { int r = fd_dup_min(t, fd, arg); if (r < 0) return (uint64_t)(int64_t)r; return (uint64_t)r; }
+        case 1: { bool on; if (fd_get_cloexec(t, fd, &on)) return SYS_EBADF; return on ? 1 : 0; }
+        case 2: { if (fd_set_cloexec(t, fd, arg & 1)) return SYS_EBADF; return 0; }
+        case 3: { uint16_t fl; if (fd_get_status(t, fd, &fl)) return SYS_EBADF; return fl; }
+        case 4: { if (fd_set_status(t, fd, (uint16_t)arg)) return SYS_EBADF; return 0; }
+        default: return SYS_EINVAL;
+    }
+}
+
+static uint64_t sys_ioctl(struct isr_frame *f) {
+    struct task *t = task_current();
+    if (!t) return SYS_ENOSYS;
+
+    int fd = (int)f->rdi;
+    uint32_t req = (uint32_t)f->rsi;
+    uint64_t arg = f->rdx;
+
+    switch (req) {
+        case 0x5401: {
+            uint32_t d = 0;
+            if (fd_console_dest(fd, t, &d)) return SYS_EBADF;
+            return d;
+        }
+        case 0x5402: {
+            int r = fd_console_set_dest(fd, t, (uint32_t)arg);
+            if (r) return (uint64_t)(int64_t)r;
+            return 0;
+        }
+        default: return SYS_EINVAL;
+    }
+}
+
 static syscall_handler_t handlers[SYSCALL_NR_MAX] = {    [SYS_READ]           = sys_read,
     [SYS_WRITE]          = sys_write,
     [SYS_PREAD]          = sys_pread,
@@ -299,6 +348,9 @@ static syscall_handler_t handlers[SYSCALL_NR_MAX] = {    [SYS_READ]           = 
     [SYS_DUP]            = sys_dup,
     [SYS_FSTAT]          = sys_fstat,
     [SYS_STAT]           = sys_stat,
+    [SYS_DUP2]           = sys_dup2,
+    [SYS_FCNTL]          = sys_fcntl,
+    [SYS_IOCTL]          = sys_ioctl,
     [SYS_GETDENTS]       = sys_getdents,
     [SYS_ISATTY]         = sys_isatty,
     [SYS_EXIT]           = sys_exit,
