@@ -10,6 +10,10 @@
 #include "arch/x86_64/gdt/gdt.h"
 #include "arch/x86_64/pic/pic.h"
 #include "drivers/keyboard/keyboard.h"
+#include "arch/x86_64/cpu/cpu.h"
+#include "kernel/crypto/crypto.h"
+#include "kernel/exec/elf.h"
+#include "kernel/mm/vmm/vmspace.h"
 #include "kernel/mm/pmm/pmm.h"
 #include "kernel/mm/heap/heap.h"
 #include "kernel/sync/sync.h"
@@ -333,7 +337,38 @@ static void fd_spawn(vaddr_t entry_rip, size_t code_bytes, size_t code_pages) {
         "isatty on fd 1 is 1",
         "getpid returns nonzero",
         "sleep returns 0",
-        "debug_print refused without the gate"
+        "debug_print refused without the gate",
+        "open directory with O_DIRECTORY",
+        "getdents returns one entry",
+        "getdents entry size is 14",
+        "getdents past the end returns 0",
+        "dup2 onto fd 5",
+        "write through the dup2 fd",
+        "isatty on the dup2 fd",
+        "dup2 from a bad fd refused",
+        "dup2 onto itself",
+        "F_GETFD on the dup2 fd",
+        "F_SETFD clears close-on-exec",
+        "ioctl reads the stream destination",
+        "ioctl changes the stream destination",
+        "ioctl restores the stream destination",
+        "read on stdout refused",
+        "F_GETFL on stdout",
+        "F_DUPFD returns an fd >= 20",
+        "ioctl on a bad fd refused",
+        "read on stderr refused",
+        "write on stdin refused",
+        "isatty on stderr is 1",
+        "dup2 past the inline table grows it",
+        "write through the grown-table dup2",
+        "close the grown-table dup2",
+        "getpid agrees between syscall and int 0x80",
+        "int 0x80 fallback still writes",
+        "syscall keeps rsp and callee-saved regs across a sleep",
+        "int 0x80 keeps rsp and all regs across sleep and stat",
+        "syscall keeps argument regs across a filesystem stat",
+        "syscall puts return rip in rcx and rflags in r11",
+        "unknown number through syscall is ENOSYS"
     };
 
     int bad = 0;
@@ -350,6 +385,384 @@ static void fd_spawn(vaddr_t entry_rip, size_t code_bytes, size_t code_pages) {
     kprintf(PRINT_SERIAL, "FD ring3: %d of %d checks passed: ", FD_CHECKS - bad, FD_CHECKS);
     kprintchar(bad == 0 ? 'Y' : 'N', PRINT_SERIAL);
     kprintchar('\n', PRINT_SERIAL);
+}
+
+#define TTY_RES_DONE  16
+#define TTY_RES_READY 17
+#define TTY_RES_GO    18
+#define TTY_RES_ARG   19
+#define TTY_RES_GOT   32
+#define TTY_UNSET     0xdeadbeefdeadbeefULL
+
+static volatile uint64_t *tty_peer(const char *name, vaddr_t rip, size_t code_bytes, size_t code_pages,
+                                   uint64_t arg, uint32_t *pid_out, paddr_t *page_out) {
+    paddr_t code_phys, results_phys;
+    if (!pmm_alloc(&code_phys, code_pages)) return NULL;
+    if (!pmm_alloc(&results_phys, 1)) { pmm_free(code_phys, code_pages); return NULL; }
+
+    volatile uint8_t *dst = (volatile uint8_t *)(vmm_hhdm_offset + code_phys);
+    for (size_t i = 0; i < code_bytes; i++) dst[i] = user_test_entry[i];
+
+    volatile uint64_t *res = (volatile uint64_t *)(vmm_hhdm_offset + results_phys);
+    for (int i = 0; i < 64; i++) res[i] = TTY_UNSET;
+    res[TTY_RES_GO] = 0;
+    res[TTY_RES_ARG] = arg;
+
+    struct task *t = task_spawn_ring3_lent(name, code_phys, code_pages, TASK_USER_CODE_VIRT, rip, results_phys, 0x60000000ULL);
+    if (!t) {
+        pmm_free(code_phys, code_pages);
+        pmm_free(results_phys, 1);
+        return NULL;
+    }
+    *pid_out = t->pid;
+    *page_out = results_phys;
+    return res;
+}
+
+static bool tty_reap(uint32_t pid) {
+    for (int i = 0; i < 200 && task_find_pid(pid); i++) pit_sleep(5);
+    return task_find_pid(pid) == NULL;
+}
+
+static bool tty_wait(volatile uint64_t *res, int slot) {
+    for (int i = 0; i < 400 && res[slot] == TTY_UNSET && res[TTY_RES_DONE] == TTY_UNSET; i++) pit_sleep(10);
+    return res[slot] != TTY_UNSET;
+}
+
+static int tty_score(const char *who, volatile uint64_t *res, const char *const *what, int n) {
+    int bad = 0;
+    for (int i = 0; i < n; i++) {
+        if (res[i] == 1) continue;
+        bad++;
+        if (res[TTY_RES_GOT + i] != TTY_UNSET)
+            kprintf(PRINT_SERIAL, "    FAIL %s: %s, got %lld\n", who, what[i], (long long)res[TTY_RES_GOT + i]);
+        else
+            kprintf(PRINT_SERIAL, "    FAIL %s: %s, never ran\n", who, what[i]);
+    }
+    return bad;
+}
+
+static void tty_isolation_test(vaddr_t a_rip, vaddr_t b_rip, vaddr_t c_rip, size_t code_bytes, size_t code_pages) {
+    static const char *const what_a[7] = {
+        "first read of a free tty claims it",
+        "owner sees itself as foreground",
+        "owner can release the tty",
+        "released tty has no foreground",
+        "free tty can be taken back",
+        "handing the tty to a dead pid is refused",
+        "foreground is visible through stdout too"
+    };
+    static const char *const what_b[7] = {
+        "background read gets EIO",
+        "background sees the real owner",
+        "background cannot steal the tty",
+        "background cannot release the tty",
+        "owner unchanged after the attempts",
+        "background can still write",
+        "second background read still EIO"
+    };
+    static const char *const what_c[5] = {
+        "owner exit released the tty",
+        "new reader claims the free tty",
+        "new reader is foreground",
+        "handing the tty to the exited owner refused",
+        "foreground unchanged after refusal"
+    };
+
+    uint32_t apid = 0, bpid = 0, cpid = 0;
+    paddr_t apage = 0, bpage = 0, cpage = 0;
+    int bad = 0, total = 20;
+
+    volatile uint64_t *ra = tty_peer("ttyowner", a_rip, code_bytes, code_pages, 0, &apid, &apage);
+    if (!ra) { kprintf(PRINT_SERIAL, "TTY ring3: owner spawn failed\n"); return; }
+
+    volatile uint64_t *rb = NULL, *rc = NULL;
+    if (tty_wait(ra, TTY_RES_READY) && ra[TTY_RES_READY] == apid) {
+        rb = tty_peer("ttybg", b_rip, code_bytes, code_pages, apid, &bpid, &bpage);
+        if (rb) tty_wait(rb, TTY_RES_DONE);
+    }
+
+    ra[TTY_RES_GO] = 1;
+    tty_wait(ra, TTY_RES_DONE);
+    bool a_gone = tty_reap(apid);
+
+    if (rb && a_gone) {
+        rc = tty_peer("ttynext", c_rip, code_bytes, code_pages, apid, &cpid, &cpage);
+        if (rc) tty_wait(rc, TTY_RES_DONE);
+    }
+
+    bool all_gone = a_gone && (!rb || tty_reap(bpid)) && (!rc || tty_reap(cpid));
+
+    bad += tty_score("owner", ra, what_a, 7);
+    if (rb) bad += tty_score("background", rb, what_b, 7);
+    else { bad += 7; kprintf(PRINT_SERIAL, "    FAIL background never ran\n"); }
+    if (rc) bad += tty_score("next", rc, what_c, 5);
+    else { bad += 5; kprintf(PRINT_SERIAL, "    FAIL next never ran\n"); }
+
+    if (keyboard_owner() != 0) { bad++; kprintf(PRINT_SERIAL, "    FAIL tty still owned by %u after all exited\n", keyboard_owner()); }
+
+    if (all_gone) {
+        pmm_free(apage, 1);
+        if (rb) pmm_free(bpage, 1);
+        if (rc) pmm_free(cpage, 1);
+    }
+
+    kprintf(PRINT_SERIAL, "TTY ring3: %d of %d isolation checks passed (3 processes): ", total - bad, total);
+    kprintchar(bad == 0 ? 'Y' : 'N', PRINT_SERIAL);
+    kprintchar('\n', PRINT_SERIAL);
+}
+
+static void tty_inject(const char *s) {
+    while (*s) keyboard_inject_char(*s++);
+}
+
+static bool tty_asleep_on(uint32_t pid, void *chan, bool want_deadline) {
+    struct task *t = task_find_pid(pid);
+    if (!t || !t->blocked) return false;
+    if (t->wait_chan != chan) return false;
+    return want_deadline ? t->wake_tick != 0 : t->wake_tick == 0;
+}
+
+static void wait_test(vaddr_t rip, size_t code_bytes, size_t code_pages) {
+    static const char *const what[13] = {
+        "stdin is blocking by default",
+        "F_SETFL O_NONBLOCK accepted",
+        "F_GETFL reports O_NONBLOCK",
+        "F_SETFL leaves close-on-exec alone",
+        "non-blocking read of an empty tty is EAGAIN",
+        "blocking read returns the typed line",
+        "line content is hey\\n",
+        "half a line is not returned yet",
+        "backspace edited line comes back as ac\\n",
+        "edited line content",
+        "short read takes only what was asked",
+        "rest of the line comes on the next read",
+        "sleep returns 0"
+    };
+    static const char *const seen[5] = {
+        "reader was asleep on the tty, not spinning",
+        "reader stayed asleep on half a line",
+        "sleeper was asleep with a deadline",
+        "sleep did not return early",
+        "tty released after the reader exited"
+    };
+
+    uint32_t pid = 0;
+    paddr_t page = 0;
+    volatile uint64_t *r = tty_peer("ttywait", rip, code_bytes, code_pages, 0, &pid, &page);
+    if (!r) { kprintf(PRINT_SERIAL, "WAIT ring3: spawn failed\n"); return; }
+
+    void *chan = keyboard_wait_chan();
+    bool ok[5] = { false, false, false, false, false };
+
+    if (tty_wait(r, TTY_RES_READY)) {
+        pit_sleep(100);
+        ok[0] = tty_asleep_on(pid, chan, false);
+        tty_inject("hey\n");
+    }
+
+    if (tty_wait(r, 20)) {
+        tty_inject("ab");
+        r[23] = 1;
+    }
+
+    if (tty_wait(r, 21)) {
+        pit_sleep(100);
+        ok[1] = tty_asleep_on(pid, chan, false);
+        tty_inject("\bc\nwxyz\n");
+    }
+
+    uint64_t t0 = 0;
+    for (int i = 0; i < 4000 && r[22] == TTY_UNSET && r[TTY_RES_DONE] == TTY_UNSET; i++) pit_sleep(1);
+    if (r[22] != TTY_UNSET) {
+        t0 = pit_get_ticks();
+        pit_sleep(50);
+        ok[2] = tty_asleep_on(pid, NULL, true);
+    }
+
+    for (int i = 0; i < 4000 && r[TTY_RES_DONE] == TTY_UNSET; i++) pit_sleep(1);
+    uint64_t t1 = pit_get_ticks();
+    ok[3] = t0 && r[TTY_RES_DONE] == 1 && t1 - t0 + TASK_QUANTUM_TICKS >= pit_ms_to_ticks(150);
+
+    bool gone = tty_reap(pid);
+    ok[4] = gone && keyboard_owner() == 0;
+
+    int bad = tty_score("reader", r, what, 13);
+    for (int i = 0; i < 5; i++) {
+        if (ok[i]) continue;
+        bad++;
+        kprintf(PRINT_SERIAL, "    FAIL kernel saw: %s\n", seen[i]);
+    }
+    if (gone) pmm_free(page, 1);
+
+    kprintf(PRINT_SERIAL, "WAIT ring3: %d of 18 blocking checks passed: ", 18 - bad);
+    kprintchar(bad == 0 ? 'Y' : 'N', PRINT_SERIAL);
+    kprintchar('\n', PRINT_SERIAL);
+}
+
+static void elf_bad_test(const char *name, const uint8_t *img, size_t len, size_t file_size, int want, int *bad) {
+    uint8_t buf[512];
+    for (size_t i = 0; i < sizeof(buf); i++) buf[i] = img[i < len ? i : len - 1];
+
+    const elf64_phdr *ph = NULL;
+    size_t n = 0;
+    bool pie = false;
+    uint64_t entry = 0;
+    int r = elf_validate(buf, len, file_size, &ph, &n, &pie, &entry);
+    if (ph) kfree((void *)ph);
+
+    if (r != want) {
+        (*bad)++;
+        kprintf(PRINT_SERIAL, "    FAIL %s: got %d (%s), wanted %d\n", name, r, elf_error_text(r), want);
+    }
+}
+
+static void elf_reject_test(int *bad) {
+    static uint8_t good[512];
+    size_t before = pmm_free_pages();
+
+    static uint8_t real[1024];
+    fs_node_t node;
+    size_t fsize = 512;
+    if (fs_lookup("/BIN/HELLO", &node) || fs_lookup("/BIN/hello", &node)) {
+        fs_node_read(&node, 0, real, sizeof(real));
+        fsize = node.size;
+    }
+
+    for (size_t i = 0; i < sizeof(good); i++) good[i] = real[i];
+
+    elf_bad_test("a valid binary is accepted", good, 512, fsize, 0, bad);
+
+    uint8_t t[512];
+    for (size_t i = 0; i < sizeof(t); i++) t[i] = good[i];
+
+    t[1] = 'X';
+    elf_bad_test("bad magic rejected", t, 512, fsize, ELF_EBADMAGIC, bad);
+
+    for (size_t i = 0; i < sizeof(t); i++) t[i] = good[i];
+    t[4] = 1;
+    elf_bad_test("32-bit class rejected", t, 512, fsize, ELF_EBADCLASS, bad);
+
+    for (size_t i = 0; i < sizeof(t); i++) t[i] = good[i];
+    t[5] = 2;
+    elf_bad_test("big endian rejected", t, 512, fsize, ELF_EBADDATA, bad);
+
+    for (size_t i = 0; i < sizeof(t); i++) t[i] = good[i];
+    t[18] = 3; t[19] = 0;
+    elf_bad_test("wrong machine rejected", t, 512, fsize, ELF_EBADMACHINE, bad);
+
+    for (size_t i = 0; i < sizeof(t); i++) t[i] = good[i];
+    t[16] = 1;
+    elf_bad_test("relocatable object rejected", t, 512, fsize, ELF_EBADTYPE, bad);
+
+    for (size_t i = 0; i < sizeof(t); i++) t[i] = good[i];
+    t[56] = 0; t[57] = 0;
+    elf_bad_test("zero program headers rejected", t, 512, fsize, ELF_EPHNUM, bad);
+
+    for (size_t i = 0; i < sizeof(t); i++) t[i] = good[i];
+    t[56] = 200; t[57] = 0;
+    elf_bad_test("absurd program header count rejected", t, 512, fsize, ELF_EPHNUM, bad);
+
+    for (size_t i = 0; i < sizeof(t); i++) t[i] = good[i];
+    t[32] = 0xff; t[33] = 0xff;
+    elf_bad_test("program headers past end of file rejected", t, 512, fsize, ELF_EOFFSET, bad);
+
+    for (size_t i = 0; i < sizeof(t); i++) t[i] = good[i];
+    for (int k = 0; k < 8; k++) { t[64 + 32 + k] = 0xf0; t[64 + 40 + k] = 0xf0; }
+    t[64 + 32] = 0xf0; t[64 + 40] = 0xf8;
+    elf_bad_test("filesz past end of file rejected", t, 512, fsize, ELF_EOFFSET, bad);
+
+    for (size_t i = 0; i < sizeof(t); i++) t[i] = good[i];
+    for (int k = 0; k < 8; k++) t[64 + 40 + k] = 0;
+    t[64 + 40] = 1;
+    elf_bad_test("memsz smaller than filesz rejected", t, 512, fsize, ELF_EMEMSZ, bad);
+
+    for (size_t i = 0; i < sizeof(t); i++) t[i] = good[i];
+    for (int k = 0; k < 8; k++) { t[64 + 16 + k] = 0; t[64 + 24 + k] = 0; t[64 + 32 + k] = 0; t[64 + 40 + k] = 0; }
+    t[64 + 23] = 0x80;
+    t[64 + 31] = 0x80;
+    t[64 + 32] = 0x00; t[64 + 40] = 0x20;
+    t[27] = 0x00; t[28] = 0x80;
+    elf_bad_test("kernel-half address rejected", t, 512, fsize, ELF_EADDR, bad);
+
+    for (size_t i = 0; i < sizeof(t); i++) t[i] = good[i];
+    t[64 + 4] = ELF_PF_W | ELF_PF_X;
+    elf_bad_test("writable and executable segment rejected", t, 512, fsize, ELF_EWX, bad);
+
+    for (size_t i = 0; i < sizeof(t); i++) t[i] = good[i];
+    t[64] = ELF_PT_INTERP;
+    elf_bad_test("dynamic binary rejected for now", t, 512, fsize, ELF_EINTERP, bad);
+
+    for (size_t i = 0; i < sizeof(t); i++) t[i] = good[i];
+    t[24] = 0x11; t[25] = 0x22; t[26] = 0x33; t[27] = 0x44;
+    t[28] = 0; t[29] = 0; t[30] = 0; t[31] = 0;
+    elf_bad_test("entry point outside every segment rejected", t, 512, fsize, ELF_EENTRY, bad);
+
+    size_t after = pmm_free_pages();
+    if (after < before) {
+        (*bad)++;
+        kprintf(PRINT_SERIAL, "    FAIL validator leaked pages: %zu -> %zu\n", before, after);
+    }
+}
+
+static bool run_c_program(fs_node_t *node, uint64_t *entry_out, const char **argv, size_t argc) {
+    struct elf_image img;
+    const char *err = NULL;
+    int r = elf_load_argv(node, &img, &err, argv, argc);
+    if (r) {
+        kprintf(PRINT_SERIAL, "ELF: refused: %s (%d)\n", err ? err : "?", r);
+        return false;
+    }
+
+    if (entry_out) *entry_out = img.entry;
+
+    struct task *t = task_spawn_vmspace("cprog", img.vs, img.entry, img.stack_top);
+    elf_destroy(&img);
+    if (!t) return false;
+
+    for (int i = 0; i < 600 && task_find_pid(t->pid); i++) pit_sleep(10);
+    task_reap_now();
+
+    return task_find_pid(t->pid) == NULL;
+}
+
+static void elf_run_test(void) {
+    fs_node_t node;
+    if (!fs_lookup("/BIN/HELLO", &node) && !fs_lookup("/BIN/hello", &node)) {
+        kprintf(PRINT_SERIAL, "ELF: /BIN/hello not found\n");
+        return;
+    }
+
+    size_t before = pmm_free_pages();
+
+    uint64_t e1 = 0, e2 = 0;
+    bool ran1 = run_c_program(&node, &e1, NULL, 0);
+    bool ran2 = run_c_program(&node, &e2, NULL, 0);
+    bool moved = ran1 && ran2 && e1 != e2;
+
+    kprintf(PRINT_SERIAL, "ELF: aslr: two loads at 0x%llx and 0x%llx, differ: ",
+            (unsigned long long)e1, (unsigned long long)e2);
+    kprintchar(moved ? 'Y' : 'N', PRINT_SERIAL);
+    kprintchar('\n', PRINT_SERIAL);
+
+    {
+        static const char *args[3] = { "/BIN/hello", "hello", "from nyonOS" };
+        bool ok = run_c_program(&node, &e2, args, 3);
+        kprintf(PRINT_SERIAL, "ELF: argv passed to a c program: ");
+        kprintchar(ok ? 'Y' : 'N', PRINT_SERIAL);
+        kprintchar('\n', PRINT_SERIAL);
+    }
+
+    for (int i = 0; i < 600; i++) {
+        task_reap_now();
+        if (pmm_free_pages() >= before) break;
+        pit_sleep(10);
+    }
+
+    size_t after = pmm_free_pages();
+    kprintf(PRINT_SERIAL, "ELF: c program ran and exited with no leak: ");
+    kprintchar(after >= before ? 'Y' : 'N', PRINT_SERIAL);
+    kprintf(PRINT_SERIAL, "  free %zu -> %zu\n", before, after);
 }
 
 static void busy_wait_ms(uint64_t ms) {
@@ -442,6 +855,11 @@ void kmain(void) {
     pit_init(1000);
     lapic_unmask_ext_int(lapic_virt);
     idt_init();
+    cpu_detect();
+    cpu_enable_nx();
+    cpu_enable_smep_smap();
+    cpu_enable_pcid();
+    crypto_init();
     syscall_init();
     irq_install(0, pit_handler);
     irq_install(1, keyboard_handler);
@@ -530,9 +948,31 @@ void kmain(void) {
         validate_spawn(validate_rip, code_bytes, code_pages);
 
         {
+            extern uint8_t user_tty_a_entry[];
+            extern uint8_t user_tty_b_entry[];
+            extern uint8_t user_tty_c_entry[];
+            tty_isolation_test(TASK_USER_CODE_VIRT + (size_t)(user_tty_a_entry - user_test_entry),
+                               TASK_USER_CODE_VIRT + (size_t)(user_tty_b_entry - user_test_entry),
+                               TASK_USER_CODE_VIRT + (size_t)(user_tty_c_entry - user_test_entry),
+                               code_bytes, code_pages);
+            extern uint8_t user_wait_entry[];
+            wait_test(TASK_USER_CODE_VIRT + (size_t)(user_wait_entry - user_test_entry), code_bytes, code_pages);
+        }
+
+        {
             vaddr_t fd_rip = TASK_USER_CODE_VIRT + (size_t)(user_zfd_entry - user_test_entry);
             fd_spawn(fd_rip, code_bytes, code_pages);
         }
+
+        {
+            int bad = 0;
+            elf_reject_test(&bad);
+            kprintf(PRINT_SERIAL, "ELF reject: %d of 15 corrupt binaries refused: ", 15 - bad);
+            kprintchar(bad == 0 ? 'Y' : 'N', PRINT_SERIAL);
+            kprintchar('\n', PRINT_SERIAL);
+        }
+
+        elf_run_test();
         {
             struct task *ft = task_current();
             int base = 0;

@@ -8,6 +8,7 @@
 #include "kernel/fd/fd.h"
 #include "kernel/fs/fs.h"
 #include "arch/x86_64/pit/pit.h"
+#include "arch/x86_64/syscall/syscall_msr.h"
 
 extern void isr_stub_syscall(void);
 
@@ -25,18 +26,19 @@ static uint64_t sys_console_write(struct isr_frame *f) {
     if (!buf || len == 0) return SYS_EINVAL;
     if (len > SYS_MAX_IO) len = SYS_MAX_IO;
 
-    if (f->cs & 3) {
-        if (!user_range_ok((uint64_t)buf, len)) return SYS_EFAULT;
+    static uint8_t iobuf[SYS_MAX_IO];
+    const uint8_t *src = (const uint8_t *)(uintptr_t)buf;
 
-        struct page_table *pml4 = task_current_pml4();
-        if (pml4 && !vmm_range_present_in(pml4, (vaddr_t)buf, (size_t)len)) return SYS_EFAULT;
+    if (f->cs & 3) {
+        if (!copyin(iobuf, buf, len)) return SYS_EFAULT;
+        src = iobuf;
     }
 
     uint32_t attr = KATTR(dest, color);
 
     preempt_disable();
     for (uint64_t i = 0; i < len; i++) {
-        kprintchar(buf[i], attr);
+        kprintchar(src[i], attr);
     }
     preempt_enable();
 
@@ -77,17 +79,8 @@ static int copy_path(struct isr_frame *f, const char *up, char *out, size_t out_
         return i ? 0 : -1;
     }
 
-    struct page_table *pml4 = task_current_pml4();
-    if (!pml4) return -1;
-
-    for (size_t i = 0; i < out_max - 1; i++) {
-        uint64_t a = (uint64_t)(uintptr_t)up + i;
-        if (!user_range_ok(a, 1)) return -1;
-        if (!vmm_range_present_in(pml4, (vaddr_t)a, 1)) return -1;
-        out[i] = up[i];
-        if (out[i] == 0) return 0;
-    }
-    return -1;
+    if (!copyinstr(out, up, out_max)) return -1;
+    return out[0] ? 0 : -1;
 }
 
 static uint64_t sys_open(struct isr_frame *f) {
@@ -133,6 +126,12 @@ static uint64_t sys_write(struct isr_frame *f) {
     if (len > SYS_MAX_IO) len = SYS_MAX_IO;
 
     if (!buf_readable(f, (uint64_t)(uintptr_t)buf, len)) return SYS_EFAULT;
+
+    if (ring3(f)) {
+        static uint8_t iobuf[SYS_MAX_IO];
+        if (!copyin(iobuf, buf, len)) return SYS_EFAULT;
+        return (uint64_t)fd_write(t, (int)f->rdi, iobuf, len);
+    }
     return (uint64_t)fd_write(t, (int)f->rdi, buf, len);
 }
 
@@ -267,10 +266,10 @@ static uint64_t sys_getpid(struct isr_frame *f) {
 static uint64_t sys_sleep(struct isr_frame *f) {
     uint64_t ms = f->rdi;
     if (ms > 60000) ms = 60000;
+    if (ms == 0) return 0;
 
-    __asm__ volatile("sti" ::: "memory");
-    pit_sleep(ms);
-    __asm__ volatile("cli" ::: "memory");
+    uint64_t deadline = pit_get_ticks() + pit_ms_to_ticks(ms);
+    while (pit_get_ticks() < deadline) task_wait(NULL, deadline);
 
     return 0;
 }
@@ -310,8 +309,20 @@ static uint64_t sys_fcntl(struct isr_frame *f) {
         case 0: { int r = fd_dup_min(t, fd, arg); if (r < 0) return (uint64_t)(int64_t)r; return (uint64_t)r; }
         case 1: { bool on; if (fd_get_cloexec(t, fd, &on)) return SYS_EBADF; return on ? 1 : 0; }
         case 2: { if (fd_set_cloexec(t, fd, arg & 1)) return SYS_EBADF; return 0; }
-        case 3: { uint16_t fl; if (fd_get_status(t, fd, &fl)) return SYS_EBADF; return fl; }
-        case 4: { if (fd_set_status(t, fd, (uint16_t)arg)) return SYS_EBADF; return 0; }
+        case 3: {
+            uint16_t fl, rights;
+            if (fd_get_status(t, fd, &fl) || fd_get_rights(t, fd, &rights)) return SYS_EBADF;
+            uint64_t out = 0;
+            if (rights & FD_RIGHT_READ) out |= FD_OPEN_READ;
+            if (rights & FD_RIGHT_WRITE) out |= FD_OPEN_WRITE;
+            if (fl & FD_FLAG_NONBLOCK) out |= FD_OPEN_NONBLOCK;
+            return out;
+        }
+        case 4: {
+            uint16_t fl = (arg & FD_OPEN_NONBLOCK) ? FD_FLAG_NONBLOCK : 0;
+            if (fd_set_status(t, fd, fl)) return SYS_EBADF;
+            return 0;
+        }
         default: return SYS_EINVAL;
     }
 }
@@ -332,6 +343,18 @@ static uint64_t sys_ioctl(struct isr_frame *f) {
         }
         case 0x5402: {
             int r = fd_console_set_dest(fd, t, (uint32_t)arg);
+            if (r) return (uint64_t)(int64_t)r;
+            return 0;
+        }
+        case 0x540F: {
+            uint32_t pid = 0;
+            int r = fd_tty_get_fg(fd, t, &pid);
+            if (r) return (uint64_t)(int64_t)r;
+            return pid;
+        }
+        case 0x5410: {
+            if (arg > 0xFFFFFFFFULL) return SYS_EINVAL;
+            int r = fd_tty_set_fg(fd, t, (uint32_t)arg);
             if (r) return (uint64_t)(int64_t)r;
             return 0;
         }
@@ -363,6 +386,7 @@ static syscall_handler_t handlers[SYSCALL_NR_MAX] = {    [SYS_READ]           = 
 void syscall_init(void) {
     idt_set_descriptor(SYSCALL_VECTOR, isr_stub_syscall, IDT_ATTR_DPL3, 0);
     kprintf(PRINT_SERIAL, "SYSCALL: vector 0x%llx installed (int gate, DPL 3)\n", (unsigned long long)SYSCALL_VECTOR);
+    syscall_msr_init();
 }
 
 void syscall_dispatch(struct isr_frame *frame) {

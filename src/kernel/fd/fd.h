@@ -26,6 +26,7 @@
 #define FD_OPEN_WRITE  0x2
 #define FD_OPEN_CREATE 0x4
 #define FD_OPEN_TRUNC   0x8
+#define FD_OPEN_NONBLOCK 0x800
 #define FD_OPEN_DIR    0x10
 
 #define FD_SEEK_SET 0
@@ -49,6 +50,8 @@
 #define FD_EISDIR   (-21)
 #define FD_EIO      (-5)
 #define FD_EAGAIN   (-11)
+#define FD_EPERM    (-1)
+#define FD_ESRCH    (-3)
 
 #define KOBJ_TYPE_ANY 0
 #define KOBJ_FILE    1
@@ -61,6 +64,7 @@ struct kobject_ops {
     int64_t (*write_at)(struct kobject *o, const void *ubuf, uint32_t len, uint64_t off);
     int64_t (*lseek)(struct kobject *o, int64_t off, int whence);
     int (*close)(struct kobject *o);
+    int (*wait_readable)(struct kobject *o);
 };
 
 struct kobject {
@@ -123,6 +127,9 @@ int fd_set_cloexec(struct task *t, int fd, bool on);
 int fd_get_cloexec(struct task *t, int fd, bool *on);
 int fd_console_dest(int fd, struct task *t, uint32_t *dest);
 int fd_console_set_dest(int fd, struct task *t, uint32_t dest);
+int fd_tty_get_fg(int fd, struct task *t, uint32_t *pid);
+int fd_tty_set_fg(int fd, struct task *t, uint32_t pid);
+void fd_tty_task_gone(uint32_t pid);
 
 struct kobject *fd_get_checked(struct task *t, int fd, uint32_t type, uint32_t needed);
 void fd_put(struct kobject *o);

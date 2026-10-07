@@ -21,8 +21,9 @@ static inline uint8_t inb(uint16_t port) {
 
 void pit_handler(struct isr_frame *frame) {
     pit_ticks++;
+    task_tick(pit_ticks);
 
-    if (pit_ticks % TASK_QUANTUM_TICKS != 0) return;
+    if (pit_ticks % TASK_QUANTUM_TICKS != 0 && !task_current_blocked()) return;
     if (preempt_count() != 0) return;
 
     task_schedule(frame);
@@ -55,6 +56,10 @@ void pit_init(uint32_t frequency_hz) {
 void pit_sleep(uint64_t ms) {
     uint64_t target = pit_ticks + (ms * pit_frequency) / 1000;
     while (pit_ticks < target) __asm__ volatile("hlt");
+}
+
+uint64_t pit_ms_to_ticks(uint64_t ms) {
+    return (ms * pit_frequency + 999) / 1000;
 }
 
 uint64_t pit_get_ticks(void) {

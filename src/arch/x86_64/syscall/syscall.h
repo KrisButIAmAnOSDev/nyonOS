@@ -58,6 +58,8 @@ struct sys_dirent {
 #define SYS_EPERM   (-1)
 #define SYS_EBADF   (-9)
 #define SYS_EAGAIN  (-11)
+#define SYS_EIO     (-5)
+#define SYS_ESRCH   (-3)
 #define SYS_EFAULT  (-14)
 #define SYS_EINVAL  (-22)
 #define SYS_ENOSYS  (-38)
@@ -74,9 +76,9 @@ struct sys_dirent {
 #define FD_SEEK_END 2
 
 #define FD_RES_SLOTS 144
-#define FD_RES_DONE  57
-#define FD_RES_FAIL  65
-#define FD_CHECKS    49
+#define FD_RES_DONE 64
+#define FD_RES_FAIL 72
+#define FD_CHECKS 56
 
 void syscall_init(void);
 void syscall_dispatch(struct isr_frame *frame);

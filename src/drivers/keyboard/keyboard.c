@@ -31,12 +31,35 @@ static void keyboard_wait_output(void) {
     while (!(inb(0x64) & 0x01));
 }
 
-static void keyboard_buffer_push(char c) {
-    size_t next = (buffer_head + 1) % 256;
-    if (next != buffer_tail) {
-        keyboard_buffer[buffer_head] = c;
-        buffer_head = next;
+static char tty_wait_chan;
+
+static bool keyboard_buffer_push(char c) {
+    if (c == '\b') {
+        if (buffer_head == buffer_tail) return false;
+        size_t prev = (buffer_head + 255) % 256;
+        if (keyboard_buffer[prev] == '\n') return false;
+        buffer_head = prev;
+        return true;
     }
+    size_t next = (buffer_head + 1) % 256;
+    if (next == buffer_tail) return false;
+    keyboard_buffer[buffer_head] = c;
+    buffer_head = next;
+    return true;
+}
+
+void *keyboard_wait_chan(void) {
+    return &tty_wait_chan;
+}
+
+bool keyboard_line_ready(void) {
+    size_t head = buffer_head;
+    size_t tail = buffer_tail;
+    if ((head + 1) % 256 == tail) return true;
+    for (size_t i = tail; i != head; i = (i + 1) % 256) {
+        if (keyboard_buffer[i] == '\n') return true;
+    }
+    return false;
 }
 
 static bool keyboard_buffer_pop(char *c) {
@@ -92,14 +115,14 @@ static uint8_t scancode_to_ascii(uint8_t scancode) {
     return ascii;
 }
 
-static volatile bool stdin_owned = false;
+static volatile uint32_t stdin_owner = 0;
 
-void keyboard_claim_stdin(void) {
-    stdin_owned = true;
+void keyboard_set_owner(uint32_t pid) {
+    stdin_owner = pid;
 }
 
-bool keyboard_stdin_owned(void) {
-    return stdin_owned;
+uint32_t keyboard_owner(void) {
+    return stdin_owner;
 }
 
 void keyboard_handler(struct isr_frame *frame) {
@@ -107,10 +130,12 @@ void keyboard_handler(struct isr_frame *frame) {
     if (!(inb(0x64) & 0x01)) return;
     uint8_t sc = inb(0x60);
     char c = (char)scancode_to_ascii(sc);
-    keyboard_buffer_push(c);
+    if (!c) return;
 
-    if (c && !kprintf_busy()) kprintf(PRINT_SCREEN, "%c", c);
+    bool kept = keyboard_buffer_push(c);
+    if (kept && !kprintf_busy()) kprintf(PRINT_SCREEN, "%c", c);
 
+    task_wake_chan(&tty_wait_chan);
     task_unblock_all();
 }
 
@@ -126,18 +151,19 @@ bool keyboard_try_pop(char *out) {
 }
 
 bool keyboard_inject_char(char c) {
-    preempt_disable();
-    keyboard_buffer_push(c);
-    preempt_enable();
-    return true;
+    uint64_t rflags;
+    __asm__ volatile("pushfq; pop %0; cli" : "=r"(rflags) :: "memory");
+    bool kept = keyboard_buffer_push(c);
+    task_wake_chan(&tty_wait_chan);
+    if (rflags & 0x200) __asm__ volatile("sti" ::: "memory");
+    return kept;
 }
 
 void keyboard_process_buffer(void) {
-    if (stdin_owned) return;
+    if (stdin_owner) return;
 
     char c;
     while (keyboard_try_pop(&c)) {
-        kprintf(KATTR(PRINT_SCREEN, COLOR_WHITE), "%c", c);
     }
 }
 

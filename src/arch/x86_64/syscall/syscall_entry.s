@@ -1,11 +1,14 @@
 .intel_syntax noprefix
 
+.extern syscall_dispatch
+.extern syscall_kstack_top
+
+.set FRAME_RIP, 17*8
+
 .global syscall_entry
 .type syscall_entry,@function
 syscall_entry:
-
     mov  [rip + syscall_user_rsp], rsp
-
     mov  rsp, [rip + syscall_kstack_top]
 
     push 0x1b
@@ -34,6 +37,10 @@ syscall_entry:
     mov  rdi, rsp
     call syscall_dispatch
 
+    mov  rax, [rsp + FRAME_RIP]
+    shr  rax, 47
+    jnz  .slow_return
+
     pop  r15
     pop  r14
     pop  r13
@@ -51,4 +58,33 @@ syscall_entry:
     pop  rax
 
     add  rsp, 16
+    mov  rcx, [rsp]
+    mov  r11, [rsp + 16]
+    mov  rsp, [rsp + 24]
     sysretq
+
+.slow_return:
+    pop  r15
+    pop  r14
+    pop  r13
+    pop  r12
+    pop  r11
+    pop  r10
+    pop  r9
+    pop  r8
+    pop  rbp
+    pop  rdi
+    pop  rsi
+    pop  rdx
+    pop  rcx
+    pop  rbx
+    pop  rax
+
+    add  rsp, 16
+    iretq
+
+.section .bss
+.align 8
+.global syscall_user_rsp
+syscall_user_rsp:
+    .quad 0

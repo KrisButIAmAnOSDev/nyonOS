@@ -27,6 +27,21 @@ if [ ! -f fat16.img ]; then
     mcopy -i fat16.img@@1M /tmp/nyonos-fs-inner.txt ::/SUB/INNER.TXT
 fi
 
+make -C user >/dev/null
+
+if [ ! -f fat16.img ]; then
+    exit 1
+fi
+
+if [ ! -f user/bin/hello ]; then
+    echo "user/bin/hello missing, cannot stage user programs" >&2
+    exit 1
+fi
+
+mdeltree -i fat16.img@@1M ::/BIN >/dev/null 2>&1 || true
+mmd -i fat16.img@@1M ::/BIN
+mcopy -i fat16.img@@1M user/bin/hello ::/BIN/hello
+
 PATH=$PATH:/usr/sbin:/sbin sgdisk nyonOS.img -n 1:2048 -t 1:ef00 -m 1
 
 mformat -i nyonOS.img@@1M -T 126976 -h 64 -s 32 ::

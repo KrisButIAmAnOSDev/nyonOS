@@ -8,10 +8,12 @@ CFILES = $(filter %.c,$(SRCFILES))
 SFILES = $(filter %.s,$(SRCFILES))
 SFILES_S = $(filter %.S,$(SRCFILES))
 OBJ = $(addprefix obj/,$(CFILES:.c=.c.o) $(SFILES:.s=.s.o) $(SFILES_S:.S=.S.o))
+DEP = $(OBJ:.o=.d)
+DEPFLAGS = -MMD -MP
 OUTPUT := nyonOS
+QEMU_CPU = qemu64,+nx,+smep,+smap,+pcid,+rdrand,+rdseed,+fsgsbase,+invpcid
 
-EXCLUDE = src/arch/x86_64/syscall/syscall_msr.c \
-          src/arch/x86_64/syscall/syscall_entry.s
+EXCLUDE =
 
 .PHONY: all kernel image run clean
 
@@ -25,11 +27,7 @@ bin/$(OUTPUT): $(OBJ) linker.ld
 
 obj/%.c.o: %.c
 	mkdir -p "$(dir $@)"
-	$(CC) $(CFLAGS) -c $< -o $@
-
-obj/%.c.o: %.c
-	mkdir -p "$(dir $@)"
-	$(CC) $(CFLAGS) -c $< -o $@
+	$(CC) $(CFLAGS) $(DEPFLAGS) -c $< -o $@
 
 obj/%.s.o: %.s
 	mkdir -p "$(dir $@)"
@@ -37,21 +35,26 @@ obj/%.s.o: %.s
 
 obj/%.S.o: %.S
 	mkdir -p "$(dir $@)"
-	$(CC) $(CFLAGS) -c $< -o $@
+	$(CC) $(CFLAGS) $(DEPFLAGS) -c $< -o $@
 
-image: kernel
+image: kernel user
 	./build.sh
+
+user:
+	$(MAKE) -C user
 
 run:
 	$(MAKE) clean
 	$(MAKE) kernel
 	./build.sh
-	qemu-system-x86_64 -drive format=raw,file=nyonOS.img -drive format=raw,file=fat16.img -d int,cpu_reset -D qemu.log -serial stdio -no-reboot -k en-us
+	qemu-system-x86_64 -cpu $(QEMU_CPU) -drive format=raw,file=nyonOS.img -drive format=raw,file=fat16.img -d int,cpu_reset -D qemu.log -serial stdio -no-reboot -k en-us
 
 run-ihatedisplay: image
-	qemu-system-x86_64 -drive format=raw,file=nyonOS.img -drive format=raw,file=fat16.img -d int,cpu_reset -D qemu.log -serial stdio -no-reboot -k en-us -display none
+	qemu-system-x86_64 -cpu $(QEMU_CPU) -drive format=raw,file=nyonOS.img -drive format=raw,file=fat16.img -d int,cpu_reset -D qemu.log -serial stdio -no-reboot -k en-us -display none
 
 clean:
 	rm -rf bin obj
 
 .PHONY: all kernel image run run-ihatedisplay clean
+
+-include $(DEP)

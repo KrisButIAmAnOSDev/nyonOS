@@ -10,6 +10,7 @@
 #include "arch/x86_64/gdt/tss.h"
 #include "arch/x86_64/syscall/syscall.h"
 #include "kernel/usermode.h"
+#include "kernel/mm/vmm/vmspace.h"
 
 #define QW_RIP 17
 #define QW_CS 18
@@ -48,7 +49,14 @@ static void task_aspace_update(void) {
 }
 
 static void task_release(struct task *t) {
+    fd_tty_task_gone(t->pid);
     fd_table_clear(t);
+
+    if (t->vs) {
+        vm_destroy(t->vs);
+        t->vs = NULL;
+        t->pml4 = NULL;
+    }
 
     if (t->pml4) {
         if (t->user_stack_base) vmm_unmap_from(t->pml4, t->user_stack_base, TASK_USER_STACK_PAGES);
@@ -69,8 +77,11 @@ static void task_release(struct task *t) {
     t->stack_top = 0;
     t->frame = NULL;
     t->name = NULL;
+    t->vs = NULL;
     t->zombie = false;
     t->blocked = false;
+    t->wait_chan = NULL;
+    t->wake_tick = 0;
     t->exit_code = 0;
 }
 
@@ -106,6 +117,8 @@ void task_init(void) {
         tasks[i].pml4 = NULL;
         tasks[i].exit_code = 0;
         tasks[i].blocked = false;
+        tasks[i].wait_chan = NULL;
+        tasks[i].wake_tick = 0;
         tasks[i].name = NULL;
         fd_table_init(&tasks[i]);
     }
@@ -171,6 +184,9 @@ struct task *task_spawn(const char *name, void (*entry)(void)) {
     t->frame = f;
     t->in_use = true;
     t->zombie = false;
+    t->blocked = false;
+    t->wait_chan = NULL;
+    t->wake_tick = 0;
     t->debug_log = false;
     t->pid = next_pid++;
     t->name = name;
@@ -183,7 +199,7 @@ struct task *task_spawn(const char *name, void (*entry)(void)) {
     return t;
 }
 
-struct task *task_spawn_ring3(const char *name, paddr_t code_phys, size_t code_pages, vaddr_t code_virt, vaddr_t entry_rip, paddr_t shared_phys, vaddr_t shared_virt) {
+static struct task *spawn_ring3(const char *name, paddr_t code_phys, size_t code_pages, vaddr_t code_virt, vaddr_t entry_rip, paddr_t shared_phys, vaddr_t shared_virt, bool shared_owned) {
     lock_acquire(LOCK_SCHED, &sched_lock);
 
     task_reap_zombies();
@@ -216,7 +232,7 @@ struct task *task_spawn_ring3(const char *name, paddr_t code_phys, size_t code_p
         return NULL;
     }
 
-    if (!vmm_map_user(pml4, code_virt, code_phys, code_pages, VMM_DEFAULT_FLAGS)) {
+    if (!vmm_map_user_exec(pml4, code_virt, code_phys, code_pages, VMM_DEFAULT_FLAGS)) {
         pmm_free(kphys, TASK_STACK_PAGES);
         pmm_free(uphys, TASK_USER_STACK_PAGES);
         vmm_destroy_address_space(pml4);
@@ -224,7 +240,10 @@ struct task *task_spawn_ring3(const char *name, paddr_t code_phys, size_t code_p
         return NULL;
     }
 
-    if (shared_phys && !vmm_map_user(pml4, shared_virt, shared_phys, 1, VMM_DEFAULT_FLAGS)) {
+    bool shared_ok = !shared_phys ||
+        (shared_owned ? vmm_map_user(pml4, shared_virt, shared_phys, 1, VMM_DEFAULT_FLAGS)
+                      : vmm_map_user_lent(pml4, shared_virt, shared_phys, 1, VMM_DEFAULT_FLAGS));
+    if (!shared_ok) {
         pmm_free(kphys, TASK_STACK_PAGES);
         pmm_free(uphys, TASK_USER_STACK_PAGES);
         vmm_destroy_address_space(pml4);
@@ -253,6 +272,8 @@ struct task *task_spawn_ring3(const char *name, paddr_t code_phys, size_t code_p
     t->pml4 = pml4;
     t->exit_code = 0;
     t->blocked = false;
+    t->wait_chan = NULL;
+    t->wake_tick = 0;
     t->zombie = false;
 
     vaddr_t frame_addr = (t->stack_top - TASK_FRAME_GUARD) & ~0xFULL;
@@ -278,6 +299,74 @@ struct task *task_spawn_ring3(const char *name, paddr_t code_phys, size_t code_p
 
     kprintf(PRINT_SERIAL, "task: spawned %s in ring 3 (rip=0x%llx as=%p)\n", name, (unsigned long long)entry_rip, (void *)pml4);
     return t;
+}
+
+struct task *task_spawn_ring3(const char *name, paddr_t code_phys, size_t code_pages, vaddr_t code_virt, vaddr_t entry_rip, paddr_t shared_phys, vaddr_t shared_virt) {
+    return spawn_ring3(name, code_phys, code_pages, code_virt, entry_rip, shared_phys, shared_virt, true);
+}
+
+struct task *task_spawn_vmspace(const char *name, struct vmspace *vs, vaddr_t entry_rip, vaddr_t user_rsp) {
+    if (!name || !vs || !vs->pml4) return NULL;
+
+    lock_acquire(LOCK_SCHED, &sched_lock);
+    task_reap_zombies();
+
+    size_t slot = 0;
+    for (size_t i = 1; i < TASK_MAX; i++) {
+        if (!tasks[i].in_use && !tasks[i].zombie) { slot = i; break; }
+    }
+    if (!slot) { lock_release(LOCK_SCHED, &sched_lock); return NULL; }
+
+    paddr_t kphys;
+    if (!pmm_alloc(&kphys, TASK_STACK_PAGES)) { lock_release(LOCK_SCHED, &sched_lock); return NULL; }
+
+    struct task *t = &tasks[slot];
+    t->stack_base = vmm_hhdm_offset + kphys;
+    t->stack_top = t->stack_base + TASK_STACK_PAGES * PAGE_SIZE;
+    t->user_stack_phys = 0;
+    t->user_stack_base = 0;
+    t->user_stack_top = user_rsp;
+    t->user_code_phys = 0;
+    t->user_code_base = 0;
+    t->user_code_pages = 0;
+    vm_ref(vs);
+    t->vs = vs;
+    t->pml4 = vs->pml4;
+    t->exit_code = 0;
+    t->blocked = false;
+    t->wait_chan = NULL;
+    t->wake_tick = 0;
+    t->zombie = false;
+    t->expect_fault = false;
+
+    vaddr_t frame_addr = (t->stack_top - TASK_FRAME_GUARD) & ~0xFULL;
+    struct isr_frame *f = (struct isr_frame *)frame_addr;
+    uint64_t *q = (uint64_t *)f;
+    for (size_t i = 0; i < sizeof(struct isr_frame) / 8; i++) q[i] = 0;
+
+    q[QW_RIP] = entry_rip;
+    q[QW_CS] = GDT_USER_CODE_RPL3;
+    q[QW_RFLAGS] = TASK_RFLAGS_IF;
+    q[QW_RSP] = user_rsp;
+    q[QW_SS] = GDT_USER_DATA_RPL3;
+
+    t->frame = f;
+    t->in_use = true;
+    t->debug_log = false;
+    t->pid = next_pid++;
+    t->name = name;
+
+    fd_table_init(t);
+    fd_install_stdio(t);
+
+    lock_release(LOCK_SCHED, &sched_lock);
+
+    kprintf(PRINT_SERIAL, "task: spawned %s in ring 3 (rip=0x%llx as=%p)\n", name, (unsigned long long)entry_rip, (void *)vs->pml4);
+    return t;
+}
+
+struct task *task_spawn_ring3_lent(const char *name, paddr_t code_phys, size_t code_pages, vaddr_t code_virt, vaddr_t entry_rip, paddr_t shared_phys, vaddr_t shared_virt) {
+    return spawn_ring3(name, code_phys, code_pages, code_virt, entry_rip, shared_phys, shared_virt, false);
 }
 
 static struct task *pick_next(void) {
@@ -330,6 +419,7 @@ void task_exit_code(uint64_t code) {
     struct task *self = &tasks[current_slot];
 
     self->exit_code = code;
+    fd_tty_task_gone(self->pid);
 
     if (!self->expect_fault)
         kprintf(PRINT_SERIAL, "task: %s exited with code %llu\n", self->name, (unsigned long long)code);
@@ -385,6 +475,59 @@ void task_block_current(uint64_t seen_seq) {
 }
 
 
+static uint64_t earliest_wake = UINT64_MAX;
+
+bool task_wait(void *chan, uint64_t deadline) {
+    uint64_t rflags;
+    __asm__ volatile("pushfq; pop %0; cli" : "=r"(rflags) :: "memory");
+
+    struct task *self = &tasks[current_slot];
+
+    lock_acquire(LOCK_SCHED, &sched_lock);
+    self->wait_chan = chan;
+    self->wake_tick = deadline;
+    if (deadline && deadline < earliest_wake) earliest_wake = deadline;
+    self->blocked = true;
+    lock_release(LOCK_SCHED, &sched_lock);
+
+    for (;;) {
+        __asm__ volatile("sti; hlt" ::: "memory");
+        __asm__ volatile("cli" ::: "memory");
+        if (!__atomic_load_n(&self->blocked, __ATOMIC_ACQUIRE)) break;
+    }
+
+    bool timed_out = deadline && pit_get_ticks() >= deadline;
+    self->wait_chan = NULL;
+    self->wake_tick = 0;
+
+    if (rflags & TASK_RFLAGS_IF) __asm__ volatile("sti" ::: "memory");
+    return timed_out;
+}
+
+void task_wake_chan(void *chan) {
+    if (!chan) return;
+    for (size_t i = 0; i < TASK_MAX; i++) {
+        if (tasks[i].in_use && tasks[i].blocked && tasks[i].wait_chan == chan)
+            __atomic_store_n(&tasks[i].blocked, false, __ATOMIC_RELEASE);
+    }
+}
+
+void task_tick(uint64_t now) {
+    if (now < earliest_wake) return;
+    uint64_t next = UINT64_MAX;
+    for (size_t i = 0; i < TASK_MAX; i++) {
+        struct task *t = &tasks[i];
+        if (!t->in_use || !t->blocked || !t->wake_tick) continue;
+        if (now >= t->wake_tick) __atomic_store_n(&t->blocked, false, __ATOMIC_RELEASE);
+        else if (t->wake_tick < next) next = t->wake_tick;
+    }
+    earliest_wake = next;
+}
+
+bool task_current_blocked(void) {
+    return __atomic_load_n(&tasks[current_slot].blocked, __ATOMIC_ACQUIRE);
+}
+
 uint64_t task_wake_seq(void) {
     return __atomic_load_n(&wake_seq, __ATOMIC_ACQUIRE);
 }
@@ -403,6 +546,19 @@ void task_unblock_all(void) {
 
 struct task *task_current(void) {
     return &tasks[current_slot];
+}
+
+void task_reap_now(void) {
+    lock_acquire(LOCK_SCHED, &sched_lock);
+    task_reap_zombies();
+    lock_release(LOCK_SCHED, &sched_lock);
+}
+
+struct task *task_find_pid(uint32_t pid) {
+    for (size_t i = 0; i < TASK_MAX; i++) {
+        if (tasks[i].in_use && !tasks[i].zombie && tasks[i].pid == pid) return &tasks[i];
+    }
+    return NULL;
 }
 
 struct page_table *task_current_pml4(void) {

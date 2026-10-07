@@ -1,6 +1,7 @@
 #include "vmm.h"
 #include "kernel/kprintf/kprintf.h"
 #include "kernel/mm/pmm/pmm.h"
+#include "arch/x86_64/cpu/cpu.h"
 #include "drivers/serial/serial.h"
 #include "kernel/sync/sync.h"
 
@@ -29,9 +30,7 @@ static inline void invlpg(vaddr_t addr) {
 #define CR4_LA57 (1ULL << 12)
 
 static bool cpu_has_5level(void) {
-    uint32_t eax, ebx, ecx, edx;
-    __asm__ volatile("cpuid" : "=a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx) : "a"(7), "c"(0));
-    return (ecx & (1 << 16)) != 0;
+    return cpu_has_la57();
 }
 
 #define VMM_PT_ENTRIES 512
@@ -254,6 +253,60 @@ bool vmm_range_writable_in(struct page_table *root, vaddr_t addr, size_t len) {
     return true;
 }
 
+uint64_t vmm_query_in(struct page_table *root, vaddr_t vaddr) {
+    if (!root) return 0;
+    uint64_t *entry = walk_page_table(root, vaddr, vmm_5level ? 5 : 4, false, 0);
+    if (!entry) return 0;
+    return *entry;
+}
+
+bool vmm_unmap_keep(struct page_table *root, vaddr_t vaddr, size_t pages) {
+    if (!root || pages == 0) return false;
+    if (vaddr & (PAGE_SIZE - 1)) return false;
+
+    int levels = vmm_5level ? 5 : 4;
+
+    lock_acquire(LOCK_VMM, &vmm_lock);
+
+    for (size_t i = 0; i < pages; i++) {
+        uint64_t *entry = walk_page_table(root, vaddr + i * PAGE_SIZE, levels, false, 0);
+        if (!entry || !(*entry & PAGE_PRESENT)) {
+            lock_release(LOCK_VMM, &vmm_lock);
+            return false;
+        }
+    }
+
+    for (size_t i = 0; i < pages; i++) {
+        vaddr_t v = vaddr + i * PAGE_SIZE;
+        uint64_t *entry = walk_page_table(root, v, levels, false, 0);
+        *entry = 0;
+        invlpg(v);
+    }
+
+    reclaim_range(root, vaddr, pages, levels);
+
+    lock_release(LOCK_VMM, &vmm_lock);
+    return true;
+}
+
+bool vmm_unmap_keep_frames(struct page_table *root, vaddr_t vaddr, size_t pages, paddr_t *freed, size_t max_freed) {
+    if (!vmm_unmap_keep(root, vaddr, pages)) return false;
+    for (size_t i = 0; i < pages; i++) {
+        if (freed && i < max_freed) freed[i] = 0;
+    }
+    return true;
+}
+
+bool vmm_map_frames(struct page_table *root, vaddr_t vaddr, paddr_t paddr, size_t pages, uint64_t flags, bool exec, bool owned) {
+    if (cpu_has_nx()) {
+        if (exec) flags &= ~PAGE_NX;
+        else flags |= PAGE_NX;
+    }
+    flags |= PAGE_USER;
+    if (owned) flags |= PAGE_OWNED;
+    return vmm_map_in(root, vaddr, paddr, pages, flags);
+}
+
 uint64_t vmm_query(vaddr_t vaddr) {
     uint64_t *entry = walk_page_table(kernel_pml4, vaddr, vmm_5level ? 5 : 4, false, 0);
     if (!entry) return 0;
@@ -310,12 +363,24 @@ bool vmm_map_user(struct page_table *root, vaddr_t vaddr, paddr_t paddr, size_t 
     return vmm_map_in(root, vaddr, paddr, pages, flags | PAGE_USER | PAGE_OWNED);
 }
 
+bool vmm_map_user_exec(struct page_table *root, vaddr_t vaddr, paddr_t paddr, size_t pages, uint64_t flags) {
+    if (cpu_has_nx()) flags &= ~PAGE_NX;
+    return vmm_map_in(root, vaddr, paddr, pages, flags | PAGE_USER | PAGE_OWNED);
+}
+
+bool vmm_map_user_lent(struct page_table *root, vaddr_t vaddr, paddr_t paddr, size_t pages, uint64_t flags) {
+    return vmm_map_in(root, vaddr, paddr, pages, flags | PAGE_USER);
+}
+
 bool vmm_unmap_from(struct page_table *root, vaddr_t vaddr, size_t pages) {
     return vmm_unmap_in(root, vaddr, pages);
 }
 
 void vmm_switch_address_space(struct page_table *pml4) {
-    __asm__ volatile("mov %0, %%cr3" :: "r"((uint64_t)pml4 - vmm_hhdm_offset) : "memory");
+    uint64_t cr3 = (uint64_t)pml4 - vmm_hhdm_offset;
+    if (cpu_has_pcid()) cr3 |= (1ULL << 63);
+    __asm__ volatile("mov %0, %%cr3" :: "r"(cr3) : "memory");
+    cpu_flush_pcid();
 }
 
 static void reclaim_owned_frames(struct page_table *table, int level, uint32_t *freed) {

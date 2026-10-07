@@ -309,7 +309,7 @@ int fd_set_status(struct task *t, int fd, uint16_t flags) {
     if (fd >= 0 && idx < ft->capacity) {
         struct fd_entry *e = slot(ft, idx);
         if (e->obj && e->generation == gen) {
-            e->flags = flags | FD_FLAG_CLOEXEC;
+            e->flags = (uint16_t)((e->flags & ~FD_FLAG_NONBLOCK) | (flags & FD_FLAG_NONBLOCK));
             r = 0;
         }
     }
@@ -426,7 +426,15 @@ int64_t fd_read(struct task *t, int fd, void *ubuf, uint32_t len) {
     if (!o->ops || !o->ops->read_at) { kobject_put(o); return FD_EBADF; }
 
     if (o->type != KOBJ_FILE) {
-        int64_t r = o->ops->read_at(o, ubuf, len, 0);
+        uint16_t fl = 0;
+        fd_get_status(t, fd, &fl);
+        int64_t r;
+        for (;;) {
+            r = o->ops->read_at(o, ubuf, len, 0);
+            if (r != FD_EAGAIN || (fl & FD_FLAG_NONBLOCK) || !o->ops->wait_readable) break;
+            int w = o->ops->wait_readable(o);
+            if (w < 0) { r = w; break; }
+        }
         kobject_put(o);
         return r;
     }
@@ -527,11 +535,53 @@ int fd_console_set_dest(int fd, struct task *t, uint32_t dest) {
     return 0;
 }
 
+int fd_tty_get_fg(int fd, struct task *t, uint32_t *pid) {
+    struct kobject *o = fd_get_checked(t, fd, KOBJ_CONSOLE, 0);
+    if (!o) return FD_EBADF;
+    kobject_put(o);
+    *pid = keyboard_owner();
+    return 0;
+}
+
+int fd_tty_set_fg(int fd, struct task *t, uint32_t pid) {
+    struct kobject *o = fd_get_checked(t, fd, KOBJ_CONSOLE, 0);
+    if (!o) return FD_EBADF;
+    kobject_put(o);
+
+    int r = 0;
+    preempt_disable();
+    uint32_t owner = keyboard_owner();
+    if (owner != 0 && owner != t->pid) r = FD_EPERM;
+    else if (pid != 0 && !task_find_pid(pid)) r = FD_ESRCH;
+    else keyboard_set_owner(pid);
+    preempt_enable();
+    task_wake_chan(keyboard_wait_chan());
+    return r;
+}
+
+void fd_tty_task_gone(uint32_t pid) {
+    preempt_disable();
+    if (pid != 0 && keyboard_owner() == pid) keyboard_set_owner(0);
+    preempt_enable();
+    task_wake_chan(keyboard_wait_chan());
+}
+
 static int64_t console_read_at(struct kobject *o, void *ubuf, uint32_t len, uint64_t off) {
     (void)o; (void)off;
     if (!ubuf || !len) return 0;
 
-    keyboard_claim_stdin();
+    struct task *t = task_current();
+    uint32_t me = t ? t->pid : 0;
+
+    preempt_disable();
+    uint32_t owner = keyboard_owner();
+    if (owner == 0 && me != 0) {
+        keyboard_set_owner(me);
+        owner = me;
+    }
+    preempt_enable();
+    if (owner != me) return FD_EIO;
+    if (!keyboard_line_ready()) return FD_EAGAIN;
 
     char *s = (char *)ubuf;
     uint32_t i = 0;
@@ -549,7 +599,27 @@ static int64_t console_read_at(struct kobject *o, void *ubuf, uint32_t len, uint
     return (int64_t)i;
 }
 
+static int console_wait_readable(struct kobject *o) {
+    (void)o;
+    struct task *t = task_current();
+    uint32_t me = t ? t->pid : 0;
+
+    uint64_t rflags;
+    __asm__ volatile("pushfq; pop %0; cli" : "=r"(rflags) :: "memory");
+
+    int r;
+    for (;;) {
+        if (keyboard_owner() != me) { r = FD_EIO; break; }
+        if (keyboard_line_ready()) { r = 0; break; }
+        task_wait(keyboard_wait_chan(), 0);
+    }
+
+    if (rflags & 0x200) __asm__ volatile("sti" ::: "memory");
+    return r;
+}
+
 static const struct kobject_ops tty_in_ops = {
+    .wait_readable = console_wait_readable,
     .read_at = console_read_at,
     .write_at = NULL,
     .lseek = NULL,

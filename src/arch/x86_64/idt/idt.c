@@ -2,6 +2,7 @@
 #include "kernel/kprintf/kprintf.h"
 #include "drivers/serial/serial.h"
 #include "kernel/panic/panic.h"
+#include "kernel/usermode.h"
 #include "kernel/multitask/task.h"
 #include "arch/x86_64/pic/pic.h"
 #include "arch/x86_64/pit/pit.h"
@@ -98,6 +99,8 @@ static int exception_signal(uint64_t vector) {
 }
 
 void exception_handler(struct isr_frame* frame) {
+
+    if ((frame->cs & 3) == 0 && usermode_recover_copy(frame)) return;
 
     if ((frame->cs & 3) == 3) {
         struct task *t = task_current();
