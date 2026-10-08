@@ -8,7 +8,7 @@ A minimal x86_64 hobby OS kernel written from scratch. Boots via Limine on BIOS/
 - **Mutitasking (premitive)** with synchronization too
 - **Fat 16 filesystem** read only for now
 - **VGA framebuffer rendering** with 8x16 font (from `kbd` package, GPL-3.0)
-- **Ring 3 and syscall** use int 0x80,working on syscall rn
+- **elf loader (working!!!)** yea its working
 - **PIT timer** (channel 0, mode 2 rate generator) at 1000 Hz driving IRQ0`
 - **Working pmm and vmm** it works,at least (and 5lvl paging)
 - **"working"** keyboard dirver (ps/2)
