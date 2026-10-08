@@ -3,6 +3,5 @@ obj/
 nyonOS.img
 qemu.log
 fat16.img
-user/*.o
-user/lib/*.o
-user/bin/
+src/user/bin/
+src/user/*.o

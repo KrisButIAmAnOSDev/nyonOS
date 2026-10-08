@@ -132,8 +132,12 @@ void keyboard_handler(struct isr_frame *frame) {
     char c = (char)scancode_to_ascii(sc);
     if (!c) return;
 
-    bool kept = keyboard_buffer_push(c);
-    if (kept && !kprintf_busy()) kprintf(PRINT_SCREEN, "%c", c);
+    keyboard_buffer_push(c);
+
+    if (!stdin_owner && !kprintf_busy()) {
+        if (c == '\b') kprintf(PRINT_SCREEN, " \b\b");
+        else kprintf(PRINT_SCREEN, "%c", c);
+    }
 
     task_wake_chan(&tty_wait_chan);
     task_unblock_all();

@@ -5,6 +5,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include "kernel/fs/fs.h"
+#include "kernel/mm/vmm/vmm.h"
 typedef fs_node_t fs_node;
 
 #define ELF_NIDENT 16
@@ -82,11 +83,27 @@ struct elf_image {
     bool is_pie;
 };
 
-int elf_validate(const uint8_t *hdr, size_t hdr_len, size_t file_size, const elf64_phdr **out_ph, size_t *out_n, bool *out_pie, uint64_t *out_entry);
+int elf_validate_hdr(const uint8_t *hdr, size_t hdr_len, size_t file_size,
+                     size_t *out_phoff, size_t *out_phentsize, size_t *out_phnum,
+                     bool *out_pie, uint64_t *out_entry);
+
+int elf_validate_phdrs(const elf64_phdr *ph, size_t phnum, size_t file_size,
+                       bool is_pie, uint64_t entry, bool *out_ok);
 const char *elf_error_text(int err);
 
 int elf_load(const fs_node *file, struct elf_image *out, const char **err);
 int elf_load_argv(const fs_node *file, struct elf_image *out, const char **err, const char **argv, size_t argc);
+
+
+struct elf_shared {
+    paddr_t phys;
+    vaddr_t virt;
+    size_t pages;
+    bool owned_by_loader;
+};
+
+int elf_load_shared(const fs_node *file, struct elf_image *out, const char **err,
+                    const char **argv, size_t argc, const struct elf_shared *shared);
 
 void elf_destroy(struct elf_image *img);
 

@@ -13,7 +13,13 @@ DEPFLAGS = -MMD -MP
 OUTPUT := nyonOS
 QEMU_CPU = qemu64,+nx,+smep,+smap,+pcid,+rdrand,+rdseed,+fsgsbase,+invpcid
 
-EXCLUDE =
+EXCLUDE = $(shell find -L src/user -type f 2>/dev/null)
+
+ASM_ABI = obj/syscalls_asm.h
+
+$(ASM_ABI): src/abi/syscalls.def src/abi/abi.h scripts/gen_asm_abi.py
+	mkdir -p obj
+	python3 scripts/gen_asm_abi.py src/abi/syscalls.def src/abi/abi.h $@
 
 .PHONY: all kernel image run clean
 
@@ -29,19 +35,19 @@ obj/%.c.o: %.c
 	mkdir -p "$(dir $@)"
 	$(CC) $(CFLAGS) $(DEPFLAGS) -c $< -o $@
 
-obj/%.s.o: %.s
+obj/%.s.o: %.s $(ASM_ABI)
 	mkdir -p "$(dir $@)"
-	$(CC) $(CFLAGS) -c $< -o $@
+	$(CC) $(CFLAGS) -x assembler-with-cpp -Iobj -c $< -o $@
 
 obj/%.S.o: %.S
 	mkdir -p "$(dir $@)"
 	$(CC) $(CFLAGS) $(DEPFLAGS) -c $< -o $@
 
-image: kernel user
+image: kernel user $(ASM_ABI)
 	./build.sh
 
 user:
-	$(MAKE) -C user
+	$(MAKE) -C src/user
 
 run:
 	$(MAKE) clean
@@ -54,6 +60,7 @@ run-ihatedisplay: image
 
 clean:
 	rm -rf bin obj
+	$(MAKE) -C src/user clean
 
 .PHONY: all kernel image run run-ihatedisplay clean
 

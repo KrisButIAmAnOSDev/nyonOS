@@ -2,7 +2,7 @@
 #include "kernel/kprintf/kprintf.h"
 #include "kernel/mm/pmm/pmm.h"
 #include "kernel/sync/preempt.h"
-#include "kernel/usermode.h"
+#include "kernel/uaccess/uaccess.h"
 #include "kernel/mm/heap/heap.h"
 
 uint64_t vm_flags_for(uint8_t prot) {

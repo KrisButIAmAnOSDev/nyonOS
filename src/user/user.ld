@@ -22,7 +22,7 @@ SECTIONS
         *(.note.gnu.build-id)
     } :rodata
 
-    .data : ALIGN(4096) {
+    .data : {
         *(.data .data.*)
     } :data
 

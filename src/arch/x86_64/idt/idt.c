@@ -2,7 +2,7 @@
 #include "kernel/kprintf/kprintf.h"
 #include "drivers/serial/serial.h"
 #include "kernel/panic/panic.h"
-#include "kernel/usermode.h"
+#include "kernel/uaccess/uaccess.h"
 #include "kernel/multitask/task.h"
 #include "arch/x86_64/pic/pic.h"
 #include "arch/x86_64/pit/pit.h"
@@ -111,6 +111,7 @@ void exception_handler(struct isr_frame* frame) {
         if (!t || !t->expect_fault) {
             kprintf(PRINT_BOTH, "\ntask %s killed by CPU exception, vector 0x%llx\n", name, (unsigned long long)vector);
             kprintf(PRINT_BOTH, "  faulting rip=0x%llx err=0x%llx cr2=0x%llx signal=%d\n", (unsigned long long)frame->rip, (unsigned long long)frame->error_code, (unsigned long long)read_cr2(), signal);
+            kprintf(PRINT_BOTH, "  rax=0x%llx rdi=0x%llx rsi=0x%llx rbx=0x%llx rbp=0x%llx\n", (unsigned long long)frame->rax, (unsigned long long)frame->rdi, (unsigned long long)frame->rsi, (unsigned long long)frame->rbx, (unsigned long long)frame->rbp);
         }
 
         task_exit_code(128 + signal);

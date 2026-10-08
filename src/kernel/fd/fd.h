@@ -5,6 +5,7 @@
 #include <stddef.h>
 #include <stdbool.h>
 #include "kernel/fs/fs.h"
+#include "abi/abi.h"
 
 #define FD_INLINE      16
 #define FD_MAX_TOTAL   256
@@ -22,36 +23,36 @@
 #define FD_FLAG_CLOEXEC  (1u << 0)
 #define FD_FLAG_NONBLOCK (1u << 1)
 
-#define FD_OPEN_READ   0x1
-#define FD_OPEN_WRITE  0x2
-#define FD_OPEN_CREATE 0x4
-#define FD_OPEN_TRUNC   0x8
-#define FD_OPEN_NONBLOCK 0x800
-#define FD_OPEN_DIR    0x10
+#define FD_OPEN_READ     ABI_O_RDONLY
+#define FD_OPEN_WRITE    ABI_O_WRONLY
+#define FD_OPEN_CREATE   ABI_O_CREAT
+#define FD_OPEN_TRUNC    ABI_O_TRUNC
+#define FD_OPEN_NONBLOCK ABI_O_NONBLOCK
+#define FD_OPEN_DIR      ABI_O_DIRECTORY
 
-#define FD_SEEK_SET 0
-#define FD_SEEK_CUR 1
-#define FD_SEEK_END 2
+#define FD_SEEK_SET ABI_SEEK_SET
+#define FD_SEEK_CUR ABI_SEEK_CUR
+#define FD_SEEK_END ABI_SEEK_END
 
 #define KOBJ_MAGIC       0x6B6F6201UL
 #define KOBJ_MAGIC_FREE  0xDEADDEADUL
 #define KOBJ_REF_SATURATE 0xFFFFFFFEUL
 
-#define FD_EBADF    (-9)
-#define FD_EBADTYPE (-91)
-#define FD_EINVAL   (-22)
-#define FD_EFAULT   (-14)
-#define FD_ENOENT   (-2)
-#define FD_EMFILE   (-24)
-#define FD_EACCES   (-13)
-#define FD_ENOSPC   (-28)
-#define FD_ENOSYS   (-38)
-#define FD_ENOTDIR  (-20)
-#define FD_EISDIR   (-21)
-#define FD_EIO      (-5)
-#define FD_EAGAIN   (-11)
-#define FD_EPERM    (-1)
-#define FD_ESRCH    (-3)
+#define FD_EBADF    ABI_EBADF
+#define FD_EBADTYPE ABI_EBADTYPE
+#define FD_EINVAL   ABI_EINVAL
+#define FD_EFAULT   ABI_EFAULT
+#define FD_ENOENT   ABI_ENOENT
+#define FD_EMFILE   ABI_EMFILE
+#define FD_EACCES   ABI_EACCES
+#define FD_ENOSPC   ABI_ENOSPC
+#define FD_ENOSYS   ABI_ENOSYS
+#define FD_ENOTDIR  ABI_ENOTDIR
+#define FD_EISDIR   ABI_EISDIR
+#define FD_EIO      ABI_EIO
+#define FD_EAGAIN   ABI_EAGAIN
+#define FD_EPERM    ABI_EPERM
+#define FD_ESRCH    ABI_ESRCH
 
 #define KOBJ_TYPE_ANY 0
 #define KOBJ_FILE    1

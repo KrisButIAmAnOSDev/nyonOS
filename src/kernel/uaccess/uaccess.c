@@ -1,4 +1,4 @@
-#include "usermode.h"
+#include "uaccess.h"
 #include "kernel/kprintf/kprintf.h"
 #include "kernel/mm/vmm/vmm.h"
 #include "kernel/multitask/task.h"
@@ -15,7 +15,6 @@ bool usermode_recover_copy(struct isr_frame *frame) {
 
     copy_abort = 1;
 
-    // the fault always lands on a 1-byte movsb, so stepping past it is enough
     frame->rip += 1;
     return true;
 }

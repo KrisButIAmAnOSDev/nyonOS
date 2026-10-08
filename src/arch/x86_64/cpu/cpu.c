@@ -21,6 +21,7 @@ static struct cpu_features feat;
 static bool detected;
 static bool pcid_enabled;
 static bool smap_on;
+static bool pcid_bit_seen;
 
 static inline void do_cpuid(uint32_t leaf, uint32_t sub, uint32_t *a, uint32_t *b, uint32_t *c, uint32_t *d) {
     __asm__ volatile("cpuid" : "=a"(*a), "=b"(*b), "=c"(*c), "=d"(*d) : "a"(leaf), "c"(sub));
@@ -38,11 +39,18 @@ static void detect_basic(void) {
     feat.sse2 = (d >> 26) & 1;
     feat.syscall = (d >> 11) & 1;
     feat.pcid = (c >> 22) & 1;
+    pcid_bit_seen = feat.pcid;
 
     if (a >= CPUID_STRUCTURE) {
+        uint32_t max = a;
         do_cpuid(CPUID_STRUCTURE, 0, &a, &b, &c, &d);
-        feat.smap = (c >> 20) & 1;
-        feat.smep = (c >> 7) & 1;
+        feat.smep = (b >> 7) & 1;
+        feat.fsgsbase = (b >> 0) & 1;
+        feat.invpcid = (b >> 10) & 1;
+        if (max >= 1) {
+            do_cpuid(CPUID_STRUCTURE, 1, &a, &b, &c, &d);
+            feat.smap = (c >> 20) & 1;
+        }
     }
 }
 
@@ -59,7 +67,6 @@ static void detect_extended(void) {
     if (a < CPUID_EXTENDED_FEATURES2) return;
     do_cpuid(CPUID_EXTENDED_FEATURES2, 0, &a, &b, &c, &d);
     feat.rdseed = (c >> 18) & 1;
-    feat.fsgsbase = (b >> 0) & 1;
     feat.invariant_tsc = (d >> 8) & 1;
 }
 
@@ -90,7 +97,7 @@ bool cpu_has_smep(void) { return feat.smep; }
 bool cpu_has_smap(void) { return feat.smap; }
 bool cpu_has_rdrand(void) { return feat.rdrand; }
 bool cpu_has_rdseed(void) { return feat.rdseed; }
-bool cpu_has_pcid(void) { return feat.pcid; }
+bool cpu_has_pcid(void) { return pcid_enabled; }
 bool cpu_has_la57(void) { return feat.la57; }
 
 bool cpu_rdrand64(uint64_t *out) {
@@ -169,7 +176,11 @@ bool cpu_smap_enabled(void) {
 }
 
 bool cpu_enable_pcid(void) {
-    if (!feat.pcid) return false;
+    if (!pcid_bit_seen) return false;
+    if (!feat.invpcid) {
+        kprintf(PRINT_SERIAL, "CPU: pcid present but invpcid missing, leaving it off\n");
+        return false;
+    }
     if (pcid_enabled) return true;
 
     cpu_cr4_write(cpu_cr4_read() | CR4_PCIDE);

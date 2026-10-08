@@ -21,6 +21,7 @@ struct cpu_features {
     bool fsgsbase;
     bool la57;
     bool syscall;
+    bool invpcid;
 };
 
 void cpu_detect(void);

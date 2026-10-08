@@ -102,7 +102,6 @@ static unsigned entropy;
 
 static size_t gather_entropy(uint8_t *out, size_t len) {
     size_t got = 0;
-    size_t cap = len / 4;
 
     if (cpu_has_rdrand()) {
         while (got + 8 <= len) {
@@ -124,7 +123,7 @@ static size_t gather_entropy(uint8_t *out, size_t len) {
         }
     }
 
-    for (int i = 0; i < RDTSC_JITTER && got < cap; i++) {
+    for (int i = 0; i < RDTSC_JITTER && got + 8 <= len; i++) {
         uint64_t a = cpu_rdtsc();
         for (volatile int spin = 0; spin < 32; spin++) { }
         uint64_t b = cpu_rdtsc();
@@ -133,7 +132,7 @@ static size_t gather_entropy(uint8_t *out, size_t len) {
         entropy |= ENT_TSC;
     }
 
-    for (int i = 0; i < 64 && got < len; i++) {
+    for (int i = 0; i < 64 && got + 8 <= len; i++) {
         uint64_t t = pit_get_ticks();
         for (int j = 0; j < 8; j++) out[got + j] = (uint8_t)(t >> (8 * j));
         got += 8;
@@ -143,19 +142,42 @@ static size_t gather_entropy(uint8_t *out, size_t len) {
     return got;
 }
 
+#define CRYPTO_GATHER 1024
+
+#ifndef CRYPTO_FORCE_SEED
+#define CRYPTO_FORCE_SEED 0
+#endif
+
+static uint64_t mix64(uint64_t h, uint8_t b) {
+    return (h ^ b) * 0x100000001b3ULL;
+}
+
 void crypto_init(void) {
+    static uint8_t raw[CRYPTO_GATHER];
+    for (size_t i = 0; i < sizeof(raw); i++) raw[i] = 0;
+
     uint8_t seed[CRYPTO_MAX_ENTROPY];
-    uint64_t salt = 0;
-    for (size_t i = 0; i < sizeof(seed); i++) seed[i] = 0;
 
-    size_t got = gather_entropy(seed, sizeof(seed));
+    if (CRYPTO_FORCE_SEED) {
+        uint64_t h = 0xcbf29ce484222325ULL;
+        for (size_t i = 0; i < sizeof(seed); i++) {
+            h = mix64(h, (uint8_t)(CRYPTO_FORCE_SEED >> ((i % 8) * 8)));
+            h = mix64(h, (uint8_t)i);
+            seed[i] = (uint8_t)(h >> 32);
+        }
+    } else {
+        size_t got = gather_entropy(raw, sizeof(raw));
 
-    cpu_detect();
-    __attribute__((aligned(16))) uint8_t fxsave[512];
-    cpu_fxsave64_to(fxsave, sizeof(fxsave));
-    for (size_t i = 0; i < sizeof(fxsave); i++) salt ^= (uint64_t)fxsave[i] << ((i % 8) * 8);
+        __attribute__((aligned(16))) uint8_t fxsave[512];
+        cpu_fxsave64_to(fxsave, sizeof(fxsave));
 
-    for (int i = 0; i < 8; i++) seed[(got + (size_t)i) % sizeof(seed)] ^= (uint8_t)(salt >> (8 * i));
+        for (size_t i = 0; i < sizeof(seed); i++) {
+            uint64_t h = 0xcbf29ce484222325ULL;
+            for (size_t j = i; j < got; j += CRYPTO_MAX_ENTROPY) h = mix64(h, raw[j]);
+            for (size_t j = i; j < sizeof(fxsave); j += 71) h = mix64(h, fxsave[j]);
+            seed[i] = (uint8_t)(h >> 32);
+        }
+    }
 
     chacha_init(&rng, seed, 1);
 
@@ -164,12 +186,14 @@ void crypto_init(void) {
     pool_ready = true;
     seeded_once = true;
 
-    kprintf(PRINT_SERIAL, "CRYPTO: chacha20 seeded, entropy: %s%s%s%s\n",
+    kprintf(PRINT_SERIAL, "CRYPTO: chacha20 seeded, entropy: %s%s%s%s%s\n",
             entropy & ENT_RDRAND ? "rdrand " : "",
             entropy & ENT_RDSEED ? "rdseed " : "",
             entropy & ENT_TSC ? "tsc " : "",
             entropy & ENT_PIT ? "pit" : "",
-            (entropy & (ENT_RDRAND | ENT_RDSEED)) ? "" : " (no hardware rng, aslr is guessable)");
+            CRYPTO_FORCE_SEED ? "forced " : "",
+            (entropy & (ENT_RDRAND | ENT_RDSEED)) || CRYPTO_FORCE_SEED
+                ? "" : " (no hardware rng, aslr is guessable)");
 }
 
 bool crypto_seeded(void) {

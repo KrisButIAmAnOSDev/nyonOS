@@ -9,7 +9,7 @@
 #include "arch/x86_64/gdt/gdt.h"
 #include "arch/x86_64/gdt/tss.h"
 #include "arch/x86_64/syscall/syscall.h"
-#include "kernel/usermode.h"
+#include "kernel/uaccess/uaccess.h"
 #include "kernel/mm/vmm/vmspace.h"
 
 #define QW_RIP 17
@@ -533,8 +533,6 @@ uint64_t task_wake_seq(void) {
 }
 
 void task_unblock_all(void) {
-    // called from the keyboard ISR: taking LOCK_SCHED here would trip the
-    // held_mask checker (or self-deadlock) if the interrupted code held a lock
     __atomic_add_fetch(&wake_seq, 1, __ATOMIC_RELEASE);
 
     // 0, not 1: slot 0 is kmain, and kmain is the task parked on input. Every

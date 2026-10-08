@@ -1,0 +1,30 @@
+/* The entire syscall ABI in one place: name, number, return type, argument
+   count, and the typed parameter list. Every consumer is generated from this,
+   so the numbers, arity and argument types cannot drift apart.
+
+   Each row also carries the bare argument names, so the same row can
+   generate a declaration and the call that fills it in.  */
+
+#ifndef SYSCALLS_DEF
+#define SYSCALLS                                                                     \
+    X(read         ,    1, int64_t, 3, N(fd,(ulong)buf,len), int fd, void *buf, unsigned len) \
+    X(write        ,    2, int64_t, 3, N(fd,(ulong)buf,len), int fd, const void *buf, unsigned len) \
+    X(pread        ,    3, int64_t, 4, N(fd,(ulong)buf,len,off), int fd, void *buf, unsigned len, int64_t off) \
+    X(open         ,    4, int32_t, 2, N((ulong)path,flags), const char *path, int flags) \
+    X(close        ,    5, int32_t, 1, N(fd), int fd) \
+    X(lseek        ,    6, int64_t, 3, N(fd,off,whence), int fd, int64_t off, int whence) \
+    X(dup          ,    7, int32_t, 3, N(fd,cloexec,rights), int fd, int cloexec, unsigned rights) \
+    X(fstat        ,    8, int32_t, 2, N(fd,(ulong)st), int fd, struct sys_stat *st) \
+    X(getdents     ,    9, int32_t, 3, N(fd,index,(ulong)buf), int fd, unsigned index, struct sys_dirent *buf) \
+    X(isatty       ,   10, int32_t, 1, N(fd), int fd) \
+    X(stat         ,   11, int32_t, 2, N((ulong)path,(ulong)st), const char *path, struct sys_stat *st) \
+    X(dup2         ,   12, int32_t, 3, N(oldfd,newfd,flags), int oldfd, int newfd, unsigned flags) \
+    X(fcntl        ,   13, int32_t, 3, N(fd,cmd,arg), int fd, unsigned cmd, int64_t arg) \
+    X(ioctl        ,   14, int64_t, 3, N(fd,req,arg), int fd, unsigned req, int64_t arg) \
+    X(exit         ,   16, int32_t, 1, N(code), int code) \
+    X(getpid       ,   17, int32_t, 0, N(0)) \
+    X(sleep        ,   18, int32_t, 1, N(ms), unsigned ms) \
+    X(console_write,  240, int64_t, 4, N(dest,attr,(ulong)buf,len), unsigned dest, unsigned attr, const void *buf, unsigned len) \
+    X(debug_print  ,  241, int64_t, 2, N((ulong)msg,len), const char *msg, unsigned len)
+
+#endif

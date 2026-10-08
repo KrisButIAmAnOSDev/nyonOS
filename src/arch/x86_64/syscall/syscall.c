@@ -1,7 +1,7 @@
 #include "syscall.h"
 #include "kernel/kprintf/kprintf.h"
 #include "kernel/panic/panic.h"
-#include "kernel/usermode.h"
+#include "kernel/uaccess/uaccess.h"
 #include "kernel/mm/vmm/vmm.h"
 #include "kernel/multitask/task.h"
 #include "kernel/sync/preempt.h"
@@ -16,157 +16,133 @@ uint64_t syscall_kstack_top;
 
 typedef uint64_t (*syscall_handler_t)(struct isr_frame *f);
 
-static uint64_t sys_console_write(struct isr_frame *f) {
-    uint32_t dest = (uint32_t)f->rdi;
-    uint32_t color = (uint32_t)f->rsi;
-    const char *buf = (const char *)f->rdx;
-    uint64_t len = f->r10;
+static bool in_user(void) {
+    struct task *t = task_current();
+    return t && t->pml4 != NULL;
+}
+
+static int64_t sys_console_write(unsigned dest, unsigned attr, uintptr_t buf, unsigned len) {
 
     if (dest > PRINT_BOTH) return SYS_EINVAL;
     if (!buf || len == 0) return SYS_EINVAL;
     if (len > SYS_MAX_IO) len = SYS_MAX_IO;
 
     static uint8_t iobuf[SYS_MAX_IO];
-    const uint8_t *src = (const uint8_t *)(uintptr_t)buf;
+    const uint8_t *src = (const uint8_t *)buf;
 
-    if (f->cs & 3) {
-        if (!copyin(iobuf, buf, len)) return SYS_EFAULT;
+    if (in_user()) {
+        if (!copyin(iobuf, (const void *)buf, len)) return SYS_EFAULT;
         src = iobuf;
     }
 
-    uint32_t attr = KATTR(dest, color);
+    uint32_t kattr = KATTR(dest, attr);
 
     preempt_disable();
     for (uint64_t i = 0; i < len; i++) {
-        kprintchar(src[i], attr);
+        kprintchar(src[i], kattr);
     }
     preempt_enable();
 
     return len;
 }
 
-static uint64_t sys_exit(struct isr_frame *f) {
-    task_exit_code(f->rdi);
+static int64_t sys_exit(int code) {
+    task_exit_code(code);
     for (;;) __asm__ volatile("hlt");
     __builtin_unreachable();
 }
 
-static bool ring3(struct isr_frame *f) {
-    return (f->cs & 3) == 3;
-}
-
-static bool buf_writable(struct isr_frame *f, uint64_t ptr, uint64_t len) {
-    if (!ring3(f)) return true;
-    if (!user_range_ok(ptr, len)) return false;
-    struct page_table *pml4 = task_current_pml4();
-    if (!pml4) return false;
-    return vmm_range_writable_in(pml4, (vaddr_t)ptr, (size_t)len);
-}
-
-static bool buf_readable(struct isr_frame *f, uint64_t ptr, uint64_t len) {
-    if (!ring3(f)) return true;
-    if (!user_range_ok(ptr, len)) return false;
-    struct page_table *pml4 = task_current_pml4();
-    if (!pml4) return false;
-    return vmm_range_present_in(pml4, (vaddr_t)ptr, (size_t)len);
-}
-
-static int copy_path(struct isr_frame *f, const char *up, char *out, size_t out_max) {
-    if (!ring3(f)) {
+static int copy_path(const char *up, char *out, size_t out_max) {
+    if (!in_user()) {
         size_t i = 0;
         while (i < out_max - 1 && up[i]) { out[i] = up[i]; i++; }
         out[i] = 0;
         return i ? 0 : -1;
     }
-
     if (!copyinstr(out, up, out_max)) return -1;
     return out[0] ? 0 : -1;
 }
 
-static uint64_t sys_open(struct isr_frame *f) {
+static int64_t sys_open(uintptr_t path, int flags) {
     struct task *t = task_current();
     if (!t) return SYS_ENOSYS;
 
-    const char *up = (const char *)(uintptr_t)f->rdi;
-    uint32_t flags = (uint32_t)f->rsi;
 
-    if (!up) return SYS_EFAULT;
+    if (!path) return SYS_EFAULT;
 
-    char path[256];
-    if (copy_path(f, up, path, sizeof(path)) != 0) return SYS_EFAULT;
+    char kpath[256];
+    if (copy_path((const char *)path, kpath, sizeof(kpath)) != 0) return SYS_EFAULT;
 
-    int fd = fd_open(t, path, flags);
+    int fd = fd_open(t, kpath, flags);
     return (uint64_t)(int64_t)fd;
 }
 
-static uint64_t sys_close(struct isr_frame *f) {
+static int64_t sys_close(int fd) {
     struct task *t = task_current();
     if (!t) return SYS_ENOSYS;
-    return (uint64_t)(int64_t)fd_close(t, (int)f->rdi);
+    return (uint64_t)(int64_t)fd_close(t, (int)fd);
 }
 
-static uint64_t sys_read(struct isr_frame *f) {
+static int64_t sys_read(int fd, uintptr_t buf, unsigned len) {
     struct task *t = task_current();
     if (!t) return SYS_ENOSYS;
+    static uint8_t iobuf[SYS_MAX_IO];
 
-    void *buf = (void *)(uintptr_t)f->rsi;
-    uint32_t len = (uint32_t)f->rdx;
     if (len > SYS_MAX_IO) len = SYS_MAX_IO;
 
-    if (!buf_writable(f, (uint64_t)(uintptr_t)buf, len)) return SYS_EFAULT;
-    return (uint64_t)fd_read(t, (int)f->rdi, buf, len);
+    if (!in_user()) return (int64_t)fd_read(t, fd, (void *)buf, len);
+    if (!copyin(iobuf, (const void *)buf, len)) return SYS_EFAULT;
+    int64_t r = fd_read(t, fd, iobuf, len);
+    if (r > 0 && !copyout((void *)buf, iobuf, (size_t)r)) return SYS_EFAULT;
+    return r;
 }
 
-static uint64_t sys_write(struct isr_frame *f) {
+static int64_t sys_write(int fd, uintptr_t buf, unsigned len) {
     struct task *t = task_current();
     if (!t) return SYS_ENOSYS;
+    static uint8_t iobuf[SYS_MAX_IO];
 
-    const void *buf = (const void *)(uintptr_t)f->rsi;
-    uint32_t len = (uint32_t)f->rdx;
     if (len > SYS_MAX_IO) len = SYS_MAX_IO;
 
-    if (!buf_readable(f, (uint64_t)(uintptr_t)buf, len)) return SYS_EFAULT;
-
-    if (ring3(f)) {
-        static uint8_t iobuf[SYS_MAX_IO];
-        if (!copyin(iobuf, buf, len)) return SYS_EFAULT;
-        return (uint64_t)fd_write(t, (int)f->rdi, iobuf, len);
-    }
-    return (uint64_t)fd_write(t, (int)f->rdi, buf, len);
+    if (!in_user()) return (int64_t)fd_write(t, fd, (const void *)buf, len);
+    if (!copyin(iobuf, (const void *)buf, len)) return SYS_EFAULT;
+    return (int64_t)fd_write(t, fd, iobuf, len);
 }
 
-static uint64_t sys_lseek(struct isr_frame *f) {
+static int64_t sys_lseek(int fd, int64_t off, int whence) {
     struct task *t = task_current();
     if (!t) return SYS_ENOSYS;
-    return (uint64_t)fd_lseek(t, (int)f->rdi, (int64_t)f->rsi, (int)f->rdx);
+    return (uint64_t)fd_lseek(t, (int)fd, (int64_t)off, (int)whence);
 }
 
-static uint64_t sys_dup(struct isr_frame *f) {
+static int64_t sys_dup(int fd, int cloexec, unsigned rights) {
+    (void)cloexec;
     struct task *t = task_current();
     if (!t) return SYS_ENOSYS;
 
-    uint32_t rights = f->rdx ? (uint32_t)f->rdx : FD_RIGHTS_ALL;
-    return (uint64_t)(int64_t)fd_dup(t, (int)f->rdi, rights);
+    unsigned r = rights ? rights : FD_RIGHTS_ALL;
+    return (int64_t)fd_dup(t, fd, r);
 }
 
-static uint64_t sys_pread(struct isr_frame *f) {
+static int64_t sys_pread(int fd, uintptr_t buf, unsigned len, int64_t off) {
     struct task *t = task_current();
     if (!t) return SYS_ENOSYS;
+    static uint8_t iobuf[SYS_MAX_IO];
 
-    void *buf = (void *)(uintptr_t)f->rsi;
-    uint32_t len = (uint32_t)f->rdx;
-    int64_t off = (int64_t)f->r10;
     if (len > SYS_MAX_IO) len = SYS_MAX_IO;
     if (off < 0) return SYS_EINVAL;
-    if (!buf_writable(f, (uint64_t)(uintptr_t)buf, len)) return SYS_EFAULT;
 
-    struct kobject *o = fd_get_checked(t, (int)f->rdi, KOBJ_TYPE_ANY, FD_RIGHT_READ);
+    bool usr = in_user();
+    void *dst = usr ? (void *)iobuf : (void *)buf;
+
+    struct kobject *o = fd_get_checked(t, fd, KOBJ_TYPE_ANY, FD_RIGHT_READ);
     if (!o) return SYS_EBADF;
     if (!o->ops || !o->ops->read_at) { kobject_put(o); return SYS_EBADF; }
 
-    int64_t r = o->ops->read_at(o, buf, len, (uint64_t)off);
+    int64_t r = o->ops->read_at(o, dst, len, (uint64_t)off);
     kobject_put(o);
-    return (uint64_t)r;
+    if (usr && r > 0 && !copyout((void *)buf, iobuf, (size_t)r)) return SYS_EFAULT;
+    return r;
 }
 
 static void fill_stat(struct sys_stat *out, const fs_node_t *n) {
@@ -177,50 +153,51 @@ static void fill_stat(struct sys_stat *out, const fs_node_t *n) {
     for (unsigned i = 0; i < SYS_MAX_NAME; i++) out->name[i] = (i < FS_MAX_NAME) ? n->name[i] : 0;
 }
 
-static uint64_t sys_fstat(struct isr_frame *f) {
+static int64_t sys_fstat(int fd, uintptr_t st) {
     struct task *t = task_current();
     if (!t) return SYS_ENOSYS;
 
-    struct sys_stat *out = (struct sys_stat *)(uintptr_t)f->rsi;
-    if (!buf_writable(f, (uint64_t)(uintptr_t)out, sizeof(*out))) return SYS_EFAULT;
+    struct sys_stat kst;
+    struct sys_stat *out = in_user() ? &kst : (struct sys_stat *)st;
 
-    struct kobject *o = fd_get_checked(t, (int)f->rdi, KOBJ_TYPE_ANY, FD_RIGHT_READ);
+    struct kobject *o = fd_get_checked(t, fd, KOBJ_TYPE_ANY, FD_RIGHT_READ);
     if (!o) return SYS_EBADF;
     if (o->type != KOBJ_FILE) { kobject_put(o); return SYS_EBADF; }
 
     fill_stat(out, &((struct file *)o)->node);
     kobject_put(o);
+    if (in_user() && !copyout((void *)st, out, sizeof(*out))) return SYS_EFAULT;
     return 0;
 }
 
-static uint64_t sys_stat(struct isr_frame *f) {
+static int64_t sys_stat(uintptr_t path, uintptr_t st) {
     struct task *t = task_current();
     if (!t) return SYS_ENOSYS;
 
-    const char *up = (const char *)(uintptr_t)f->rdi;
-    struct sys_stat *out = (struct sys_stat *)(uintptr_t)f->rsi;
-    if (!up) return SYS_EFAULT;
-    if (!buf_writable(f, (uint64_t)(uintptr_t)out, sizeof(*out))) return SYS_EFAULT;
+    if (!path) return SYS_EFAULT;
 
-    char path[256];
-    if (copy_path(f, up, path, sizeof(path)) != 0) return SYS_EFAULT;
+    struct sys_stat kst;
+    struct sys_stat *out = in_user() ? &kst : (struct sys_stat *)st;
+
+    char kpath[256];
+    if (copy_path((const char *)path, kpath, sizeof(kpath)) != 0) return SYS_EFAULT;
 
     fs_node_t n;
-    if (!fs_lookup(path, &n)) return SYS_ENOENT;
+    if (!fs_lookup(kpath, &n)) return SYS_ENOENT;
 
     fill_stat(out, &n);
+    if (in_user() && !copyout((void *)st, out, sizeof(*out))) return SYS_EFAULT;
     return 0;
 }
 
-static uint64_t sys_getdents(struct isr_frame *f) {
+static int64_t sys_getdents(int fd, unsigned index, uintptr_t buf) {
     struct task *t = task_current();
     if (!t) return SYS_ENOSYS;
 
-    uint32_t index = (uint32_t)f->rsi;
-    struct sys_dirent *out = (struct sys_dirent *)(uintptr_t)f->rdx;
-    if (!buf_writable(f, (uint64_t)(uintptr_t)out, sizeof(*out))) return SYS_EFAULT;
+    struct sys_dirent kdent;
+    struct sys_dirent *out = in_user() ? &kdent : (struct sys_dirent *)buf;
 
-    struct kobject *o = fd_get_checked(t, (int)f->rdi, KOBJ_TYPE_ANY, FD_RIGHT_GETDENT);
+    struct kobject *o = fd_get_checked(t, fd, KOBJ_TYPE_ANY, FD_RIGHT_GETDENT);
     if (!o) return SYS_EBADF;
     if (o->type != KOBJ_FILE) { kobject_put(o); return SYS_EBADF; }
 
@@ -241,14 +218,15 @@ static uint64_t sys_getdents(struct isr_frame *f) {
     }
 
     kobject_put(o);
-    return (uint64_t)ret;
+    if (in_user() && ret > 0 && !copyout((void *)buf, out, sizeof(*out))) return SYS_EFAULT;
+    return (int64_t)ret;
 }
 
-static uint64_t sys_isatty(struct isr_frame *f) {
+static int64_t sys_isatty(int fd) {
     struct task *t = task_current();
     if (!t) return SYS_ENOSYS;
 
-    struct kobject *o = fd_get_checked(t, (int)f->rdi, KOBJ_TYPE_ANY, 0);
+    struct kobject *o = fd_get_checked(t, (int)fd, KOBJ_TYPE_ANY, 0);
     if (!o) return SYS_EBADF;
 
     bool tty = (o->type == KOBJ_CONSOLE);
@@ -256,15 +234,13 @@ static uint64_t sys_isatty(struct isr_frame *f) {
     return tty ? 1 : 0;
 }
 
-static uint64_t sys_getpid(struct isr_frame *f) {
-    (void)f;
+static int64_t sys_getpid(void) {
     struct task *t = task_current();
     if (!t) return SYS_ENOSYS;
     return t->pid;
 }
 
-static uint64_t sys_sleep(struct isr_frame *f) {
-    uint64_t ms = f->rdi;
+static int64_t sys_sleep(unsigned ms) {
     if (ms > 60000) ms = 60000;
     if (ms == 0) return 0;
 
@@ -274,41 +250,43 @@ static uint64_t sys_sleep(struct isr_frame *f) {
     return 0;
 }
 
-static uint64_t sys_debug_print(struct isr_frame *f) {
+static int64_t sys_debug_print(uintptr_t msg, unsigned len) {
     struct task *t = task_current();
     if (!t) return SYS_ENOSYS;
     if (!t->debug_log) return SYS_EPERM;
 
-    const char *buf = (const char *)(uintptr_t)f->rdi;
-    uint32_t len = (uint32_t)f->rsi;
+    if (!msg) return SYS_EFAULT;
     if (len > 512) len = 512;
-    if (!buf) return SYS_EFAULT;
-    if (!buf_readable(f, (uint64_t)(uintptr_t)buf, len)) return SYS_EFAULT;
 
-    for (uint32_t i = 0; i < len; i++) kprintchar(buf[i], PRINT_SERIAL);
+    char kbuf[512];
+    const char *src = (const char *)msg;
+    if (in_user()) {
+        if (!copyin(kbuf, (const void *)msg, len)) return SYS_EFAULT;
+        src = kbuf;
+    }
+
+    for (uint32_t i = 0; i < len; i++) kprintchar(src[i], PRINT_SERIAL);
     return len;
 }
 
-static uint64_t sys_dup2(struct isr_frame *f) {
+static int64_t sys_dup2(int oldfd, int newfd, unsigned flags) {
     struct task *t = task_current();
     if (!t) return SYS_ENOSYS;
-    int r = fd_dup2(t, (int)f->rdi, (int)f->rsi, (uint32_t)f->rdx);
+    int r = fd_dup2(t, (int)oldfd, (int)newfd, (uint32_t)flags);
     if (r < 0) return (uint64_t)(int64_t)r;
     return (uint64_t)r;
 }
 
-static uint64_t sys_fcntl(struct isr_frame *f) {
+static int64_t sys_fcntl(int fd, unsigned cmd, int64_t arg) {
     struct task *t = task_current();
     if (!t) return SYS_ENOSYS;
 
-    int fd = (int)f->rdi;
-    uint32_t cmd = (uint32_t)f->rsi;
-    uint32_t arg = (uint32_t)f->rdx;
+    uint32_t a = (uint32_t)arg;
 
     switch (cmd) {
-        case 0: { int r = fd_dup_min(t, fd, arg); if (r < 0) return (uint64_t)(int64_t)r; return (uint64_t)r; }
+        case 0: { int r = fd_dup_min(t, fd, a); if (r < 0) return (uint64_t)(int64_t)r; return (uint64_t)r; }
         case 1: { bool on; if (fd_get_cloexec(t, fd, &on)) return SYS_EBADF; return on ? 1 : 0; }
-        case 2: { if (fd_set_cloexec(t, fd, arg & 1)) return SYS_EBADF; return 0; }
+        case 2: { if (fd_set_cloexec(t, fd, a & 1)) return SYS_EBADF; return 0; }
         case 3: {
             uint16_t fl, rights;
             if (fd_get_status(t, fd, &fl) || fd_get_rights(t, fd, &rights)) return SYS_EBADF;
@@ -319,7 +297,7 @@ static uint64_t sys_fcntl(struct isr_frame *f) {
             return out;
         }
         case 4: {
-            uint16_t fl = (arg & FD_OPEN_NONBLOCK) ? FD_FLAG_NONBLOCK : 0;
+            uint16_t fl = (a & FD_OPEN_NONBLOCK) ? FD_FLAG_NONBLOCK : 0;
             if (fd_set_status(t, fd, fl)) return SYS_EBADF;
             return 0;
         }
@@ -327,13 +305,11 @@ static uint64_t sys_fcntl(struct isr_frame *f) {
     }
 }
 
-static uint64_t sys_ioctl(struct isr_frame *f) {
+static int64_t sys_ioctl(int fd, unsigned req, int64_t arg) {
     struct task *t = task_current();
     if (!t) return SYS_ENOSYS;
 
-    int fd = (int)f->rdi;
-    uint32_t req = (uint32_t)f->rsi;
-    uint64_t arg = f->rdx;
+    uint64_t a = (uint64_t)arg;
 
     switch (req) {
         case 0x5401: {
@@ -342,7 +318,7 @@ static uint64_t sys_ioctl(struct isr_frame *f) {
             return d;
         }
         case 0x5402: {
-            int r = fd_console_set_dest(fd, t, (uint32_t)arg);
+            int r = fd_console_set_dest(fd, t, (uint32_t)a);
             if (r) return (uint64_t)(int64_t)r;
             return 0;
         }
@@ -353,8 +329,8 @@ static uint64_t sys_ioctl(struct isr_frame *f) {
             return pid;
         }
         case 0x5410: {
-            if (arg > 0xFFFFFFFFULL) return SYS_EINVAL;
-            int r = fd_tty_set_fg(fd, t, (uint32_t)arg);
+            if (a > 0xFFFFFFFFULL) return SYS_EINVAL;
+            int r = fd_tty_set_fg(fd, t, (uint32_t)a);
             if (r) return (uint64_t)(int64_t)r;
             return 0;
         }
@@ -362,26 +338,7 @@ static uint64_t sys_ioctl(struct isr_frame *f) {
     }
 }
 
-static syscall_handler_t handlers[SYSCALL_NR_MAX] = {    [SYS_READ]           = sys_read,
-    [SYS_WRITE]          = sys_write,
-    [SYS_PREAD]          = sys_pread,
-    [SYS_OPEN]           = sys_open,
-    [SYS_CLOSE]          = sys_close,
-    [SYS_LSEEK]          = sys_lseek,
-    [SYS_DUP]            = sys_dup,
-    [SYS_FSTAT]          = sys_fstat,
-    [SYS_STAT]           = sys_stat,
-    [SYS_DUP2]           = sys_dup2,
-    [SYS_FCNTL]          = sys_fcntl,
-    [SYS_IOCTL]          = sys_ioctl,
-    [SYS_GETDENTS]       = sys_getdents,
-    [SYS_ISATTY]         = sys_isatty,
-    [SYS_EXIT]           = sys_exit,
-    [SYS_GETPID]         = sys_getpid,
-    [SYS_SLEEP]          = sys_sleep,
-    [SYS_CONSOLE_WRITE]  = sys_console_write,
-    [SYS_DEBUG_PRINT]    = sys_debug_print,
-};
+#define X(name, num, ...) [SYS_##name] = sys_##name,
 
 void syscall_init(void) {
     idt_set_descriptor(SYSCALL_VECTOR, isr_stub_syscall, IDT_ATTR_DPL3, 0);
@@ -389,13 +346,24 @@ void syscall_init(void) {
     syscall_msr_init();
 }
 
-void syscall_dispatch(struct isr_frame *frame) {
-    uint64_t nr = frame->rax;
+#define FARG0
+#define FARG1 (uint64_t)frame->rdi
+#define FARG2 FARG1, (uint64_t)frame->rsi
+#define FARG3 FARG2, (uint64_t)frame->rdx
+#define FARG4 FARG3, (uint64_t)frame->r10
 
-    if (nr >= SYSCALL_NR_MAX || !handlers[nr]) {
-        frame->rax = SYS_ENOSYS;
+#undef X
+
+#define X(name, num, ret, nargs, argnames, ...)                                        \
+    case SYS_##name:                                                                  \
+        frame->rax = (uint64_t)(int64_t)sys_##name(FARG##nargs);                      \
         return;
-    }
 
-    frame->rax = handlers[nr](frame);
+void syscall_dispatch(struct isr_frame *frame) {
+    switch (frame->rax) {
+        SYSCALLS
+        default:
+            frame->rax = SYS_ENOSYS;
+            return;
+    }
 }

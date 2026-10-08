@@ -8,12 +8,12 @@
 .global syscall_entry
 .type syscall_entry,@function
 syscall_entry:
-    mov  [rip + syscall_user_rsp], rsp
+    mov  r11, rsp
     mov  rsp, [rip + syscall_kstack_top]
 
     push 0x1b
-    push qword ptr [rip + syscall_user_rsp]
     push r11
+    pushfq
     push 0x23
     push rcx
     push 0
@@ -82,9 +82,3 @@ syscall_entry:
 
     add  rsp, 16
     iretq
-
-.section .bss
-.align 8
-.global syscall_user_rsp
-syscall_user_rsp:
-    .quad 0

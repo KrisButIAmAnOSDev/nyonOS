@@ -1,5 +1,7 @@
 .intel_syntax noprefix
 
+#include "syscalls_asm.h"
+
 .macro WRITE dest, colour, begin, end
     mov rax, 240
     mov rdi, \dest
@@ -155,34 +157,9 @@ fault_msg:
     .ascii "nyawnyaw nyoe nyalsei nyoo fault\n"
 fault_msg_end:
 
-.set SYS_READ,          1
-.set SYS_WRITE,         2
-.set SYS_PREAD,         3
-.set SYS_OPEN,          4
-.set SYS_CLOSE,         5
-.set SYS_LSEEK,         6
-.set SYS_DUP,           7
-.set SYS_FSTAT,         8
-.set SYS_GETDENTS,     9
-.set SYS_ISATTY,       10
-.set SYS_STAT,         11
-.set SYS_EXIT,         16
-.set SYS_GETPID,       17
-.set SYS_SLEEP,        18
-.set SYS_CONSOLE_WRITE, 240
-.set SYS_DEBUG_PRINT,  241
 
-.set O_RDONLY,  1
-.set O_DIRECTORY, 0x10
-.set SEEK_SET,  0
 
-.set EBADF,    -9
-.set EPERM,    -1
-.set ENOENT,   -2
-.set EFAULT,  -14
-.set EISDIR,  -21
 
-.set RIGHT_READ, 1
 
 .set RES, 0x60000000
 .set WANT_SIZE, 3000
@@ -197,16 +174,6 @@ fault_msg_end:
     jmp report
 .endm
 
-.set SYS_DUP2,         12
-.set SYS_FCNTL,        13
-.set SYS_IOCTL,        14
-.set F_DUPFD,   0
-.set F_GETFD,    1
-.set F_SETFD,    2
-.set F_GETFL,    3
-.set F_SETFL,    4
-.set KTTY_GETDEST, 0x5401
-.set KTTY_SETDEST, 0x5402
 
 .macro ABI_PROBE fast, cfail, afail
     push rbx
@@ -1044,11 +1011,6 @@ msg_eol_end:
 
 .size user_zfd_entry, . - user_zfd_entry
 
-.set EIO,     -5
-.set ESRCH,   -3
-.set EAGAIN, -11
-.set KTTY_GETFG, 0x540F
-.set KTTY_SETFG, 0x5410
 .set TTY_DONE,  RES + 16*8
 .set TTY_READY, RES + 17*8
 .set TTY_GO,    RES + 18*8
@@ -1079,7 +1041,6 @@ msg_eol_end:
     syscall
 .endm
 
-.set O_NONBLOCK, 0x800
 
 .macro TNONBLOCK on
     mov rax, SYS_FCNTL

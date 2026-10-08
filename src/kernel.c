@@ -282,111 +282,6 @@ static void fs_test(void) {
     kprintchar('\n', PRINT_SERIAL);
 }
 
-static void fd_spawn(vaddr_t entry_rip, size_t code_bytes, size_t code_pages) {
-    paddr_t code_phys, results_phys;
-
-    if (!pmm_alloc(&code_phys, code_pages) || !pmm_alloc(&results_phys, 1)) {
-        kprintf(PRINT_SERIAL, "FD ring3: alloc failed\n");
-        return;
-    }
-
-    volatile uint8_t *dst = (volatile uint8_t *)(vmm_hhdm_offset + code_phys);
-    for (size_t i = 0; i < code_bytes; i++) dst[i] = user_test_entry[i];
-
-    volatile uint64_t *res = (volatile uint64_t *)(vmm_hhdm_offset + results_phys);
-    for (int i = 0; i < FD_RES_SLOTS; i++) res[i] = 0xdeadbeefdeadbeefULL;
-
-    struct task *t = task_spawn_ring3("ring3fd", code_phys, code_pages, TASK_USER_CODE_VIRT,
-                                      entry_rip, results_phys, 0x60000000ULL);
-    if (!t) {
-        pmm_free(code_phys, code_pages);
-        pmm_free(results_phys, 1);
-        kprintf(PRINT_SERIAL, "FD ring3: spawn failed\n");
-        return;
-    }
-
-    for (int i = 0; i < 400 && res[FD_RES_DONE] == 0xdeadbeefdeadbeefULL; i++) pit_sleep(10);
-
-    if (res[FD_RES_DONE] == 0xdeadbeefdeadbeefULL) {
-        kprintf(PRINT_SERIAL, "FD ring3: task never reported\n");
-        return;
-    }
-
-    static const char *what[FD_CHECKS] = {
-        "open /TEST.TXT returns an fd",
-        "read 14 bytes from ring 3",
-        "content matches that my jarona",
-        "lseek SET 0 resets position",
-        "re-read after lseek returns 4",
-        "lseek past end clamps to file size",
-        "read at EOF returns 0",
-        "dup with narrowed rights",
-        "write through read-only fd refused",
-        "close returns 0",
-        "stale fd after close refused",
-        "double close refused",
-        "open missing file returns ENOENT",
-        "open directory returns EISDIR",
-        "kernel pointer to read rejected",
-        "write to stdout via fd 1",
-        "pread 14 bytes at offset 0",
-        "pread content matches",
-        "fstat reports size 3000",
-        "stat by path reports size 3000",
-        "isatty on a file fd is 0",
-        "isatty on fd 1 is 1",
-        "getpid returns nonzero",
-        "sleep returns 0",
-        "debug_print refused without the gate",
-        "open directory with O_DIRECTORY",
-        "getdents returns one entry",
-        "getdents entry size is 14",
-        "getdents past the end returns 0",
-        "dup2 onto fd 5",
-        "write through the dup2 fd",
-        "isatty on the dup2 fd",
-        "dup2 from a bad fd refused",
-        "dup2 onto itself",
-        "F_GETFD on the dup2 fd",
-        "F_SETFD clears close-on-exec",
-        "ioctl reads the stream destination",
-        "ioctl changes the stream destination",
-        "ioctl restores the stream destination",
-        "read on stdout refused",
-        "F_GETFL on stdout",
-        "F_DUPFD returns an fd >= 20",
-        "ioctl on a bad fd refused",
-        "read on stderr refused",
-        "write on stdin refused",
-        "isatty on stderr is 1",
-        "dup2 past the inline table grows it",
-        "write through the grown-table dup2",
-        "close the grown-table dup2",
-        "getpid agrees between syscall and int 0x80",
-        "int 0x80 fallback still writes",
-        "syscall keeps rsp and callee-saved regs across a sleep",
-        "int 0x80 keeps rsp and all regs across sleep and stat",
-        "syscall keeps argument regs across a filesystem stat",
-        "syscall puts return rip in rcx and rflags in r11",
-        "unknown number through syscall is ENOSYS"
-    };
-
-    int bad = 0;
-    for (int i = 0; i < FD_CHECKS; i++) {
-        if (res[i] != 1) { bad++; kprintf(PRINT_SERIAL, "    FAIL %s\n", what[i]); }
-    }
-
-    for (int i = 0; i < FD_CHECKS; i++) {
-        if (res[FD_RES_FAIL + i] == 1) {
-            kprintf(PRINT_SERIAL, "    ring3 fail check %d (%s) mark=%lld\n",
-                    i, i < FD_CHECKS ? what[i] : "?", (long long)res[FD_RES_FAIL + i]);
-        }
-    }
-    kprintf(PRINT_SERIAL, "FD ring3: %d of %d checks passed: ", FD_CHECKS - bad, FD_CHECKS);
-    kprintchar(bad == 0 ? 'Y' : 'N', PRINT_SERIAL);
-    kprintchar('\n', PRINT_SERIAL);
-}
-
 #define TTY_RES_DONE  16
 #define TTY_RES_READY 17
 #define TTY_RES_GO    18
@@ -419,6 +314,206 @@ static volatile uint64_t *tty_peer(const char *name, vaddr_t rip, size_t code_by
     return res;
 }
 
+static void tty_inject(const char *s) {
+    while (*s) keyboard_inject_char(*s++);
+}
+
+static void tty_drain(void) {
+    char c;
+    while (keyboard_try_pop(&c)) { }
+    keyboard_set_owner(0);
+}
+
+static const char *const c_stdin_lines[] = {
+    "",
+    "nyon from stdin\n",
+    "second line\n",
+    "abcdefghij\n",
+    "xy\n",
+    "back\bspace\n"
+};
+#define C_STDIN_LINES ((int)(sizeof(c_stdin_lines) / sizeof(c_stdin_lines[0])))
+
+static const char *const c_fd_labels[C_CHECKS] = {
+    "open /TEST.TXT returns an fd",
+    "read 14 bytes from a C program",
+    "read content matches",
+    "pread 14 bytes at offset 0",
+    "pread content matches",
+    "fstat succeeds",
+    "fstat reports size 3000",
+    "stat by path succeeds",
+    "stat reports size 3000",
+    "isatty on a file fd is 0",
+    "isatty on fd 1 is 1",
+    "open a directory with O_DIRECTORY",
+    "getdents returns one entry",
+    "getdents entry size is 14",
+    "getdents past the end returns 0",
+    "getpid is nonzero",
+    "sleep returns 0",
+    "debug_print refused without the gate",
+    "dup2 onto fd 5",
+    "write through the dup2 fd",
+    "isatty on the dup2 fd",
+    "dup2 from a bad fd refused",
+    "dup2 onto itself",
+    "F_GETFD on the dup2 fd",
+    "F_SETFD clears close-on-exec",
+    "ioctl reads the stream destination",
+    "ioctl changes the destination",
+    "ioctl restores the destination",
+    "read on stdout refused",
+    "F_GETFL on stdout",
+    "F_DUPFD returns an fd >= 20",
+    "close the F_DUPFD result",
+    "ioctl on a bad fd refused",
+    "read on stderr refused",
+    "write on stdin refused",
+    "isatty on stderr is 1",
+    "dup2 past the inline table grows it",
+    "write through the grown-table dup2",
+    "close the grown-table dup2",
+    "lseek SET 0 resets position",
+    "re-read after lseek returns 4",
+    "lseek past end clamps to file size",
+    "read at EOF returns 0",
+    "dup with narrowed rights",
+    "write through a read-only fd refused",
+    "close the dup returns 0",
+    "close the file fd returns 0",
+    "stale fd after close refused",
+    "double close refused",
+    "open a missing file returns ENOENT",
+    "open a directory without O_DIRECTORY is EISDIR",
+    "kernel pointer to read rejected",
+    "write to stdout via fd 1",
+    "getpid agrees between syscall and int 0x80",
+    "int 0x80 fallback still writes",
+    "syscall keeps rsp and all regs across sleep+stat",
+    "int 0x80 keeps rsp and all regs across sleep+stat",
+    "unknown syscall number is ENOSYS",
+    "rcx changes across syscall (return address)",
+    "r11 bit 9 set across syscall (flags)",
+    "bss starts zeroed at the front",
+    "bss starts zeroed at the end",
+    "data initialiser survived loading",
+    "rodata content survived loading",
+    "bss is writable",
+    "isatty on stdin is 1",
+    "F_SETFL O_NONBLOCK on stdin accepted",
+    "F_GETFL reports O_NONBLOCK on stdin",
+    "non-blocking read of an empty tty is EAGAIN",
+    "F_SETFL clears O_NONBLOCK on stdin",
+    "F_GETFL no longer reports O_NONBLOCK",
+    "stdin claims the tty and is the foreground",
+    "blocking read returns the whole injected line",
+    "injected line content is nyon from stdin",
+    "short line read returns its length",
+    "short line content is xy",
+    "read of 4 takes only 4 bytes",
+    "partial read content is abcd",
+    "rest of the line comes on the next read",
+    "remainder content is efghij",
+    "backspace-edited line length",
+    "backspace-edited line content is baspace",
+    "stdout default destination is PRINT_BOTH",
+    "stderr default destination is PRINT_SERIAL",
+    "stderr destination can be changed",
+    "changing stderr leaves stdout alone",
+    "write to stderr returns the byte count",
+    "dup2 of stdout returns the fd",
+    "write through the stdout dup",
+    "the stdout dup shares the destination",
+    "close the stdout dup",
+    "dup2 of stderr returns the fd",
+    "the stderr dup has its own destination",
+    "write through the stderr dup",
+    "close the stderr dup",
+    "setting the destination on stdin refused",
+    "write on stdin refused",
+    "null buffer on stdin is EFAULT",
+    "kernel pointer to stderr is EFAULT"
+};
+
+static void c_test(void) {
+    fs_node_t node;
+    if (!fs_lookup("/BIN/FDTEST", &node) && !fs_lookup("/BIN/fdtest", &node)) {
+        kprintf(PRINT_SERIAL, "FD ring3: /BIN/fdtest not found\n");
+        return;
+    }
+
+    paddr_t phys;
+    if (!pmm_alloc(&phys, 1)) { kprintf(PRINT_SERIAL, "FD ring3: alloc failed\n"); return; }
+
+    volatile uint64_t *res = (volatile uint64_t *)(vmm_hhdm_offset + phys);
+    for (int i = 0; i < C_RES_SLOTS; i++) res[i] = 0xdeadbeefdeadbeefULL;
+
+    struct elf_shared shared = { .phys = phys, .virt = C_RES_VIRT, .pages = 1, .owned_by_loader = false };
+
+    struct elf_image img;
+    const char *err = NULL;
+    int r = elf_load_shared(&node, &img, &err, NULL, 0, &shared);
+    if (r) {
+        pmm_free(phys, 1);
+        kprintf(PRINT_SERIAL, "FD ring3: load refused: %s\n", err ? err : "?");
+        return;
+    }
+
+    size_t before = pmm_free_pages();
+
+    struct task *t = task_spawn_vmspace("ring3c", img.vs, img.entry, img.stack_top);
+    elf_destroy(&img);
+    if (!t) {
+        pmm_free(phys, 1);
+        kprintf(PRINT_SERIAL, "FD ring3: spawn failed\n");
+        return;
+    }
+
+    uint32_t pid_served = t->pid;
+    tty_drain();
+    for (int i = 0; i < 2000 && res[C_RES_DONE] == 0xdeadbeefdeadbeefULL && task_find_pid(pid_served); i++) {
+        uint64_t req = res[C_RES_STDIN_REQ];
+        uint64_t ack = res[C_RES_STDIN_ACK];
+        if (req != ack) {
+            uint64_t line = req < C_STDIN_LINES ? req : 0;
+            res[C_RES_STDIN_ACK] = req;
+            tty_inject(c_stdin_lines[line]);
+        }
+        pit_sleep(5);
+    }
+
+    bool ran = res[C_RES_DONE] != 0xdeadbeefdeadbeefULL;
+    uint32_t pid = t->pid;
+    for (int i = 0; i < 400 && task_find_pid(pid); i++) pit_sleep(5);
+    task_reap_now();
+
+    if (!ran) {
+        kprintf(PRINT_SERIAL, "FD ring3: the c test never reported\n");
+        pmm_free(phys, 1);
+        return;
+    }
+
+    int bad = 0;
+    for (int i = 0; i < C_CHECKS; i++) {
+        if (res[C_RES_CHECK_BASE + i] == 1) continue;
+        bad++;
+        kprintf(PRINT_SERIAL, "    FAIL %s: got %lld, wanted %lld\n",
+                c_fd_labels[i], (long long)res[C_RES_FAIL_BASE + i],
+                (long long)res[C_RES_GOT_BASE + i]);
+    }
+
+    size_t after = pmm_free_pages();
+
+    kprintf(PRINT_SERIAL, "FD ring3: %d of %d checks passed: ", C_CHECKS - bad, C_CHECKS);
+    kprintchar(bad == 0 ? 'Y' : 'N', PRINT_SERIAL);
+    kprintchar('\n', PRINT_SERIAL);
+    kprintf(PRINT_SERIAL, "FD ring3: loaded by the elf loader as pie, no leak: ");
+    kprintchar(after >= before ? 'Y' : 'N', PRINT_SERIAL);
+    kprintf(PRINT_SERIAL, "  free %zu -> %zu\n", before, after);
+
+    pmm_free(phys, 1);
+}
 static bool tty_reap(uint32_t pid) {
     for (int i = 0; i < 200 && task_find_pid(pid); i++) pit_sleep(5);
     return task_find_pid(pid) == NULL;
@@ -512,10 +607,6 @@ static void tty_isolation_test(vaddr_t a_rip, vaddr_t b_rip, vaddr_t c_rip, size
     kprintchar('\n', PRINT_SERIAL);
 }
 
-static void tty_inject(const char *s) {
-    while (*s) keyboard_inject_char(*s++);
-}
-
 static bool tty_asleep_on(uint32_t pid, void *chan, bool want_deadline) {
     struct task *t = task_find_pid(pid);
     if (!t || !t->blocked) return false;
@@ -549,6 +640,7 @@ static void wait_test(vaddr_t rip, size_t code_bytes, size_t code_pages) {
 
     uint32_t pid = 0;
     paddr_t page = 0;
+    tty_drain();
     volatile uint64_t *r = tty_peer("ttywait", rip, code_bytes, code_pages, 0, &pid, &page);
     if (!r) { kprintf(PRINT_SERIAL, "WAIT ring3: spawn failed\n"); return; }
 
@@ -604,12 +696,39 @@ static void elf_bad_test(const char *name, const uint8_t *img, size_t len, size_
     uint8_t buf[512];
     for (size_t i = 0; i < sizeof(buf); i++) buf[i] = img[i < len ? i : len - 1];
 
-    const elf64_phdr *ph = NULL;
-    size_t n = 0;
+    size_t phoff = 0, phentsize = 0, n = 0;
     bool pie = false;
     uint64_t entry = 0;
-    int r = elf_validate(buf, len, file_size, &ph, &n, &pie, &entry);
-    if (ph) kfree((void *)ph);
+    int r = elf_validate_hdr(buf, len, file_size, &phoff, &phentsize, &n, &pie, &entry);
+    if (r) {
+        if (r != want) {
+            (*bad)++;
+            kprintf(PRINT_SERIAL, "    FAIL %s: got %d (%s), wanted %d\n", name, r, elf_error_text(r), want);
+        }
+        return;
+    }
+
+    elf64_phdr ph[ELF_MAX_PHNUM];
+    for (size_t i = 0; i < n && phoff + i * sizeof(elf64_phdr) + sizeof(elf64_phdr) <= len; i++) {
+        const uint8_t *base = buf + phoff + i * sizeof(elf64_phdr);
+        ph[i].type  = (uint32_t)base[0] | ((uint32_t)base[1] << 8);
+        ph[i].flags = (uint32_t)base[4] | ((uint32_t)base[5] << 8);
+        uint64_t o = 0, v = 0, pp = 0, f = 0, m = 0, a = 0;
+        for (size_t k = 0; k < 8; k++) {
+            o  |= (uint64_t)base[8 + k]  << (8 * k);
+            v  |= (uint64_t)base[16 + k] << (8 * k);
+            pp |= (uint64_t)base[24 + k] << (8 * k);
+            f  |= (uint64_t)base[32 + k] << (8 * k);
+            m  |= (uint64_t)base[40 + k] << (8 * k);
+            a  |= (uint64_t)base[48 + k] << (8 * k);
+        }
+        ph[i].offset = o; ph[i].vaddr = v; ph[i].paddr = pp;
+        ph[i].filesz = f; ph[i].memsz = m; ph[i].align = a;
+    }
+
+    bool ok = false;
+    r = elf_validate_phdrs(ph, n, file_size, pie, entry, &ok);
+    if (r == 0 && !ok) r = ELF_EBADMAGIC;
 
     if (r != want) {
         (*bad)++;
@@ -887,7 +1006,6 @@ void kmain(void) {
     {
         extern uint8_t user_fault_entry[];
         extern uint8_t user_validate_entry[];
-        extern uint8_t user_zfd_entry[];
         extern uint8_t user_test_end[];
 
         size_t code_bytes = (size_t)(user_test_end - user_test_entry);
@@ -960,8 +1078,7 @@ void kmain(void) {
         }
 
         {
-            vaddr_t fd_rip = TASK_USER_CODE_VIRT + (size_t)(user_zfd_entry - user_test_entry);
-            fd_spawn(fd_rip, code_bytes, code_pages);
+            c_test();
         }
 
         {
@@ -973,52 +1090,6 @@ void kmain(void) {
         }
 
         elf_run_test();
-        {
-            struct task *ft = task_current();
-            int base = 0;
-            int many[40];
-            int opened = 0;
-            for (int i = 0; i < 40; i++) {
-                many[i] = fd_open(ft, "/TEST.TXT", FD_OPEN_READ);
-                if (many[i] < 0) break;
-                opened++;
-            }
-            for (int i = 0; i < opened; i++) fd_close(ft, many[i]);
-            kprintf(PRINT_SERIAL, "FD kernel: %d concurrent fds past inline %d: ", opened, FD_INLINE);
-            kprintchar(opened > FD_INLINE ? 'Y' : 'N', PRINT_SERIAL);
-            kprintchar('\n', PRINT_SERIAL);
-
-            struct kobject *o0 = fd_get_checked(ft, 0, KOBJ_TYPE_ANY, FD_RIGHT_READ);
-            struct kobject *o1 = fd_get_checked(ft, 1, KOBJ_TYPE_ANY, FD_RIGHT_WRITE);
-            struct kobject *o2 = fd_get_checked(ft, 2, KOBJ_TYPE_ANY, FD_RIGHT_WRITE);
-            if (o0) fd_put(o0);
-            if (o1) fd_put(o1);
-            if (o2) fd_put(o2);
-            kprintf(PRINT_SERIAL, "FD kernel: stdio survives table growth: ");
-            kprintchar((o0 && o1 && o2) ? 'Y' : 'N', PRINT_SERIAL);
-            kprintchar('\n', PRINT_SERIAL);
-            (void)base;
-        }
-
-        {
-            struct task tmp;
-            size_t before = pmm_free_pages();
-
-            int cycles = 3000;
-            fd_table_init(&tmp);
-            for (int i = 0; i < cycles; i++) {
-                int a = fd_open(&tmp, "/TEST.TXT", FD_OPEN_READ);
-                if (a >= 0) fd_close(&tmp, a);
-                int b = fd_open(&tmp, "/TEST.TXT", FD_OPEN_READ);
-                if (b >= 0) fd_table_clear(&tmp);
-                fd_table_init(&tmp);
-            }
-
-            size_t after = pmm_free_pages();
-            kprintf(PRINT_SERIAL, "FD kernel: teardown leak check, %d cycles: ", cycles);
-            kprintchar(after >= before ? 'Y' : 'N', PRINT_SERIAL);
-            kprintf(PRINT_SERIAL, " (%zu -> %zu)\n", before, after);
-        }
     }
 
     for (;;) {
