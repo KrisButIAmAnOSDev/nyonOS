@@ -176,9 +176,11 @@ int fd_alloc(struct task *t, struct kobject *obj, uint32_t rights, uint32_t flag
         break;
     }
 
+    bool needs_grow = (ret == FD_EMFILE) && !ft->grown;
+
     preempt_enable();
 
-    if (ret == FD_EMFILE && !ft->grown) {
+    if (needs_grow) {
         preempt_disable();
         bool ok = fd_grow(ft);
         preempt_enable();
@@ -324,7 +326,7 @@ int fd_slot_in_use(struct task *t, int idx) {
 }
 
 int fd_dup2(struct task *t, int oldfd, int newfd, uint32_t flags) {
-    if (oldfd == newfd) return newfd;
+    if (oldfd == newfd) return oldfd;
 
     preempt_disable();
 
@@ -364,7 +366,7 @@ int fd_dup2(struct task *t, int oldfd, int newfd, uint32_t flags) {
         target->obj = NULL;
         target->rights = 0;
         target->flags = FD_FLAG_CLOEXEC;
-        target->generation++;
+        target->generation = (uint8_t)((target->generation + 1) & FD_GEN_MASK);
         mark_free(ft, nidx);
         kobject_put(old);
     }
@@ -377,7 +379,7 @@ int fd_dup2(struct task *t, int oldfd, int newfd, uint32_t flags) {
     target->generation = old_gen;
 
     preempt_enable();
-    return newfd;
+    return (int)(nidx | ((uint32_t)old_gen << FD_GEN_SHIFT));
 }
 
 int fd_dup_min(struct task *t, int oldfd, uint32_t min) {
@@ -506,6 +508,7 @@ static int64_t file_lseek(struct kobject *o, int64_t off, int whence) {
 static int64_t console_write_at(struct kobject *o, const void *ubuf, uint32_t len, uint64_t off) {
     (void)off;
     const struct console *c = (const struct console *)o;
+    if (c->dest == PRINT_NONE) return (int64_t)len;
     const char *s = (const char *)ubuf;
     for (uint32_t i = 0; i < len; i++) kprintchar(s[i], c->dest);
     return (int64_t)len;
@@ -527,7 +530,7 @@ int fd_console_dest(int fd, struct task *t, uint32_t *dest) {
 }
 
 int fd_console_set_dest(int fd, struct task *t, uint32_t dest) {
-    if (dest > PRINT_BOTH) return FD_EINVAL;
+    if (dest > PRINT_NONE) return FD_EINVAL;
     struct kobject *o = fd_get_checked(t, fd, KOBJ_CONSOLE, FD_RIGHT_WRITE);
     if (!o) return FD_EBADF;
     ((struct console *)o)->dest = dest;

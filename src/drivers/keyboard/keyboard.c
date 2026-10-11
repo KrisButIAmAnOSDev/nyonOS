@@ -6,8 +6,8 @@
 #include "kernel/sync/preempt.h"
 
 static char keyboard_buffer[256];
-static volatile size_t buffer_head = 0;
-static volatile size_t buffer_tail = 0;
+static size_t buffer_head = 0;
+static size_t buffer_tail = 0;
 static bool shift_pressed = false;
 static bool caps_lock = false;
 static bool ctrl_pressed = false;
@@ -35,16 +35,20 @@ static char tty_wait_chan;
 
 static bool keyboard_buffer_push(char c) {
     if (c == '\b') {
-        if (buffer_head == buffer_tail) return false;
-        size_t prev = (buffer_head + 255) % 256;
+        size_t head = __atomic_load_n(&buffer_head, __ATOMIC_ACQUIRE);
+        size_t tail = __atomic_load_n(&buffer_tail, __ATOMIC_ACQUIRE);
+        if (head == tail) return false;
+        size_t prev = (head + 255) % 256;
         if (keyboard_buffer[prev] == '\n') return false;
-        buffer_head = prev;
+        __atomic_store_n(&buffer_head, prev, __ATOMIC_RELEASE);
         return true;
     }
-    size_t next = (buffer_head + 1) % 256;
-    if (next == buffer_tail) return false;
-    keyboard_buffer[buffer_head] = c;
-    buffer_head = next;
+    size_t head = __atomic_load_n(&buffer_head, __ATOMIC_RELAXED);
+    size_t tail = __atomic_load_n(&buffer_tail, __ATOMIC_ACQUIRE);
+    size_t next = (head + 1) % 256;
+    if (next == tail) return false;
+    keyboard_buffer[head] = c;
+    __atomic_store_n(&buffer_head, next, __ATOMIC_RELEASE);
     return true;
 }
 
@@ -53,8 +57,8 @@ void *keyboard_wait_chan(void) {
 }
 
 bool keyboard_line_ready(void) {
-    size_t head = buffer_head;
-    size_t tail = buffer_tail;
+    size_t head = __atomic_load_n(&buffer_head, __ATOMIC_ACQUIRE);
+    size_t tail = __atomic_load_n(&buffer_tail, __ATOMIC_ACQUIRE);
     if ((head + 1) % 256 == tail) return true;
     for (size_t i = tail; i != head; i = (i + 1) % 256) {
         if (keyboard_buffer[i] == '\n') return true;
@@ -63,9 +67,11 @@ bool keyboard_line_ready(void) {
 }
 
 static bool keyboard_buffer_pop(char *c) {
-    if (buffer_head == buffer_tail) return false;
-    *c = keyboard_buffer[buffer_tail];
-    buffer_tail = (buffer_tail + 1) % 256;
+    size_t head = __atomic_load_n(&buffer_head, __ATOMIC_ACQUIRE);
+    size_t tail = __atomic_load_n(&buffer_tail, __ATOMIC_RELAXED);
+    if (head == tail) return false;
+    *c = keyboard_buffer[tail];
+    __atomic_store_n(&buffer_tail, (tail + 1) % 256, __ATOMIC_RELEASE);
     return true;
 }
 
@@ -115,14 +121,14 @@ static uint8_t scancode_to_ascii(uint8_t scancode) {
     return ascii;
 }
 
-static volatile uint32_t stdin_owner = 0;
+static uint32_t stdin_owner = 0;
 
 void keyboard_set_owner(uint32_t pid) {
-    stdin_owner = pid;
+    __atomic_store_n(&stdin_owner, pid, __ATOMIC_RELEASE);
 }
 
 uint32_t keyboard_owner(void) {
-    return stdin_owner;
+    return __atomic_load_n(&stdin_owner, __ATOMIC_ACQUIRE);
 }
 
 void keyboard_handler(struct isr_frame *frame) {
@@ -134,7 +140,7 @@ void keyboard_handler(struct isr_frame *frame) {
 
     keyboard_buffer_push(c);
 
-    if (!stdin_owner && !kprintf_busy()) {
+    if (keyboard_owner() == 0 && !kprintf_busy()) {
         if (c == '\b') kprintf(PRINT_SCREEN, " \b\b");
         else kprintf(PRINT_SCREEN, "%c", c);
     }
@@ -164,7 +170,7 @@ bool keyboard_inject_char(char c) {
 }
 
 void keyboard_process_buffer(void) {
-    if (stdin_owner) return;
+    if (keyboard_owner()) return;
 
     char c;
     while (keyboard_try_pop(&c)) {

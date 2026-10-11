@@ -3,12 +3,13 @@
 #include "drivers/serial/serial.h"
 #include "kernel/kprintf/kprintf.h"
 #include <stddef.h>
+#include "arch/x86_64/cpu/cpu.h"
 
-static uint8_t gdt[GDT_ENTRIES * 8];
+static uint8_t gdt[MAX_CPUS][GDT_ENTRIES * 8] __attribute__((aligned(64)));
 
-uint8_t gdt_tss_desc[16];
+uint8_t gdt_tss_desc[MAX_CPUS][16];
 
-extern void gdt_load(struct gdt_pointer *gdtr);
+extern void gdt_load(struct gdt_pointer *gdtr, uint8_t *tss_desc);
 
 uint16_t gdt_rd_cs(void);
 uint16_t gdt_rd_ds(void);
@@ -87,25 +88,29 @@ static uint64_t entry_qword(const uint8_t *d) {
     return q;
 }
 
-void gdt_init(uint64_t hhdm_offset) {
-    tss_init(hhdm_offset);
+void gdt_init(uint64_t hhdm_offset, uint32_t id) {
+    if (id >= MAX_CPUS) return;
 
-    for (size_t i = 0; i < sizeof(gdt); i++) gdt[i] = 0;
+    tss_init(hhdm_offset, id);
 
-    gdt_encode(&gdt[0x08], 0, 0x000FFFFF, 0x9B, 0xA);
-    gdt_encode(&gdt[0x10], 0, 0x000FFFFF, 0x93, 0xC);
-    gdt_encode(&gdt[0x18], 0, 0x000FFFFF, 0xF3, 0xC);
-    gdt_encode(&gdt[0x20], 0, 0x000FFFFF, 0xFB, 0xA);
-    gdt_encode_tss(&gdt[0x28], tss_addr(), sizeof(struct tss) - 1);
+    uint8_t *g = gdt[id];
 
-    for (size_t i = 0; i < 16; i++) gdt_tss_desc[i] = gdt[0x28 + i];
+    for (size_t i = 0; i < GDT_ENTRIES * 8; i++) g[i] = 0;
+
+    gdt_encode(&g[0x08], 0, 0x000FFFFF, 0x9B, 0xA);
+    gdt_encode(&g[0x10], 0, 0x000FFFFF, 0x93, 0xC);
+    gdt_encode(&g[0x18], 0, 0x000FFFFF, 0xF3, 0xC);
+    gdt_encode(&g[0x20], 0, 0x000FFFFF, 0xFB, 0xA);
+    gdt_encode_tss(&g[0x28], tss_addr(id), sizeof(struct tss) - 1);
+
+    for (size_t i = 0; i < 16; i++) gdt_tss_desc[id][i] = g[0x28 + i];
 
     struct gdt_pointer gdtr = {
-        .limit = sizeof(gdt) - 1,
-        .base = (uint64_t)gdt
+        .limit = GDT_ENTRIES * 8 - 1,
+        .base = (uint64_t)g
     };
 
-    gdt_load(&gdtr);
+    gdt_load(&gdtr, &gdt_tss_desc[id][0]);
 
     kprintf(PRINT_SERIAL, "GDT: loaded, TSS limit=");
     kprintf(PRINT_SERIAL, "%llx", (unsigned)(sizeof(struct tss) - 1));

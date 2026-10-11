@@ -2,12 +2,16 @@
 #include "kernel/block/block.h"
 #include "kernel/sync/preempt.h"
 #include "kernel/kprintf/kprintf.h"
+#include "arch/x86_64/cpu/cpu.h"
 
 #define FS_PATH_MAX 128
 #define FS_SCAN_MAX 4096
 
 static fs_volume_t fs;
-static uint8_t sec[FS_SECTOR_SIZE] __attribute__((aligned(4)));
+
+static uint8_t fs_sectors[MAX_CPUS][FS_SECTOR_SIZE] __attribute__((aligned(4)));
+
+#define sec (fs_sectors[cpu_id()])
 
 static uint16_t rd16(const uint8_t *p) {
     return (uint16_t)(p[0] | (p[1] << 8));
@@ -106,8 +110,14 @@ static uint32_t cluster_lba(uint32_t cluster) {
     return fs.data_start + (cluster - FS_FIRST_CLUSTER) * fs.sectors_per_cluster;
 }
 
-static bool fat_entry(uint32_t cluster, uint16_t *out) {
+static bool cluster_ok(uint32_t cluster) {
     if (cluster < FS_FIRST_CLUSTER || cluster >= FS_BAD_CLUSTER) return false;
+    if (!fs.mounted) return false;
+    return cluster < FS_FIRST_CLUSTER + fs.cluster_count;
+}
+
+static bool fat_entry(uint32_t cluster, uint16_t *out) {
+    if (!cluster_ok(cluster)) return false;
     uint32_t byte = cluster * 2;
     uint32_t lba = fs.fat_start + byte / fs.bytes_per_sector;
     uint32_t off = byte % fs.bytes_per_sector;
@@ -126,7 +136,7 @@ static bool fat_next(uint32_t cluster, uint32_t *out) {
 }
 
 static bool cluster_nth(uint32_t cluster, uint32_t skip, uint32_t *out) {
-    if (cluster < FS_FIRST_CLUSTER || cluster >= FS_BAD_CLUSTER) return false;
+    if (!cluster_ok(cluster)) return false;
     for (uint32_t i = 0; i < skip; i++) {
         uint32_t nx;
         if (!fat_next(cluster, &nx)) return false;
@@ -192,7 +202,7 @@ static bool parse_dirent(const uint8_t *e, fs_node_t *out) {
     out->cluster = (uint32_t)rd16(e + 26) | ((uint32_t)rd16(e + 20) << 16);
     out->size = out->is_dir ? 0 : rd32(e + 28);
 
-    if (!out->is_dir && (out->cluster < FS_FIRST_CLUSTER || out->cluster >= FS_BAD_CLUSTER)) out->cluster = 0;
+    if (!out->is_dir && !cluster_ok(out->cluster)) out->cluster = 0;
     return true;
 }
 
@@ -312,7 +322,7 @@ bool fs_node_read_inner(const fs_node_t *node, uint32_t offset, void *buf, uint3
     if (node->is_dir) return false;
     if (len == 0) return true;
     if (offset >= node->size) return false;
-    if (node->cluster < FS_FIRST_CLUSTER || node->cluster >= FS_BAD_CLUSTER) return false;
+    if (!cluster_ok(node->cluster)) return false;
 
     if (len > node->size - offset) len = node->size - offset;
     if (len == 0) return false;

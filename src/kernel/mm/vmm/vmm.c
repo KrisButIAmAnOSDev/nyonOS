@@ -378,7 +378,6 @@ bool vmm_unmap_from(struct page_table *root, vaddr_t vaddr, size_t pages) {
 
 void vmm_switch_address_space(struct page_table *pml4) {
     uint64_t cr3 = (uint64_t)pml4 - vmm_hhdm_offset;
-    if (cpu_has_pcid()) cr3 |= (1ULL << 63);
     __asm__ volatile("mov %0, %%cr3" :: "r"(cr3) : "memory");
     cpu_flush_pcid();
 }

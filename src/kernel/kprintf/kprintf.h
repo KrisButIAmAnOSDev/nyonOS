@@ -9,6 +9,7 @@
 #define PRINT_SERIAL 0
 #define PRINT_SCREEN 1
 #define PRINT_BOTH   2
+#define PRINT_NONE   3
 
 #define COLOR_BLACK   0x000000
 #define COLOR_WHITE   0xFFFFFF

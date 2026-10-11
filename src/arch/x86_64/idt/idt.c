@@ -69,6 +69,16 @@ void idt_init(void) {
     kprintf(PRINT_SERIAL, "IDT loaded!\n");
 }
 
+void idt_install(uint8_t vector, void *stub, uint8_t flags) {
+    idt_set_descriptor(vector, stub, flags, 0);
+}
+
+void idt_reload(void) {
+    idtr.limit = sizeof(idt) - 1;
+    idtr.base = (uint64_t)&idt;
+    idt_load(&idtr);
+}
+
 void irq_install(uint8_t irq, irq_handler_t handler) {
     if (irq >= IRQ_COUNT) return;
     irq_handlers[irq] = handler;
@@ -99,6 +109,7 @@ static int exception_signal(uint64_t vector) {
 }
 
 void exception_handler(struct isr_frame* frame) {
+
 
     if ((frame->cs & 3) == 0 && usermode_recover_copy(frame)) return;
 

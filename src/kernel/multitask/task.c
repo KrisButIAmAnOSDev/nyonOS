@@ -2,6 +2,7 @@
 #include "kernel/kprintf/kprintf.h"
 #include "drivers/serial/serial.h"
 #include "kernel/sync/sync.h"
+#include "kernel/sync/preempt.h"
 #include "kernel/panic/panic.h"
 #include "kernel/mm/pmm/pmm.h"
 #include "kernel/mm/vmm/vmm.h"
@@ -11,6 +12,8 @@
 #include "arch/x86_64/syscall/syscall.h"
 #include "kernel/uaccess/uaccess.h"
 #include "kernel/mm/vmm/vmspace.h"
+#include "arch/x86_64/cpu/cpu.h"
+#include "arch/x86_64/lapic/lapic.h"
 
 #define QW_RIP 17
 #define QW_CS 18
@@ -30,21 +33,29 @@ _Static_assert(offsetof(struct isr_frame, ss) == 168, "frame layout");
 _Static_assert(sizeof(struct isr_frame) == 176, "frame layout");
 
 static struct task tasks[TASK_MAX];
-static size_t current_slot = 0;
-static volatile uint64_t wake_seq = 0;
 static uint32_t next_pid = 1;
-static bool in_scheduler = false;
-static bool sched_enabled = false;
-static uint64_t switch_count = 0;
 static spinlock_t sched_lock = SPINLOCK_INIT;
 
+static inline size_t current_slot(void) { return cpu_self()->current_slot; }
+static inline void set_current_slot(size_t v) { cpu_self()->current_slot = v; }
+static inline volatile uint64_t *wake_seq_p(void) { return &cpu_self()->wake_seq; }
+static inline bool in_scheduler(void) { return cpu_self()->in_scheduler; }
+static inline void set_in_scheduler(bool v) { cpu_self()->in_scheduler = v; }
+static inline bool sched_enabled(void) { return cpu_self()->sched_enabled; }
+static inline void set_sched_enabled(bool v) { cpu_self()->sched_enabled = v; }
+static inline uint64_t switch_count(void) { return cpu_self()->switch_count; }
+static inline void bump_switch_count(void) { cpu_self()->switch_count++; }
+static inline uint64_t earliest_wake(void) { return cpu_self()->earliest_wake; }
+static inline void set_earliest_wake(uint64_t v) { cpu_self()->earliest_wake = v; }
+
 static void task_kstack_update(void) {
-    tss_set_rsp0(tasks[current_slot].stack_top);
-    syscall_kstack_top = tasks[current_slot].stack_top;
+    size_t cs = current_slot();
+    tss_set_rsp0((uint32_t)cpu_id(), tasks[cs].stack_top);
+    *percpu_syscall_kstack_top() = tasks[cs].stack_top;
 }
 
 static void task_aspace_update(void) {
-    struct page_table *pml4 = tasks[current_slot].pml4;
+    struct page_table *pml4 = tasks[current_slot()].pml4;
     vmm_switch_address_space(pml4 ? pml4 : kernel_pml4);
 }
 
@@ -82,12 +93,13 @@ static void task_release(struct task *t) {
     t->blocked = false;
     t->wait_chan = NULL;
     t->wake_tick = 0;
+    t->wake_gen = 0;
     t->exit_code = 0;
 }
 
 static void task_reap_zombies(void) {
     for (size_t i = 1; i < TASK_MAX; i++) {
-        if (!tasks[i].zombie || i == current_slot) continue;
+        if (!tasks[i].zombie || i == current_slot()) continue;
         task_release(&tasks[i]);
     }
 }
@@ -98,9 +110,9 @@ static void task_resume(struct isr_frame *frame) {
 }
 
 void task_init(void) {
-    current_slot = 0;
-    in_scheduler = false;
-    switch_count = 0;
+    set_current_slot(0);
+    set_in_scheduler(false);
+    cpu_self()->switch_count = 0;
 
     for (size_t i = 0; i < TASK_MAX; i++) {
         tasks[i].frame = NULL;
@@ -119,6 +131,7 @@ void task_init(void) {
         tasks[i].blocked = false;
         tasks[i].wait_chan = NULL;
         tasks[i].wake_tick = 0;
+        tasks[i].wake_gen = 0;
         tasks[i].name = NULL;
         fd_table_init(&tasks[i]);
     }
@@ -133,7 +146,7 @@ void task_init(void) {
     tasks[0].debug_log = true;
     fd_install_stdio(&tasks[0]);
     task_kstack_update();
-    sched_enabled = true;
+    set_sched_enabled(true);
 }
 
 struct task *task_spawn(const char *name, void (*entry)(void)) {
@@ -187,8 +200,9 @@ struct task *task_spawn(const char *name, void (*entry)(void)) {
     t->blocked = false;
     t->wait_chan = NULL;
     t->wake_tick = 0;
+    t->wake_gen = 0;
     t->debug_log = false;
-    t->pid = next_pid++;
+    t->pid = __atomic_add_fetch(&next_pid, 1, __ATOMIC_RELAXED);
     t->name = name;
 
     lock_release(LOCK_SCHED, &sched_lock);
@@ -274,6 +288,7 @@ static struct task *spawn_ring3(const char *name, paddr_t code_phys, size_t code
     t->blocked = false;
     t->wait_chan = NULL;
     t->wake_tick = 0;
+    t->wake_gen = 0;
     t->zombie = false;
 
     vaddr_t frame_addr = (t->stack_top - TASK_FRAME_GUARD) & ~0xFULL;
@@ -290,7 +305,7 @@ static struct task *spawn_ring3(const char *name, paddr_t code_phys, size_t code
     t->frame = f;
     t->in_use = true;
     t->debug_log = false;
-    t->pid = next_pid++;
+    t->pid = __atomic_add_fetch(&next_pid, 1, __ATOMIC_RELAXED);
     t->name = name;
     fd_table_init(t);
     fd_install_stdio(t);
@@ -336,6 +351,7 @@ struct task *task_spawn_vmspace(const char *name, struct vmspace *vs, vaddr_t en
     t->blocked = false;
     t->wait_chan = NULL;
     t->wake_tick = 0;
+    t->wake_gen = 0;
     t->zombie = false;
     t->expect_fault = false;
 
@@ -353,7 +369,7 @@ struct task *task_spawn_vmspace(const char *name, struct vmspace *vs, vaddr_t en
     t->frame = f;
     t->in_use = true;
     t->debug_log = false;
-    t->pid = next_pid++;
+    t->pid = __atomic_add_fetch(&next_pid, 1, __ATOMIC_RELAXED);
     t->name = name;
 
     fd_table_init(t);
@@ -369,39 +385,53 @@ struct task *task_spawn_ring3_lent(const char *name, paddr_t code_phys, size_t c
     return spawn_ring3(name, code_phys, code_pages, code_virt, entry_rip, shared_phys, shared_virt, false);
 }
 
+static void task_release_wait(struct task *t, size_t idx) {
+    (void)idx;
+    __atomic_add_fetch(&t->wake_gen, 1, __ATOMIC_RELEASE);
+    __atomic_store_n(&t->blocked, false, __ATOMIC_RELEASE);
+}
+
 static struct task *pick_next(void) {
     for (size_t i = 1; i <= TASK_MAX; i++) {
-        size_t idx = (current_slot + i) % TASK_MAX;
-        if (tasks[idx].in_use && !tasks[idx].blocked) return &tasks[idx];
+        size_t idx = (current_slot() + i) % TASK_MAX;
+        struct task *t = &tasks[idx];
+        if (t->in_use && !t->blocked) return t;
     }
     return NULL;
 }
 
 void task_schedule(struct isr_frame *frame) {
-    if (!sched_enabled) return;
-    if (in_scheduler) return;
+    if (!sched_enabled()) return;
+    if (in_scheduler()) return;
 
     if (sync_lock_depth() != 0) {
         panic_assert("context switch attempted while this task still holds a lock");
     }
 
-    in_scheduler = true;
+    set_in_scheduler(true);
 
     __asm__ volatile("cli" ::: "memory");
 
     lock_acquire(LOCK_SCHED, &sched_lock);
 
-    tasks[current_slot].frame = frame;
+    if (cpu_id() != 0) {
+        lock_release(LOCK_SCHED, &sched_lock);
+        set_in_scheduler(false);
+        return;
+    }
+
+    tasks[current_slot()].frame = frame;
 
     task_reap_zombies();
 
     struct task *next = pick_next();
-    if (next && next != &tasks[current_slot]) {
-        current_slot = (size_t)(next - tasks);
-        switch_count++;
+    if (next && next != &tasks[current_slot()]) {
+        bump_switch_count();
+        set_current_slot((size_t)(next - tasks));
     }
 
-    if (!tasks[current_slot].frame) {
+
+    if (!tasks[current_slot()].frame) {
         kprintf(PRINT_SERIAL, "task: no saved frame, cannot resume\n");
         for (;;) __asm__ volatile("hlt");
     }
@@ -411,12 +441,30 @@ void task_schedule(struct isr_frame *frame) {
 
     lock_release(LOCK_SCHED, &sched_lock);
 
-    in_scheduler = false;
-    task_resume(tasks[current_slot].frame);
+    set_in_scheduler(false);
+    task_resume(tasks[current_slot()].frame);
+}
+
+void task_init_cpu(void) {
+    struct percpu *self = cpu_self();
+    self->current_slot = 0;
+    self->in_scheduler = false;
+    self->sched_enabled = true;
+    self->switch_count = 0;
+    self->earliest_wake = UINT64_MAX;
+}
+
+void smp_resched_handler(struct isr_frame *frame) {
+    cpu_self()->resched_count++;
+    lapic_eoi(cpu_self()->lapic_base);
+    lapic_timer_set(cpu_self()->lapic_base, LAPIC_TIMER_PERIOD, LAPIC_TIMER_DIV);
+
+    if (preempt_count() != 0) return;
+    task_schedule(frame);
 }
 
 void task_exit_code(uint64_t code) {
-    struct task *self = &tasks[current_slot];
+    struct task *self = &tasks[current_slot()];
 
     self->exit_code = code;
     fd_tty_task_gone(self->pid);
@@ -432,8 +480,8 @@ void task_exit_code(uint64_t code) {
     self->zombie = true;
     struct task *next = pick_next();
     if (next) {
-        current_slot = (size_t)(next - tasks);
-        switch_count++;
+        set_current_slot((size_t)(next - tasks));
+        bump_switch_count();
     }
     task_kstack_update();
     task_aspace_update();
@@ -443,7 +491,7 @@ void task_exit_code(uint64_t code) {
         for (;;) __asm__ volatile("sti; hlt" ::: "memory");
     }
 
-    task_resume(tasks[current_slot].frame);
+    task_resume(tasks[current_slot()].frame);
 }
 
 void task_exit(void) {
@@ -451,12 +499,12 @@ void task_exit(void) {
 }
 
 void task_block_current(uint64_t seen_seq) {
-    if (__atomic_load_n(&wake_seq, __ATOMIC_ACQUIRE) != seen_seq) return;
+    if (__atomic_load_n(wake_seq_p(), __ATOMIC_ACQUIRE) != seen_seq) return;
 
     __asm__ volatile("cli" ::: "memory");
 
     lock_acquire(LOCK_SCHED, &sched_lock);
-    tasks[current_slot].blocked = true;
+    tasks[current_slot()].blocked = true;
     lock_release(LOCK_SCHED, &sched_lock);
 
     for (;;) {
@@ -464,7 +512,7 @@ void task_block_current(uint64_t seen_seq) {
         __asm__ volatile("cli" ::: "memory");
 
         lock_acquire(LOCK_SCHED, &sched_lock);
-        bool woken = !tasks[current_slot].blocked;
+        bool woken = !tasks[current_slot()].blocked;
         lock_release(LOCK_SCHED, &sched_lock);
 
         if (woken) {
@@ -475,20 +523,24 @@ void task_block_current(uint64_t seen_seq) {
 }
 
 
-static uint64_t earliest_wake = UINT64_MAX;
-
 bool task_wait(void *chan, uint64_t deadline) {
     uint64_t rflags;
     __asm__ volatile("pushfq; pop %0; cli" : "=r"(rflags) :: "memory");
 
-    struct task *self = &tasks[current_slot];
+    struct task *self = &tasks[current_slot()];
+
+    uint64_t seen = __atomic_load_n(&self->wake_gen, __ATOMIC_ACQUIRE);
 
     lock_acquire(LOCK_SCHED, &sched_lock);
     self->wait_chan = chan;
     self->wake_tick = deadline;
-    if (deadline && deadline < earliest_wake) earliest_wake = deadline;
+    if (deadline && deadline < earliest_wake()) set_earliest_wake(deadline);
     self->blocked = true;
     lock_release(LOCK_SCHED, &sched_lock);
+
+    if (__atomic_load_n(&self->wake_gen, __ATOMIC_ACQUIRE) != seen) {
+        __atomic_store_n(&self->blocked, false, __ATOMIC_RELEASE);
+    }
 
     for (;;) {
         __asm__ volatile("sti; hlt" ::: "memory");
@@ -507,43 +559,43 @@ bool task_wait(void *chan, uint64_t deadline) {
 void task_wake_chan(void *chan) {
     if (!chan) return;
     for (size_t i = 0; i < TASK_MAX; i++) {
-        if (tasks[i].in_use && tasks[i].blocked && tasks[i].wait_chan == chan)
-            __atomic_store_n(&tasks[i].blocked, false, __ATOMIC_RELEASE);
+        if (tasks[i].in_use && tasks[i].wait_chan == chan) task_release_wait(&tasks[i], i);
     }
 }
 
 void task_tick(uint64_t now) {
-    if (now < earliest_wake) return;
+    if (now < earliest_wake()) return;
     uint64_t next = UINT64_MAX;
     for (size_t i = 0; i < TASK_MAX; i++) {
         struct task *t = &tasks[i];
         if (!t->in_use || !t->blocked || !t->wake_tick) continue;
-        if (now >= t->wake_tick) __atomic_store_n(&t->blocked, false, __ATOMIC_RELEASE);
+        if (now >= t->wake_tick) task_release_wait(t, i);
         else if (t->wake_tick < next) next = t->wake_tick;
     }
-    earliest_wake = next;
+    set_earliest_wake(next);
 }
 
 bool task_current_blocked(void) {
-    return __atomic_load_n(&tasks[current_slot].blocked, __ATOMIC_ACQUIRE);
+    return __atomic_load_n(&tasks[current_slot()].blocked, __ATOMIC_ACQUIRE);
 }
 
 uint64_t task_wake_seq(void) {
-    return __atomic_load_n(&wake_seq, __ATOMIC_ACQUIRE);
+    return __atomic_load_n(wake_seq_p(), __ATOMIC_ACQUIRE);
 }
 
 void task_unblock_all(void) {
-    __atomic_add_fetch(&wake_seq, 1, __ATOMIC_RELEASE);
+    __atomic_add_fetch(wake_seq_p(), 1, __ATOMIC_RELEASE);
 
     // 0, not 1: slot 0 is kmain, and kmain is the task parked on input. Every
     // other loop over tasks[] starts at 1, so this one looks like a nyonpo (only comment in the whole os btw)
     for (size_t i = 0; i < TASK_MAX; i++) {
-        if (tasks[i].in_use) __atomic_store_n(&tasks[i].blocked, false, __ATOMIC_RELEASE);
+        if (!tasks[i].in_use) continue;
+        task_release_wait(&tasks[i], i);
     }
 }
 
 struct task *task_current(void) {
-    return &tasks[current_slot];
+    return &tasks[current_slot()];
 }
 
 void task_reap_now(void) {
@@ -560,9 +612,9 @@ struct task *task_find_pid(uint32_t pid) {
 }
 
 struct page_table *task_current_pml4(void) {
-    return tasks[current_slot].pml4;
+    return tasks[current_slot()].pml4;
 }
 
 uint64_t task_switch_count(void) {
-    return switch_count;
+    return switch_count();
 }

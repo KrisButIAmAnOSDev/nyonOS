@@ -1,7 +1,7 @@
 .intel_syntax noprefix
 
 .extern syscall_dispatch
-.extern syscall_kstack_top
+#include "percpu_off.h"
 
 .set FRAME_RIP, 17*8
 
@@ -9,7 +9,7 @@
 .type syscall_entry,@function
 syscall_entry:
     mov  r11, rsp
-    mov  rsp, [rip + syscall_kstack_top]
+    mov  rsp, gs:PERCPU_SYSCALL_KSTACK_OFF
 
     push 0x1b
     push r11

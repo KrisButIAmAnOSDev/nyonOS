@@ -161,6 +161,8 @@ int main(void) {
     sys_ioctl(5, KTTY_SETDEST, 2);
     ck(sys_ioctl(5, KTTY_GETDEST, 0), 2);
 
+    sys_ioctl(1, KTTY_SETDEST, PRINT_NONE);
+
     ck(sys_read(1, buf, 4), EBADF);
     ck(sys_fcntl(1, F_GETFL, 0) != 0, 1);
     slong hi = sys_fcntl(1, F_DUPFD, 20);
@@ -256,6 +258,7 @@ int main(void) {
     buf[9] = 0;
     ck(streq(buf, "bacspace\n"), 1);
 
+    sys_ioctl(1, KTTY_SETDEST, 2);
     ck(sys_ioctl(1, KTTY_GETDEST, 0), 2);
     ck(sys_ioctl(2, KTTY_GETDEST, 0), 0);
     sys_ioctl(2, KTTY_SETDEST, 1);

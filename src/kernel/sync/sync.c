@@ -2,12 +2,11 @@
 #include "kernel/kprintf/kprintf.h"
 #include "kernel/panic/panic.h"
 #include "drivers/serial/serial.h"
-
-static uint32_t held_mask = 0;
-static uint32_t lock_depth = 0;
+#include "arch/x86_64/cpu/cpu.h"
 
 static const char *lock_names[LOCK_COUNT] = {
-    "none", "ata_lock", "sched_lock", "fd_lock", "heap_lock", "vmm_lock", "pmm_lock"
+    "none", "ata_lock", "sched_lock", "fd_lock", "heap_lock",
+    "vmm_lock", "pmm_lock", "fs_lock", "crypto_lock"
 };
 
 const char *lock_name(lock_id_t id) {
@@ -16,13 +15,13 @@ const char *lock_name(lock_id_t id) {
 }
 
 void sync_init(void) {
-    held_mask = 0;
-    lock_depth = 0;
+    cpu_self()->held_mask = 0;
+    cpu_self()->lock_depth = 0;
     preempt_init();
 }
 
 uint32_t sync_lock_depth(void) {
-    return lock_depth;
+    return cpu_self()->lock_depth;
 }
 
 void spin_lock(spinlock_t *l) {
@@ -54,35 +53,37 @@ static void lock_panic(const char *what, lock_id_t a, lock_id_t b) {
 
 void lock_acquire(lock_id_t id, spinlock_t *l) {
     uint32_t bit = 1u << id;
+    struct percpu *s = cpu_self();
 
-    if (held_mask & bit) {
+    if (s->held_mask & bit) {
         lock_panic("recursive acquire, already held by this task", id, LOCK_NONE);
     }
 
     for (int j = id + 1; j < LOCK_COUNT; j++) {
-        if (held_mask & (1u << j)) {
+        if (s->held_mask & (1u << j)) {
             lock_panic("acquired an outer lock while holding an inner one", id, (lock_id_t)j);
         }
     }
 
-    if (lock_depth >= LOCK_MAX_DEPTH) {
+    if (s->lock_depth >= LOCK_MAX_DEPTH) {
         lock_panic("nested deeper than LOCK_MAX_DEPTH", id, LOCK_NONE);
     }
 
     spin_lock(l);
-    held_mask |= bit;
-    lock_depth++;
+    s->held_mask |= bit;
+    s->lock_depth++;
 }
 
 void lock_release(lock_id_t id, spinlock_t *l) {
     uint32_t bit = 1u << id;
+    struct percpu *s = cpu_self();
 
-    if (!(held_mask & bit)) {
+    if (!(s->held_mask & bit)) {
         lock_panic("release of a lock this task does not hold", id, LOCK_NONE);
     }
 
-    held_mask &= ~bit;
-    lock_depth--;
+    s->held_mask &= ~bit;
+    s->lock_depth--;
 
     spin_unlock(l);
 }

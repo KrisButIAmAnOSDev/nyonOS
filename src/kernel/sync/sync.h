@@ -17,6 +17,8 @@ typedef enum {
     LOCK_HEAP,
     LOCK_VMM,
     LOCK_PMM,
+    LOCK_FS,
+    LOCK_CRYPTO,
     LOCK_COUNT
 } lock_id_t;
 

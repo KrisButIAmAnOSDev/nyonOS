@@ -30,6 +30,8 @@
 #define ABI_O_DIRECTORY 0x10
 #define ABI_O_NONBLOCK  0x800
 
+#define ABI_PRINT_NONE 3
+
 #define ABI_SEEK_SET 0
 #define ABI_SEEK_CUR 1
 #define ABI_SEEK_END 2

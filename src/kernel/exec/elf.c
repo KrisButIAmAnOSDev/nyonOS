@@ -164,7 +164,7 @@ int elf_load_shared(const fs_node *file, struct elf_image *out, const char **err
     if (!file || !out) return ELF_EOFFSET;
     if (file->is_dir) return ELF_EOFFSET;
 
-    static uint8_t ehdr[sizeof(elf64_header)];
+    uint8_t ehdr[sizeof(elf64_header)];
     uint32_t ehdr_len = file->size < sizeof(ehdr) ? file->size : (uint32_t)sizeof(ehdr);
     if (ehdr_len < sizeof(ehdr)) { if (err) *err = elf_error_text(ELF_EBADMAGIC); return ELF_EBADMAGIC; }
     if (!fs_node_read(file, 0, ehdr, ehdr_len)) { if (err) *err = "short read"; return ELF_EOFFSET; }
@@ -197,8 +197,6 @@ int elf_load_shared(const fs_node *file, struct elf_image *out, const char **err
             if (ph[i].type != ELF_PT_LOAD || ph[i].memsz == 0) continue;
             uint64_t hi = ph[i].vaddr + ph[i].memsz;
             if (ph[i].vaddr >= VM_LOAD_SPAN || hi > VM_LOAD_SPAN) { kfree((void *)ph); if (err) *err = "pie segment too big"; return ELF_EADDR; }
-            if (ph[i].vaddr >= USER_MAX || hi > USER_MAX) { kfree((void *)ph); if (err) *err = elf_error_text(ELF_EADDR); return ELF_EADDR; }
-            if (ph[i].vaddr + VM_LOAD_SPAN + hi > USER_MAX) { kfree((void *)ph); if (err) *err = elf_error_text(ELF_EADDR); return ELF_EADDR; }
         }
     } else {
         for (size_t i = 0; i < phnum; i++) {
@@ -212,6 +210,11 @@ int elf_load_shared(const fs_node *file, struct elf_image *out, const char **err
     if (is_pie) {
         uint64_t r = crypto_random_u64();
         load_bias = VM_LOAD_BASE + (r % 0x400) * PAGE_SIZE;
+        if (load_bias >= USER_MAX - VM_LOAD_SPAN) {
+            kfree((void *)ph);
+            if (err) *err = elf_error_text(ELF_EADDR);
+            return ELF_EADDR;
+        }
     }
 
     struct vmspace *vs = vm_create();
@@ -220,6 +223,11 @@ int elf_load_shared(const fs_node *file, struct elf_image *out, const char **err
     vaddr_t lo = UINT64_MAX, hi = 0;
     for (size_t i = 0; i < phnum; i++) {
         if (ph[i].type != ELF_PT_LOAD || ph[i].memsz == 0) continue;
+        if (ph[i].vaddr > USER_MAX - load_bias - ph[i].memsz) {
+            vm_destroy(vs); kfree((void *)ph);
+            if (err) *err = elf_error_text(ELF_EADDR);
+            return ELF_EADDR;
+        }
         vaddr_t s = ((ph[i].vaddr + load_bias) & ~(PAGE_SIZE - 1));
         vaddr_t e = ((ph[i].vaddr + load_bias + ph[i].memsz + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1));
         if (s < lo) lo = s;

@@ -12,7 +12,6 @@
 
 extern void isr_stub_syscall(void);
 
-uint64_t syscall_kstack_top;
 
 typedef uint64_t (*syscall_handler_t)(struct isr_frame *f);
 
@@ -23,7 +22,7 @@ static bool in_user(void) {
 
 static int64_t sys_console_write(unsigned dest, unsigned attr, uintptr_t buf, unsigned len) {
 
-    if (dest > PRINT_BOTH) return SYS_EINVAL;
+    if (dest > PRINT_NONE) return SYS_EINVAL;
     if (!buf || len == 0) return SYS_EINVAL;
     if (len > SYS_MAX_IO) len = SYS_MAX_IO;
 

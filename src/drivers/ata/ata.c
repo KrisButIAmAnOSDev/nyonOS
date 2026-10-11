@@ -17,6 +17,7 @@
 #define REG_STATUS     7
 
 #define DEVCTL(base) ((base) + 0x206)
+#define DEVCTL_LBA   0x40
 
 #define ST_BSY  0x80
 #define ST_DRDY 0x40
@@ -24,6 +25,7 @@
 #define ST_DRQ  0x08
 #define ST_ERR  0x01
 
+#define ATA_APPEAR_MS     100ULL
 #define ATA_SPIN_LIMIT    20000000ULL
 #define ATA_RESET_SPINS   2000000ULL
 
@@ -39,6 +41,7 @@
 #define CMD_READ     0x20
 #define CMD_WRITE    0x30
 #define CMD_IDENTIFY 0xEC
+#define CMD_NATIVE_MAX 0xF8
 #define CMD_FLUSH    0xE7
 
 #define READY_TIMEOUT_MS 5000
@@ -170,7 +173,9 @@ static void reset_channel(uint16_t base) {
     for (int i = 0; i < 8; i++) io_wait();
 
     for (uint64_t i = 0; i < ATA_RESET_SPINS; i++) {
-        if (!(status_of(base) & ST_BSY)) break;
+        uint8_t s = status_of(base);
+        if (s == 0xFF) break;
+        if (!(s & ST_BSY)) break;
         io_wait();
     }
 }
@@ -193,6 +198,39 @@ static void swap_words(char *dst, const uint16_t *src, int words) {
 
 
 
+static bool ata_read_identify_block(uint16_t base, uint16_t *data) {
+    if (!wait_status(base, ST_DRQ, DRQ_TIMEOUT_MS)) return false;
+
+    for (int i = 0; i < 256; i++) data[i] = inw(base + REG_DATA);
+    io_wait();
+
+    return wait_status(base, ST_DRDY, READY_TIMEOUT_MS);
+}
+
+static bool ata_native_max(uint16_t base, uint64_t *out_max) {
+    uint16_t data[256];
+
+    uint8_t devctl = inb(DEVCTL(base));
+    outb(DEVCTL(base), devctl | DEVCTL_LBA);
+    io_wait();
+
+    zero_task_file(base);
+    outb(base + REG_STATUS, CMD_NATIVE_MAX);
+    io_wait();
+
+    bool ok = ata_read_identify_block(base, data);
+
+    outb(DEVCTL(base), devctl & (uint8_t)~DEVCTL_LBA);
+    io_wait();
+
+    if (!ok) return false;
+
+    *out_max = ((uint64_t)data[100]) | ((uint64_t)data[101] << 16) |
+               ((uint64_t)data[102] << 32) | ((uint64_t)data[103] << 48);
+
+    return true;
+}
+
 static bool ata_identify(int index) {
     uint16_t base = port_for(index);
 
@@ -200,9 +238,12 @@ static bool ata_identify(int index) {
     select_drive(base, head_for(index));
 
     uint8_t st = status_of(base);
-    for (uint64_t i = 0; st == 0x00 && i < ATA_RESET_SPINS; i++) {
-        io_wait();
-        st = status_of(base);
+    {
+        uint64_t deadline = pit_get_ticks() + ATA_APPEAR_MS;
+        while (st == 0x00 && pit_get_ticks() < deadline) {
+            io_wait();
+            st = status_of(base);
+        }
     }
     if (st == 0xFF || st == 0x00) return fail(ATA_ENODEV);
 
@@ -227,11 +268,8 @@ static bool ata_identify(int index) {
         return false;
     }
 
-    if (!wait_status(base, ST_DRQ, DRQ_TIMEOUT_MS)) return false;
-
     uint16_t data[256];
-    for (int i = 0; i < 256; i++) data[i] = inw(base + REG_DATA);
-    io_wait();
+    if (!ata_read_identify_block(base, data)) return false;
 
     ata_drive_t *d = &drives[index];
     d->present = true;
@@ -253,6 +291,14 @@ static bool ata_identify(int index) {
     d->sectors = (d->lba48 && cap48) ? cap48 : cap28;
     d->lba48_sectors = d->sectors;
 
+    if (d->lba48) {
+        uint64_t native = 0;
+        if (ata_native_max(base, &native) && native && native < ATA_MAX_LBA28) {
+            d->sectors = native;
+            d->lba48_sectors = native;
+        }
+    }
+
     return true;
 }
 
@@ -262,13 +308,15 @@ static void ata_probe_size(int index, ata_drive_t *d) {
 
     if (!d->present || d->atapi || !reported) return;
 
-    d->sectors = ATA_MAX_LBA28;
-
     uint64_t good = 0;
-    uint64_t bad = ATA_MAX_LBA28 + 1;
+    uint64_t bad = ATA_MAX_LBA28;
 
-    for (uint64_t step = reported ? reported : 1; step < ATA_MAX_LBA28;) {
-        if (!ata_read_sectors(index, (uint32_t)(step - 1), 1, buf)) {
+    for (uint64_t step = reported; step < ATA_MAX_LBA28;) {
+        uint64_t prev = d->sectors;
+        d->sectors = step;
+        bool ok = ata_read_sectors(index, (uint32_t)(step - 1), 1, buf);
+        d->sectors = prev;
+        if (!ok) {
             bad = step;
             break;
         }
@@ -276,16 +324,24 @@ static void ata_probe_size(int index, ata_drive_t *d) {
         step = step < 4096 ? step * 2 : step + (step / 2);
     }
 
-    if (bad == ATA_MAX_LBA28 + 1) {
-        if (ata_read_sectors(index, (uint32_t)(ATA_MAX_LBA28 - 1), 1, buf)) good = ATA_MAX_LBA28;
-        else bad = ATA_MAX_LBA28;
+    if (bad == ATA_MAX_LBA28 && good == 0) {
+        d->sectors = reported;
+        return;
     }
+
+    if (bad == ATA_MAX_LBA28) bad = good + 1;
 
     while (good + 1 < bad) {
         uint64_t mid = good + (bad - good) / 2;
-        if (ata_read_sectors(index, (uint32_t)(mid - 1), 1, buf)) good = mid;
+        uint64_t prev = d->sectors;
+        d->sectors = mid;
+        bool ok = ata_read_sectors(index, (uint32_t)(mid - 1), 1, buf);
+        d->sectors = prev;
+        if (ok) good = mid;
         else bad = mid;
     }
+
+    if (good == 0) return;
 
     d->sectors = good;
     d->lba48_sectors = good;

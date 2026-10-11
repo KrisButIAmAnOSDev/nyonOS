@@ -18,6 +18,8 @@ typedef unsigned char uchar;
 #define O_DIRECTORY  ABI_O_DIRECTORY
 #define O_NONBLOCK   ABI_O_NONBLOCK
 
+#define PRINT_NONE ABI_PRINT_NONE
+
 #define SEEK_SET ABI_SEEK_SET
 #define SEEK_CUR ABI_SEEK_CUR
 #define SEEK_END ABI_SEEK_END
