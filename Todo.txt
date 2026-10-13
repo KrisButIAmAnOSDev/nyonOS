@@ -1,0 +1,12 @@
+make hello world from mlibc works
+add rtc dirver
+add pc speaker dirver
+add ac97 dirver
+whattever
+check for bugs in everything again (opencode does this)
+try step 5
+compile gcc again with ccache
+whatever
+nyon
+nyonnn
+ulelee
