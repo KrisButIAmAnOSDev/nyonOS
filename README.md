@@ -9,7 +9,7 @@ A minimal x86_64 hobby OS kernel written from scratch. Boots via Limine on BIOS/
 - **Fat 16 filesystem** read only for now
 - **VGA framebuffer rendering** with 8x16 font (from `kbd` package, GPL-3.0)
 - **elf loader (working!!!)** yea its working
-- **PIT timer** (channel 0, mode 2 rate generator) at 1000 Hz driving IRQ0`
+- **mlibc ruuning (mlibc port ig?)** its running 
 - **Working pmm and vmm** it works,at least (and 5lvl paging)
 - **"working"** keyboard dirver (ps/2)
 
@@ -35,7 +35,7 @@ of any kind.
 
 also sometime stupid llm i try touch my code and make my code stupid too so expect werid things,i did check my code after "stupid" llm touch it but still,be aware of it
 
-and if you think this project is vibecoded,tag me in osdev server and ask me about an random function,i will explain it myself
+and if you think this project is vibecoded,tag me in osdev discord server and ask me about an random function,i will explain it myself
 
 ## License
 
