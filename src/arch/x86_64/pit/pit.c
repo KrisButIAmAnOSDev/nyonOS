@@ -7,7 +7,7 @@
 #include "drivers/serial/serial.h"
 
 static volatile uint64_t pit_ticks = 0;
-static uint32_t pit_frequency = 0;
+static uint32_t pit_frequency_hz = 0;
 
 static inline void outb(uint16_t port, uint8_t val) {
     __asm__ volatile("outb %0, %1" : : "a"(val), "Nd"(port));
@@ -42,7 +42,7 @@ void pit_init(uint32_t frequency_hz) {
         return;
     }
 
-    pit_frequency = PIT_FREQUENCY / divisor;
+    pit_frequency_hz = PIT_FREQUENCY / divisor;
 
     outb(PIT_COMMAND, 0x36);
     outb(PIT_CHANNEL0, divisor & 0xFF);
@@ -50,18 +50,22 @@ void pit_init(uint32_t frequency_hz) {
 
     pic_clear_mask(0);
 
-    kprintf(PRINT_SERIAL, "PIT initialized at %u Hz\n", pit_frequency);
+    kprintf(PRINT_SERIAL, "PIT initialized at %u Hz\n", pit_frequency_hz);
 }
 
 void pit_sleep(uint64_t ms) {
-    uint64_t target = pit_ticks + (ms * pit_frequency) / 1000;
+    uint64_t target = pit_ticks + (ms * pit_frequency_hz) / 1000;
     while (pit_ticks < target) __asm__ volatile("hlt");
 }
 
 uint64_t pit_ms_to_ticks(uint64_t ms) {
-    return (ms * pit_frequency + 999) / 1000;
+    return (ms * pit_frequency_hz + 999) / 1000;
 }
 
 uint64_t pit_get_ticks(void) {
     return pit_ticks;
+}
+
+uint32_t pit_frequency(void) {
+    return pit_frequency_hz;
 }

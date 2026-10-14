@@ -94,6 +94,39 @@ int vm_region_add(struct vmspace *vs, vaddr_t start, vaddr_t end, uint8_t prot, 
     return 0;
 }
 
+bool vm_region_remove(struct vmspace *vs, vaddr_t start, vaddr_t end) {
+    if (!vs) return false;
+    preempt_disable();
+    for (size_t i = 0; i < vs->region_count; i++) {
+        struct vm_region *r = &vs->regions[i];
+        if (r->start == start && r->end == end) {
+            vs->regions[i] = vs->regions[--vs->region_count];
+            preempt_enable();
+            return true;
+        }
+    }
+    preempt_enable();
+    return false;
+}
+
+bool vm_find_free(struct vmspace *vs, vaddr_t lo, vaddr_t hi, size_t bytes, vaddr_t *out) {
+    if (!vs || !out || bytes == 0 || lo >= hi) return false;
+    vaddr_t cur = lo;
+    for (;;) {
+        if (cur + bytes > hi || cur + bytes < cur) return false;
+        bool clash = false;
+        for (size_t i = 0; i < vs->region_count; i++) {
+            struct vm_region *r = &vs->regions[i];
+            if (cur < r->end && r->start < cur + bytes) {
+                cur = r->end;
+                clash = true;
+                break;
+            }
+        }
+        if (!clash) { *out = cur; return true; }
+    }
+}
+
 struct vm_region *vm_region_find(struct vmspace *vs, vaddr_t addr) {
     if (!vs) return NULL;
     for (size_t i = 0; i < vs->region_count; i++) {
@@ -161,9 +194,10 @@ static uint8_t *stack_page(struct vmspace *vs, uint64_t *vbase_out) {
 }
 
 bool vm_stack_push_strings(struct vmspace *vs, const char **strs, size_t count,
+                           const char **envp, size_t envc, const struct vm_auxv *aux, size_t auxc,
                            uint64_t *argc_out, uint64_t *stack_out, uint64_t *argv_out, uint64_t *auxv_out) {
     if (!vs || !vs->pml4 || !vs->has_stack) return false;
-    if (count > 32) return false;
+    if (count > 32 || envc > 32 || auxc > 32) return false;
 
     uint64_t vbase = 0;
     uint8_t *base = stack_page(vs, &vbase);
@@ -177,6 +211,7 @@ bool vm_stack_push_strings(struct vmspace *vs, const char **strs, size_t count,
     if (floor < base) floor = base;
 
     uint64_t argv_ptr[32];
+    uint64_t envp_ptr[32];
 
     for (size_t i = 0; i < count; i++) {
         size_t sl = 0;
@@ -191,20 +226,44 @@ bool vm_stack_push_strings(struct vmspace *vs, const char **strs, size_t count,
         top = (uint8_t *)((uintptr_t)dst & ~0x7ULL);
     }
 
+    for (size_t i = 0; i < envc; i++) {
+        size_t sl = 0;
+        while (envp[i][sl]) sl++;
+
+        if ((size_t)(top - floor) < sl + 16) return false;
+
+        uint8_t *dst = top - sl - 1;
+        for (size_t k = 0; k <= sl; k++) dst[k] = (uint8_t)envp[i][k];
+
+        envp_ptr[i] = vbase + (uint64_t)(dst - base);
+        top = (uint8_t *)((uintptr_t)dst & ~0x7ULL);
+    }
+
     top = (uint8_t *)((uintptr_t)top & ~0xFULL);
 
-    if ((size_t)(top - floor) < (count + 2) * 8) return false;
+    size_t words = 1 + count + 1 + envc + 1 + auxc * 2 + 2;
+    if (words & 1) words++;
+    if ((size_t)(top - floor) < words * 8 + 16) return false;
 
-    uint64_t *sp = (uint64_t *)top - (count + 2);
-    sp[0] = count;
-    for (size_t i = 0; i < count; i++) sp[1 + i] = argv_ptr[i];
-    sp[1 + count] = 0;
+    uint64_t *sp = (uint64_t *)top - words;
+    size_t w = 0;
+    sp[w++] = count;
+    for (size_t i = 0; i < count; i++) sp[w++] = argv_ptr[i];
+    sp[w++] = 0;
+    for (size_t i = 0; i < envc; i++) sp[w++] = envp_ptr[i];
+    sp[w++] = 0;
+    for (size_t i = 0; i < auxc; i++) {
+        sp[w++] = aux[i].type;
+        sp[w++] = aux[i].value;
+    }
+    sp[w++] = 0;
+    sp[w++] = 0;
 
     uint64_t sp_virt = vbase + (uint64_t)((uint8_t *)sp - base);
 
     if (argc_out) *argc_out = count;
     if (stack_out) *stack_out = sp_virt;
     if (argv_out) *argv_out = sp_virt + 8;
-    if (auxv_out) *auxv_out = sp_virt + (uint64_t)(count + 2) * 8;
+    if (auxv_out) *auxv_out = sp_virt + (uint64_t)(1 + count + 1 + envc + 1) * 8;
     return true;
 }

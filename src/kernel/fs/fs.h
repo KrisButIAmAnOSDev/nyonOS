@@ -54,6 +54,7 @@ fs_volume_t *fs_get(void);
 
 bool fs_iterate(const fs_node_t *dir, uint32_t index, fs_node_t *out);
 bool fs_lookup(const char *path, fs_node_t *out);
+bool fs_name_eq(const char *a, const char *b);
 
 
 bool fs_node_read(const fs_node_t *node, uint32_t offset, void *buf, uint32_t len);

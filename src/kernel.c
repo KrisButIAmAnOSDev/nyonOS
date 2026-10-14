@@ -192,6 +192,19 @@ static void fs_test(void) {
     }
     kprintf(PRINT_SERIAL, "  root entries listed: %u\n", n);
 
+    bool have_test_txt = false, have_sub = false, have_bin = false;
+    for (uint32_t i = 0; i < n; i++) {
+        if (!fs_iterate(&root, i, &e)) continue;
+        if (fs_name_eq(e.name, "TEST.TXT")) have_test_txt = true;
+        if (fs_name_eq(e.name, "SUB")) have_sub = true;
+        if (fs_name_eq(e.name, "BIN")) have_bin = true;
+    }
+    bool fixtures = have_test_txt && have_sub && have_bin;
+    kprintf(PRINT_SERIAL, "  test fixtures present: ");
+    kprintchar(fixtures ? 'Y' : 'N', PRINT_SERIAL);
+    kprintf(PRINT_SERIAL, "  (TEST.TXT %u SUB %u BIN %u)\n",
+            have_test_txt, have_sub, have_bin);
+
     fs_node_t file;
     bool got = fs_lookup("/TEST.TXT", &file);
     kprintf(PRINT_SERIAL, "  lookup /TEST.TXT: ");
@@ -277,7 +290,7 @@ static void fs_test(void) {
     kprintchar('\n', PRINT_SERIAL);
 
     kprintf(PRINT_SERIAL, "FS test: usable: ");
-    kprintchar((n == 2 && size_ok && content_ok && edge_ok && p2 && oob && missing &&
+    kprintchar((fixtures && size_ok && content_ok && edge_ok && p2 && oob && missing &&
                 got_sub && sub_count == 1 && inner_ok && bad_path && dir_read_refused) ? 'Y' : 'N', PRINT_SERIAL);
     kprintchar('\n', PRINT_SERIAL);
 }
@@ -514,6 +527,172 @@ static void c_test(void) {
 
     pmm_free(phys, 1);
 }
+
+static void mm_test(void) {
+    fs_node_t node;
+    if (!fs_lookup("/BIN/MMTEST", &node) && !fs_lookup("/BIN/mmtest", &node)) {
+        kprintf(PRINT_SERIAL, "MM ring3: /BIN/mmtest not found\n");
+        return;
+    }
+
+    paddr_t phys;
+    if (!pmm_alloc(&phys, 1)) { kprintf(PRINT_SERIAL, "MM ring3: alloc failed\n"); return; }
+
+    volatile uint64_t *res = (volatile uint64_t *)(vmm_hhdm_offset + phys);
+    for (int i = 0; i < C_RES_SLOTS; i++) res[i] = 0xdeadbeefdeadbeefULL;
+
+    struct elf_shared shared = { .phys = phys, .virt = C_RES_VIRT, .pages = 1, .owned_by_loader = false };
+
+    struct elf_image img;
+    const char *err = NULL;
+    int r = elf_load_shared(&node, &img, &err, NULL, 0, &shared);
+    if (r) {
+        pmm_free(phys, 1);
+        kprintf(PRINT_SERIAL, "MM ring3: load refused: %s\n", err ? err : "?");
+        return;
+    }
+
+    struct task *t = task_spawn_vmspace("ring3mm", img.vs, img.entry, img.stack_top);
+    elf_destroy(&img);
+    if (!t) {
+        pmm_free(phys, 1);
+        kprintf(PRINT_SERIAL, "MM ring3: spawn failed\n");
+        return;
+    }
+
+    uint32_t pid = t->pid;
+    for (int i = 0; i < 2000 && res[C_RES_DONE] == 0xdeadbeefdeadbeefULL && task_find_pid(pid); i++) pit_sleep(5);
+
+    bool ran = res[C_RES_DONE] != 0xdeadbeefdeadbeefULL;
+    for (int i = 0; i < 400 && task_find_pid(pid); i++) pit_sleep(5);
+    task_reap_now();
+
+    if (!ran) {
+        kprintf(PRINT_SERIAL, "MM ring3: the test never reported\n");
+        pmm_free(phys, 1);
+        return;
+    }
+
+    int checks_run = 0, bad = 0;
+    for (int i = 0; i < C_MAX_CHECKS; i++) {
+        if (res[C_RES_CHECK_BASE + i] == 0xdeadbeefdeadbeefULL) break;
+        checks_run++;
+        if (res[C_RES_CHECK_BASE + i] == 1) continue;
+        bad++;
+        kprintf(PRINT_SERIAL, "    FAIL mm check %d: got %lld, wanted %lld\n", i,
+                (long long)res[C_RES_FAIL_BASE + i], (long long)res[C_RES_GOT_BASE + i]);
+    }
+
+    kprintf(PRINT_SERIAL, "MM ring3: %d of %d checks passed: ", checks_run - bad, checks_run);
+    kprintchar(bad == 0 ? 'Y' : 'N', PRINT_SERIAL);
+    kprintchar('\n', PRINT_SERIAL);
+
+    pmm_free(phys, 1);
+}
+
+static void futex_pair_test(void) {
+    fs_node_t node;
+    if (!fs_lookup("/BIN/MMTEST", &node) && !fs_lookup("/BIN/mmtest", &node)) {
+        kprintf(PRINT_SERIAL, "FUTEX ring3: /BIN/mmtest not found\n");
+        return;
+    }
+
+    paddr_t phys;
+    if (!pmm_alloc(&phys, 1)) { kprintf(PRINT_SERIAL, "FUTEX ring3: alloc failed\n"); return; }
+
+    volatile uint64_t *res = (volatile uint64_t *)(vmm_hhdm_offset + phys);
+    for (int i = 0; i < C_RES_SLOTS; i++) res[i] = 0xdeadbeefdeadbeefULL;
+
+    struct elf_shared shared = { .phys = phys, .virt = C_RES_VIRT, .pages = 1, .owned_by_loader = false };
+
+    static const char *wait_argv[] = { "mmtest", "waiter" };
+    static const char *wake_argv[] = { "mmtest", "waker" };
+
+    struct elf_image img;
+    const char *err = NULL;
+    if (elf_load_shared(&node, &img, &err, wait_argv, 2, &shared)) {
+        pmm_free(phys, 1);
+        kprintf(PRINT_SERIAL, "FUTEX ring3: load refused: %s\n", err ? err : "?");
+        return;
+    }
+
+    struct vmspace *vs = img.vs;
+    struct task *t1 = task_spawn_vmspace("ring3wt", vs, img.entry, img.stack_top);
+    elf_destroy(&img);
+
+    struct elf_image img2;
+    if (elf_load_shared(&node, &img2, &err, wake_argv, 2, &shared)) {
+        if (t1) { for (int i = 0; i < 400 && task_find_pid(t1->pid); i++) pit_sleep(5); }
+        pmm_free(phys, 1);
+        kprintf(PRINT_SERIAL, "FUTEX ring3: second load refused: %s\n", err ? err : "?");
+        return;
+    }
+
+    struct task *t2 = task_spawn_vmspace("ring3wk", img2.vs, img2.entry, img2.stack_top);
+    elf_destroy(&img2);
+
+    if (!t1 || !t2) {
+        kprintf(PRINT_SERIAL, "FUTEX ring3: spawn failed\n");
+        pmm_free(phys, 1);
+        return;
+    }
+
+    for (int i = 0; i < 900; i++) {
+        pit_sleep(5);
+        if (res[466] != 0xdeadbeefdeadbeefULL && res[468] != 0xdeadbeefdeadbeefULL) break;
+    }
+    task_reap_now();
+
+    uint64_t waiter = res[466], waker = res[468];
+    bool ok = (waiter == 100) && (waker == 100);
+    kprintf(PRINT_SERIAL, "FUTEX ring3: waiter blocked, woken by second task: ");
+    kprintchar(ok ? 'Y' : 'N', PRINT_SERIAL);
+    kprintchar('\n', PRINT_SERIAL);
+    if (!ok)
+        kprintf(PRINT_SERIAL, "    FAIL waiter=%lld waker=%lld\n", (long long)waiter, (long long)waker);
+
+    pmm_free(phys, 1);
+}
+
+static void mlibc_hello_test(void) {
+    fs_node_t node;
+    if (!fs_lookup("/BIN/MHELLO", &node) && !fs_lookup("/BIN/mhello", &node)) {
+        kprintf(PRINT_SERIAL, "MLIBC: /BIN/mhello not found\n");
+        return;
+    }
+
+    size_t before = pmm_free_pages();
+
+    struct elf_image img;
+    const char *err = NULL;
+    static const char *args[2] = { "/BIN/mhello", "kawkaw" };
+    if (elf_load_argv(&node, &img, &err, args, 2)) {
+        kprintf(PRINT_SERIAL, "MLIBC: load refused: %s\n", err ? err : "?");
+        return;
+    }
+
+    struct task *t = task_spawn_vmspace("mlibc", img.vs, img.entry, img.stack_top);
+    elf_destroy(&img);
+    if (!t) {
+        kprintf(PRINT_SERIAL, "MLIBC: spawn failed\n");
+        return;
+    }
+
+    uint32_t pid = t->pid;
+    for (int i = 0; i < 4000 && task_find_pid(pid); i++) pit_sleep(5);
+    bool alive = task_find_pid(pid) != NULL;
+    task_reap_now();
+
+    size_t after = pmm_free_pages();
+
+    kprintf(PRINT_SERIAL, "MLIBC: libc program ran and exited: ");
+    kprintchar(!alive ? 'Y' : 'N', PRINT_SERIAL);
+    kprintchar('\n', PRINT_SERIAL);
+    kprintf(PRINT_SERIAL, "MLIBC: no leaked frames: ");
+    kprintchar(after >= before ? 'Y' : 'N', PRINT_SERIAL);
+    kprintf(PRINT_SERIAL, "  free %zu -> %zu\n", before, after);
+}
+
 static bool tty_reap(uint32_t pid) {
     for (int i = 0; i < 200 && task_find_pid(pid); i++) pit_sleep(5);
     return task_find_pid(pid) == NULL;
@@ -783,7 +962,7 @@ static void elf_reject_test(int *bad) {
     elf_bad_test("absurd program header count rejected", t, 512, fsize, ELF_EPHNUM, bad);
 
     for (size_t i = 0; i < sizeof(t); i++) t[i] = good[i];
-    t[32] = 0xff; t[33] = 0xff;
+    for (int k = 0; k < 8; k++) t[32 + k] = (uint8_t)((fsize >> (8 * k)) & 0xff);
     elf_bad_test("program headers past end of file rejected", t, 512, fsize, ELF_EOFFSET, bad);
 
     for (size_t i = 0; i < sizeof(t); i++) t[i] = good[i];
@@ -977,6 +1156,7 @@ void kmain(void) {
     cpu_detect();
     cpu_enable_nx();
     cpu_enable_smep_smap();
+    cpu_enable_sse_user();
     cpu_enable_pcid();
     crypto_init();
     syscall_init();
@@ -1079,6 +1259,9 @@ void kmain(void) {
 
         {
             c_test();
+            mm_test();
+            futex_pair_test();
+            mlibc_hello_test();
         }
 
         {

@@ -33,7 +33,7 @@ if [ ! -f fat16.img ]; then
     exit 1
 fi
 
-for prog in hello fdtest; do
+for prog in hello fdtest mmtest mhello; do
     if [ ! -f "src/user/bin/$prog" ]; then
         echo "src/user/bin/$prog missing, cannot stage user programs" >&2
         exit 1
@@ -42,7 +42,7 @@ done
 
 mdeltree -i fat16.img@@1M ::/BIN >/dev/null 2>&1 || true
 mmd -i fat16.img@@1M ::/BIN
-for prog in hello fdtest; do
+for prog in hello fdtest mmtest mhello; do
     mcopy -i fat16.img@@1M "src/user/bin/$prog" "::/BIN/$prog"
 done
 

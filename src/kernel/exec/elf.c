@@ -7,6 +7,7 @@
 #include "kernel/uaccess/uaccess.h"
 #include "kernel/crypto/crypto.h"
 #include "kernel/fs/fs.h"
+#include "abi/abi.h"
 
 #define VM_LOAD_BASE   0x0000000040000000ULL
 #define VM_LOAD_SPAN   0x0000000100000000ULL
@@ -339,13 +340,62 @@ int elf_load_shared(const fs_node *file, struct elf_image *out, const char **err
     }
 
     uint64_t sp = vs->stack_top - 16;
-    if (argv && argc) {
-        if (!vm_stack_push_strings(vs, argv, argc, &argc_out, &sp, &argv_out, &auxv_out)) {
-            if (err) *err = "cannot build the initial stack";
-            kfree((void *)ph);
-            vm_destroy(vs);
-            return ELF_ETOOLARGE;
+
+    struct vm_auxv aux[8];
+    size_t auxc = 0;
+    #define VM_AUXV_LO 0x0000000080000000ULL
+    #define VM_AUXV_HI 0x0000000080100000ULL
+    uint64_t phdr_lo = phoff;
+    uint64_t phdr_hi = phoff + (uint64_t)phnum * phentsize;
+    for (size_t i = 0; i < phnum; i++) {
+        if (ph[i].type != ELF_PT_LOAD || ph[i].memsz == 0) continue;
+        uint64_t seg_lo = ph[i].offset;
+        uint64_t seg_hi = ph[i].offset + ph[i].filesz;
+        if (phdr_lo >= seg_lo && phdr_hi <= seg_hi) {
+            aux[auxc].type = ABI_AT_PHDR;
+            aux[auxc].value = ph[i].vaddr + load_bias + (phoff - seg_lo);
+            auxc++;
+            break;
         }
+    }
+    aux[auxc].type = ABI_AT_PHENT;  aux[auxc].value = phentsize; auxc++;
+    aux[auxc].type = ABI_AT_PHNUM;  aux[auxc].value = phnum;     auxc++;
+    aux[auxc].type = ABI_AT_PAGESZ; aux[auxc].value = PAGE_SIZE; auxc++;
+    aux[auxc].type = ABI_AT_ENTRY;  aux[auxc].value = entry + load_bias; auxc++;
+
+    /* AT_RANDOM is the address of 16 random bytes, not a random value.
+       Consumers memcpy from it, so it must be readable user memory. */
+    uint64_t random_addr = 0;
+    {
+        vaddr_t rbase = 0;
+        if (vm_find_free(vs, VM_AUXV_LO, VM_AUXV_HI, PAGE_SIZE, &rbase) &&
+            vm_region_add(vs, rbase, rbase + PAGE_SIZE,
+                          VM_PROT_READ | VM_PROT_WRITE, VM_BACKING_ANON) == 0 &&
+            vm_map_anon_zeroed(vs, rbase, 1, VM_PROT_READ | VM_PROT_WRITE, true)) {
+            uint64_t *slot = (uint64_t *)(vmm_hhdm_offset +
+                (vmm_query_in(vs->pml4, rbase) & 0x000FFFFFFFFFF000ULL));
+            slot[0] = crypto_random_u64();
+            slot[1] = crypto_random_u64();
+            random_addr = rbase;
+        }
+        if (random_addr) {
+            aux[auxc].type = ABI_AT_RANDOM;
+            aux[auxc].value = random_addr;
+            auxc++;
+        }
+    }
+
+    const char *empty_env[1] = { NULL };
+    const char **envp = empty_env;
+    size_t envc = 0;
+
+    if (!vm_stack_push_strings(vs, argv ? argv : empty_env, argv ? argc : 0,
+                               envp, envc, aux, auxc,
+                               &argc_out, &sp, &argv_out, &auxv_out)) {
+        if (err) *err = "cannot build the initial stack";
+        kfree((void *)ph);
+        vm_destroy(vs);
+        return ELF_ETOOLARGE;
     }
 
     if (shared && shared->phys && shared->pages) {

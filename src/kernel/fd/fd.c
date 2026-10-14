@@ -459,8 +459,13 @@ int64_t fd_write(struct task *t, int fd, const void *ubuf, uint32_t len) {
 }
 
 int64_t fd_lseek(struct task *t, int fd, int64_t off, int whence) {
-    struct kobject *o = fd_get_checked(t, fd, KOBJ_FILE, FD_RIGHT_READ);
+    struct kobject *o = fd_get_checked(t, fd, KOBJ_TYPE_ANY, 0);
     if (!o) return FD_EBADF;
+
+    if (o->type != KOBJ_FILE) {
+        kobject_put(o);
+        return FD_ESPIPE;
+    }
 
     struct file *f = (struct file *)o;
     int64_t r = -1;
@@ -677,7 +682,7 @@ int fd_open(struct task *t, const char *path, uint32_t oflags) {
 
     uint32_t rights = 0;
     if (node.is_dir) rights |= FD_RIGHT_GETDENT;
-    else if (oflags & FD_OPEN_WRITE) rights |= FD_RIGHT_WRITE;
+    else if ((oflags & FD_OPEN_MODE) != FD_OPEN_READ) rights |= FD_RIGHT_WRITE;
     else rights |= FD_RIGHT_READ;
     rights |= FD_RIGHT_DUP;
 
@@ -687,7 +692,7 @@ int fd_open(struct task *t, const char *path, uint32_t oflags) {
     kobject_init(&f->obj, KOBJ_FILE, FD_RIGHTS_ALL, &file_ops);
     f->node = node;
     f->pos = 0;
-    f->writable = (oflags & FD_OPEN_WRITE) != 0;
+    f->writable = (oflags & FD_OPEN_MODE) != FD_OPEN_READ;
 
     int fd = fd_alloc(t, &f->obj, rights, 0);
 

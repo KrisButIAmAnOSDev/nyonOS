@@ -35,6 +35,8 @@ _start:
     mov rsp, rbx
     xor rbp, rbp
 
+    mov rdi, [rsp]
+    lea rsi, [rsp + 8]
     call main
 
     mov edi, eax

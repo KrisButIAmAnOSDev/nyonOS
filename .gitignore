@@ -5,3 +5,4 @@ qemu.log
 fat16.img
 src/user/bin/
 src/user/*.o
+src/user/*.d

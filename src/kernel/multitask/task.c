@@ -9,6 +9,7 @@
 #include "arch/x86_64/gdt/gdt.h"
 #include "arch/x86_64/gdt/tss.h"
 #include "arch/x86_64/syscall/syscall.h"
+#include "arch/x86_64/syscall/syscall_msr.h"
 #include "kernel/uaccess/uaccess.h"
 #include "kernel/mm/vmm/vmspace.h"
 
@@ -46,6 +47,7 @@ static void task_kstack_update(void) {
 static void task_aspace_update(void) {
     struct page_table *pml4 = tasks[current_slot].pml4;
     vmm_switch_address_space(pml4 ? pml4 : kernel_pml4);
+    msr_write(MSR_FS_BASE, tasks[current_slot].fs_base);
 }
 
 static void task_release(struct task *t) {

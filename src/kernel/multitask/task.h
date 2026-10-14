@@ -30,6 +30,7 @@ struct task {
     struct page_table *pml4;
     struct vmspace *vs;
     uint64_t exit_code;
+    uint64_t fs_base;
     bool in_use;
     bool zombie;
     bool blocked;

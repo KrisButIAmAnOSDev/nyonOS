@@ -43,13 +43,21 @@ struct vmspace *vm_ref(struct vmspace *vs);
 
 int vm_region_add(struct vmspace *vs, vaddr_t start, vaddr_t end, uint8_t prot, uint8_t backing);
 struct vm_region *vm_region_find(struct vmspace *vs, vaddr_t addr);
+bool vm_region_remove(struct vmspace *vs, vaddr_t start, vaddr_t end);
+bool vm_find_free(struct vmspace *vs, vaddr_t lo, vaddr_t hi, size_t bytes, vaddr_t *out);
 
 bool vm_map_anon(struct vmspace *vs, vaddr_t vaddr, size_t pages, uint8_t prot);
 bool vm_map_anon_zeroed(struct vmspace *vs, vaddr_t vaddr, size_t pages, uint8_t prot, bool zero);
 bool vm_commit(struct vmspace *vs, vaddr_t vaddr, paddr_t phys, size_t pages, uint8_t prot, bool owned);
 
 bool vm_setup_stack(struct vmspace *vs);
+struct vm_auxv {
+    uint64_t type;
+    uint64_t value;
+};
+
 bool vm_stack_push_strings(struct vmspace *vs, const char **strs, size_t count,
+                           const char **envp, size_t envc, const struct vm_auxv *aux, size_t auxc,
                            uint64_t *argc_out, uint64_t *stack_out, uint64_t *argv_out, uint64_t *auxv_out);
 
 void vm_free_range(struct vmspace *vs, vaddr_t start, vaddr_t end);

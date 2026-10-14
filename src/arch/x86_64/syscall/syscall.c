@@ -7,6 +7,7 @@
 #include "kernel/sync/preempt.h"
 #include "kernel/fd/fd.h"
 #include "kernel/fs/fs.h"
+#include "kernel/mm/vmm/vmspace.h"
 #include "arch/x86_64/pit/pit.h"
 #include "arch/x86_64/syscall/syscall_msr.h"
 
@@ -232,6 +233,113 @@ static int64_t sys_isatty(int fd) {
     bool tty = (o->type == KOBJ_CONSOLE);
     kobject_put(o);
     return tty ? 1 : 0;
+}
+
+#define SYS_MMAP_LO   0x0000000100000000ULL
+#define SYS_MMAP_HI   0x00007FFFFFFFF000ULL
+#define SYS_FUTEX_WAIT 0
+#define SYS_FUTEX_WAKE 1
+
+static int64_t sys_mmap(uint64_t len, unsigned prot, unsigned flags) {
+    struct task *t = task_current();
+    if (!t || !in_user()) return SYS_EINVAL;
+    if (len == 0 || len > SYS_MMAP_HI - SYS_MMAP_LO) return SYS_EINVAL;
+    if (!(flags & ABI_MMAP_ANON)) return SYS_EINVAL;
+    if (prot & ~(ABI_MMAP_PROT_READ | ABI_MMAP_PROT_WRITE | ABI_MMAP_PROT_EXEC)) return SYS_EINVAL;
+
+    uint8_t vprot = 0;
+    if (prot & ABI_MMAP_PROT_READ) vprot |= VM_PROT_READ;
+    if (prot & ABI_MMAP_PROT_WRITE) vprot |= VM_PROT_WRITE;
+    if (prot & ABI_MMAP_PROT_EXEC) vprot |= VM_PROT_EXEC;
+
+    size_t pages = (size_t)((len + PAGE_SIZE - 1) / PAGE_SIZE);
+    size_t bytes = pages * PAGE_SIZE;
+
+    preempt_disable();
+    vaddr_t base = 0;
+    if (!vm_find_free(t->vs, SYS_MMAP_LO, SYS_MMAP_HI, bytes, &base)) {
+        preempt_enable();
+        return SYS_ENOMEM;
+    }
+    if (vm_region_add(t->vs, base, base + bytes, vprot, VM_BACKING_ANON) != 0) {
+        preempt_enable();
+        return SYS_ENOMEM;
+    }
+    if (!vm_map_anon_zeroed(t->vs, base, pages, vprot, true)) {
+        vm_region_remove(t->vs, base, base + bytes);
+        preempt_enable();
+        return SYS_ENOMEM;
+    }
+    preempt_enable();
+    return (int64_t)base;
+}
+
+static int64_t sys_munmap(uint64_t addr, uint64_t len) {
+    struct task *t = task_current();
+    if (!t || !in_user()) return SYS_EINVAL;
+    if (len == 0 || (addr & (PAGE_SIZE - 1))) return SYS_EINVAL;
+
+    size_t pages = (size_t)((len + PAGE_SIZE - 1) / PAGE_SIZE);
+    vaddr_t end = addr + (uint64_t)pages * PAGE_SIZE;
+    if (end <= addr) return SYS_EINVAL;
+
+    struct vm_region *r = vm_region_find(t->vs, addr);
+    if (!r || r->backing != VM_BACKING_ANON) return SYS_EINVAL;
+    if (r->start != addr || r->end != end) return SYS_EINVAL;
+
+    preempt_disable();
+    vm_free_range(t->vs, addr, end);
+    vm_region_remove(t->vs, addr, end);
+    preempt_enable();
+    return 0;
+}
+
+static int64_t sys_clock_gettime(unsigned clk, uintptr_t ts) {
+    if (!ts) return SYS_EFAULT;
+    if (clk != ABI_CLOCK_MONOTONIC) return SYS_ENOSYS;
+
+    uint64_t ticks = pit_get_ticks();
+    uint32_t hz = pit_frequency();
+    struct sys_timespec out;
+    out.sec = (int64_t)(ticks / hz);
+    out.nsec = (int64_t)((ticks % hz) * 1000000000ULL / hz);
+
+    if (in_user()) {
+        if (!copyout((void *)ts, &out, sizeof(out))) return SYS_EFAULT;
+    } else {
+        *(struct sys_timespec *)ts = out;
+    }
+    return 0;
+}
+
+static int64_t sys_futex(uintptr_t addr, unsigned op, uint32_t val) {
+    struct task *t = task_current();
+    if (!t || !in_user()) return SYS_EINVAL;
+    if (!addr || (addr & 3)) return SYS_EINVAL;
+
+    uint32_t cur;
+    if (!copyin(&cur, (const void *)addr, sizeof(cur))) return SYS_EFAULT;
+
+    if (op == SYS_FUTEX_WAIT) {
+        if (cur != val) return SYS_EAGAIN;
+        uint64_t deadline = pit_get_ticks() + pit_ms_to_ticks(2000);
+        task_wait((void *)addr, deadline);
+        return 0;
+    }
+    if (op == SYS_FUTEX_WAKE) {
+        task_wake_chan((void *)addr);
+        return 0;
+    }
+    return SYS_EINVAL;
+}
+
+static int64_t sys_set_fs_base(uint64_t base) {
+    struct task *t = task_current();
+    if (!t || !in_user()) return SYS_EINVAL;
+    if (base >= VMM_HIGHER_HALF) return SYS_EINVAL;
+    t->fs_base = base;
+    msr_write(MSR_FS_BASE, base);
+    return 0;
 }
 
 static int64_t sys_getpid(void) {

@@ -233,6 +233,8 @@ static bool root_node(fs_node_t *out) {
     return true;
 }
 
+bool fs_name_eq(const char *a, const char *b);
+
 static bool name_eq(const char *a, const char *b) {
     while (*a && *b) {
         char ca = *a;
@@ -369,4 +371,9 @@ uint32_t fs_node_read_all(const fs_node_t *node, void *buf, uint32_t max) {
     uint32_t r = fs_node_read_all_inner(node, buf, max);
     preempt_enable();
     return r;
+}
+
+
+bool fs_name_eq(const char *a, const char *b) {
+    return name_eq(a, b);
 }

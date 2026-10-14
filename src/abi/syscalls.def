@@ -24,6 +24,11 @@
     X(exit         ,   16, int32_t, 1, N(code), int code) \
     X(getpid       ,   17, int32_t, 0, N(0)) \
     X(sleep        ,   18, int32_t, 1, N(ms), unsigned ms) \
+    X(mmap         ,   19, int64_t, 3, N(len,prot,flags), uint64_t len, unsigned prot, unsigned flags) \
+    X(munmap       ,   20, int32_t, 2, N(addr,len), uint64_t addr, uint64_t len) \
+    X(clock_gettime,   21, int32_t, 2, N(clk,(ulong)ts), unsigned clk, struct sys_timespec *ts) \
+    X(futex        ,   22, int32_t, 3, N((ulong)addr,op,val), uint32_t *addr, unsigned op, uint32_t val) \
+    X(set_fs_base  ,   23, int32_t, 1, N(base), uint64_t base) \
     X(console_write,  240, int64_t, 4, N(dest,attr,(ulong)buf,len), unsigned dest, unsigned attr, const void *buf, unsigned len) \
     X(debug_print  ,  241, int64_t, 2, N((ulong)msg,len), const char *msg, unsigned len)
 

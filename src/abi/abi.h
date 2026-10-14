@@ -17,17 +17,20 @@
 #define ABI_ENOTDIR (-20)
 #define ABI_EISDIR  (-21)
 #define ABI_EINVAL  (-22)
+#define ABI_ESPIPE  (-29)
 #define ABI_EMFILE  (-24)
 #define ABI_ENOSPC  (-28)
+#define ABI_ENOMEM  (-12)
 #define ABI_ENOSYS  (-38)
 #define ABI_EBADTYPE (-91)
 
-#define ABI_O_RDONLY    0x1
-#define ABI_O_WRONLY    0x2
-#define ABI_O_RDWR      0x3
-#define ABI_O_CREAT     0x4
-#define ABI_O_TRUNC     0x8
-#define ABI_O_DIRECTORY 0x10
+#define ABI_O_ACCMODE   0x3
+#define ABI_O_RDONLY    0x0
+#define ABI_O_WRONLY    0x1
+#define ABI_O_RDWR      0x2
+#define ABI_O_CREAT     0x40
+#define ABI_O_TRUNC     0x200
+#define ABI_O_DIRECTORY 0x10000
 #define ABI_O_NONBLOCK  0x800
 
 #define ABI_SEEK_SET 0
@@ -62,6 +65,30 @@ struct sys_dirent {
     uint32_t is_dir;
     char name[ABI_MAX_NAME];
 };
+
+struct sys_timespec {
+    int64_t sec;
+    int64_t nsec;
+};
+
+#define ABI_CLOCK_REALTIME  0
+#define ABI_CLOCK_MONOTONIC 1
+
+#define ABI_MMAP_PROT_READ   1
+#define ABI_MMAP_PROT_WRITE  2
+#define ABI_MMAP_PROT_EXEC   4
+#define ABI_MMAP_ANON       0x20
+
+#define ABI_FUTEX_WAIT 0
+#define ABI_FUTEX_WAKE 1
+
+#define ABI_AT_NULL    0
+#define ABI_AT_PHDR    3
+#define ABI_AT_PHENT   4
+#define ABI_AT_PHNUM   5
+#define ABI_AT_PAGESZ  6
+#define ABI_AT_ENTRY   9
+#define ABI_AT_RANDOM  25
 
 #include "syscalls.def"
 

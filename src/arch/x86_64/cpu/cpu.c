@@ -16,6 +16,10 @@
 #define CR4_PCIDE          (1ULL << 17)
 #define CR4_SMEP           (1ULL << 20)
 #define CR4_SMAP           (1ULL << 21)
+#define CR4_OSXMMEXCPT     (1ULL << 10)
+#define CR4_OSFXSR         (1ULL << 9)
+#define CR0_EM             (1ULL << 2)
+#define CR0_MP             (1ULL << 1)
 
 static struct cpu_features feat;
 static bool detected;
@@ -169,6 +173,23 @@ bool cpu_enable_smep_smap(void) {
 
     smap_on = feat.smap;
     return feat.smep;
+}
+
+void cpu_enable_sse_user(void) {
+    if (!feat.sse && !feat.sse2) return;
+
+    uint64_t cr0 = cpu_cr0_read();
+    cr0 &= ~CR0_EM;
+    cr0 |= CR0_MP;
+    __asm__ volatile("mov %0, %%cr0" : : "r"(cr0) : "memory");
+
+    uint64_t cr4 = cpu_cr4_read();
+    cr4 |= CR4_OSFXSR;
+    if (feat.sse) cr4 |= CR4_OSXMMEXCPT;
+    cpu_cr4_write(cr4);
+
+    uint64_t mxcsr = 0x1f80;
+    __asm__ volatile("ldmxcsr %0" : : "m"(mxcsr));
 }
 
 bool cpu_smap_enabled(void) {

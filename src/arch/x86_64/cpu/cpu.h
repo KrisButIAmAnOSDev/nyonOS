@@ -49,6 +49,7 @@ void cpu_cr4_write(uint64_t value);
 void cpu_enable_nx(void);
 bool cpu_enable_smep_smap(void);
 bool cpu_enable_pcid(void);
+void cpu_enable_sse_user(void);
 bool cpu_smap_enabled(void);
 void cpu_flush_pcid(void);
 
