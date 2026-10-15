@@ -114,6 +114,7 @@ void kobject_put(struct kobject *o);
 bool kobject_valid(const struct kobject *o);
 
 void fd_table_init(struct task *t);
+void fd_table_clone(struct task *dst, struct task *src);
 void fd_table_clear(struct task *t);
 
 int fd_alloc(struct task *t, struct kobject *obj, uint32_t rights, uint32_t flags);

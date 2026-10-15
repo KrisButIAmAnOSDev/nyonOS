@@ -67,6 +67,46 @@ static void mark_used(struct fd_table *ft, uint32_t i) {
     ft->freebits[i / 64] &= ~(1ULL << (i % 64));
 }
 
+void fd_table_clone(struct task *dst, struct task *src) {
+    struct fd_table *s = &src->fds;
+    struct fd_table *d = &dst->fds;
+
+    uint32_t cap = s->capacity;
+    if (cap < FD_INLINE) cap = FD_INLINE;
+
+    for (uint32_t w = 0; w < 4; w++) d->freebits[w] = s->freebits[w];
+    d->capacity = cap;
+    d->grown = s->grown;
+    d->heap = NULL;
+
+    for (uint32_t i = 0; i < cap; i++) {
+        struct fd_entry *se = (i < FD_INLINE) ? &s->inl[i] : &s->heap[i - FD_INLINE];
+        struct fd_entry tmp = { .obj = NULL, .rights = 0, .flags = FD_FLAG_CLOEXEC, .generation = 0 };
+        if (se->obj) {
+            tmp.obj = se->obj;
+            tmp.rights = se->rights;
+            tmp.flags = se->flags;
+            tmp.generation = se->generation;
+            kobject_get(se->obj);
+        }
+        if (i < FD_INLINE) {
+            d->inl[i] = tmp;
+        } else {
+            if (!d->heap) {
+                d->heap = kmalloc((size_t)(cap - FD_INLINE) * sizeof(struct fd_entry));
+                if (!d->heap) {
+                    d->capacity = FD_INLINE;
+                    d->grown = false;
+                    for (uint32_t w = 0; w < 4; w++) d->freebits[w] = s->freebits[w];
+                    for (uint32_t k = 0; k < FD_INLINE; k++) d->inl[k] = tmp;
+                    return;
+                }
+            }
+            d->heap[i - FD_INLINE] = tmp;
+        }
+    }
+}
+
 void fd_table_init(struct task *t) {
     struct fd_table *ft = &t->fds;
 

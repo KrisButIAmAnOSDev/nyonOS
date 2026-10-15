@@ -17,6 +17,8 @@ uint64_t syscall_kstack_top;
 
 typedef uint64_t (*syscall_handler_t)(struct isr_frame *f);
 
+static struct isr_frame *current_frame;
+
 static bool in_user(void) {
     struct task *t = task_current();
     return t && t->pml4 != NULL;
@@ -45,6 +47,36 @@ static int64_t sys_console_write(unsigned dest, unsigned attr, uintptr_t buf, un
     preempt_enable();
 
     return len;
+}
+
+static int64_t sys_newthread(uintptr_t pid_out, uint64_t entry, uint64_t stack) {
+    struct task *t = task_current();
+    if (!t || !in_user()) return SYS_EINVAL;
+    if (!entry || !stack) return SYS_EINVAL;
+    if (entry >= VMM_HIGHER_HALF || stack >= VMM_HIGHER_HALF) return SYS_EINVAL;
+    if (stack & 7) return SYS_EINVAL;
+
+    uint64_t zero = 0;
+    if (!copyout(&zero, (void *)pid_out, sizeof(zero))) return SYS_EFAULT;
+
+    struct task *child = task_spawn_thread(t, "thread", entry, stack, t->fs_base);
+    if (!child) return SYS_ENOMEM;
+
+    uint32_t pid = child->pid;
+    if (!copyout((void *)pid_out, &pid, sizeof(pid))) return SYS_EFAULT;
+    return 0;
+}
+
+static int64_t sys_thread_exit(void) {
+    task_exit_code(0);
+    for (;;) __asm__ volatile("hlt");
+    __builtin_unreachable();
+}
+
+static int64_t sys_yield(void) {
+    if (current_frame) current_frame->rax = 0;
+    task_yield(current_frame);
+    return 0;
 }
 
 static int64_t sys_exit(int code) {
@@ -312,19 +344,21 @@ static int64_t sys_clock_gettime(unsigned clk, uintptr_t ts) {
     return 0;
 }
 
-static int64_t sys_futex(uintptr_t addr, unsigned op, uint32_t val) {
+static int64_t sys_futex(uintptr_t addr, unsigned op, uint32_t val, uintptr_t ts) {
     struct task *t = task_current();
     if (!t || !in_user()) return SYS_EINVAL;
     if (!addr || (addr & 3)) return SYS_EINVAL;
 
-    uint32_t cur;
-    if (!copyin(&cur, (const void *)addr, sizeof(cur))) return SYS_EFAULT;
-
     if (op == SYS_FUTEX_WAIT) {
-        if (cur != val) return SYS_EAGAIN;
-        uint64_t deadline = pit_get_ticks() + pit_ms_to_ticks(2000);
-        task_wait((void *)addr, deadline);
-        return 0;
+        uint64_t deadline = 0;
+        if (ts) {
+            struct sys_timespec kts;
+            if (!copyin(&kts, (const void *)ts, sizeof(kts))) return SYS_EFAULT;
+            if (kts.sec < 0 || kts.nsec < 0 || kts.nsec >= 1000000000LL) return SYS_EINVAL;
+            uint64_t ms = (uint64_t)kts.sec * 1000 + ((uint64_t)kts.nsec + 999999) / 1000000;
+            deadline = pit_get_ticks() + pit_ms_to_ticks(ms);
+        }
+        return task_futex_wait((void *)addr, addr, val, deadline);
     }
     if (op == SYS_FUTEX_WAKE) {
         task_wake_chan((void *)addr);
@@ -468,6 +502,7 @@ void syscall_init(void) {
         return;
 
 void syscall_dispatch(struct isr_frame *frame) {
+    current_frame = frame;
     switch (frame->rax) {
         SYSCALLS
         default:

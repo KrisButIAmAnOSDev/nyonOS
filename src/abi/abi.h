@@ -18,6 +18,7 @@
 #define ABI_EISDIR  (-21)
 #define ABI_EINVAL  (-22)
 #define ABI_ESPIPE  (-29)
+#define ABI_ETIMEDOUT (-110)
 #define ABI_EMFILE  (-24)
 #define ABI_ENOSPC  (-28)
 #define ABI_ENOMEM  (-12)

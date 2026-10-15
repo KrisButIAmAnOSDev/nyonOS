@@ -49,6 +49,7 @@ typedef unsigned char uchar;
 #define EMFILE  ABI_EMFILE
 #define ENOSPC  ABI_ENOSPC
 #define ENOSYS  ABI_ENOSYS
+#define ETIMEDOUT ABI_ETIMEDOUT
 
 #define SYS_MAX_NAME ABI_MAX_NAME
 

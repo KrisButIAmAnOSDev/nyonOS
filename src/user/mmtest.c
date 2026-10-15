@@ -47,7 +47,7 @@ static void futex_role(int argc, char **argv) {
         __sync_synchronize();
         *word = 99;
         for (int i = 0; i < 400 && res[FX_WAITER] == 0; i++) {
-            sys_futex((uint32_t *)word, ABI_FUTEX_WAKE, 0);
+            sys_futex((uint32_t *)word, ABI_FUTEX_WAKE, 0, 0);
             sys_sleep(1);
         }
         res[FX_WAKER] = 100;
@@ -55,22 +55,28 @@ static void futex_role(int argc, char **argv) {
     }
 
     if (streq(argv[1], "waiter")) {
+        res[FX_WAITER] = 0;
+        __sync_synchronize();
         *word = 42;
         __sync_synchronize();
         res[FX_READY] = 0x5eed;
-        slong r = sys_futex((uint32_t *)word, ABI_FUTEX_WAIT, 42);
+        slong r = 0;
+        while (*word == 42) {
+            r = sys_futex((uint32_t *)word, ABI_FUTEX_WAIT, 42, 0);
+            if (r == ETIMEDOUT) break;
+        }
         res[FX_WAITER] = (ulong)(r + 100);
         sys_exit(0);
     }
 }
 
 int main(int argc, char **argv) {
-    for (int i = 0; i < RES_SLOTS; i++) res[i] = RES_PENDING;
-
     if (argc >= 2) {
         futex_role(argc, argv);
         sys_exit(2);
     }
+
+    for (int i = 0; i < RES_SLOTS; i++) res[i] = RES_PENDING;
 
     slong m = sys_mmap(PAGE, ABI_MMAP_PROT_READ | ABI_MMAP_PROT_WRITE, ABI_MMAP_ANON);
     ck_ge(m, 0x100000000L);
@@ -108,10 +114,10 @@ int main(int argc, char **argv) {
     ck(sys_clock_gettime(ABI_CLOCK_MONOTONIC, (struct sys_timespec *)0), EFAULT);
 
     volatile uint32_t word = 7;
-    ck(sys_futex((uint32_t *)&word, ABI_FUTEX_WAIT, 9), EAGAIN);
-    ck(sys_futex((uint32_t *)&word, ABI_FUTEX_WAKE, 0), 0);
-    ck(sys_futex((uint32_t *)0, ABI_FUTEX_WAKE, 0), EINVAL);
-    ck(sys_futex((uint32_t *)((ulong)&word + 1), ABI_FUTEX_WAKE, 0), EINVAL);
+    ck(sys_futex((uint32_t *)&word, ABI_FUTEX_WAIT, 9, 0), EAGAIN);
+    ck(sys_futex((uint32_t *)&word, ABI_FUTEX_WAKE, 0, 0), 0);
+    ck(sys_futex((uint32_t *)0, ABI_FUTEX_WAKE, 0, 0), EINVAL);
+    ck(sys_futex((uint32_t *)((ulong)&word + 1), ABI_FUTEX_WAKE, 0, 0), EINVAL);
 
     ck(sys_set_fs_base(0x200000UL), 0);
     ck(sys_set_fs_base(0xFFFF800000000000UL), EINVAL);
