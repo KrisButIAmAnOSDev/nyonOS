@@ -214,6 +214,42 @@ bool vmm_unmap(vaddr_t vaddr, size_t pages) {
     return vmm_unmap_in(kernel_pml4, vaddr, pages);
 }
 
+static void clone_user_level(struct page_table *src, struct page_table *dst,
+                            vaddr_t base, int level, size_t *copied) {
+    for (size_t i = 0; i < VMM_PT_ENTRIES; i++) {
+        uint64_t e = src->entries[i];
+        if (!(e & PAGE_PRESENT)) continue;
+        if (!(e & PAGE_USER)) continue;
+
+        vaddr_t v = base + ((vaddr_t)i << (12 + 9 * (level - 1)));
+
+        if (level == 1) {
+            paddr_t np;
+            if (!pmm_alloc(&np, 1)) return;
+            uint8_t *dp = (uint8_t *)(vmm_hhdm_offset + np);
+            const uint8_t *sp2 =
+                (const uint8_t *)(vmm_hhdm_offset + (e & VMM_PT_ADDR_MASK));
+            for (size_t k = 0; k < PAGE_SIZE; k++)
+                dp[k] = sp2[k];
+            uint64_t nf = e & (PAGE_PRESENT | PAGE_WRITE | PAGE_PWT | PAGE_PCD | PAGE_NX);
+            vmm_map_frames(dst, v, np, 1, nf, !(e & PAGE_NX), true);
+            (*copied)++;
+        } else {
+            struct page_table *child =
+                (struct page_table *)(vmm_hhdm_offset + (e & VMM_PT_ADDR_MASK));
+            clone_user_level(child, dst, v, level - 1, copied);
+        }
+    }
+}
+
+bool vmm_clone_user_space(struct page_table *src, struct page_table *dst, size_t *copied) {
+    size_t n = 0;
+    int levels = vmm_5level ? 5 : 4;
+    clone_user_level(src, dst, 0, levels, &n);
+    if (copied) *copied = n;
+    return true;
+}
+
 bool vmm_range_present_in(struct page_table *root, vaddr_t addr, size_t len) {
     if (len == 0) return false;
     if (addr > VMM_HIGHER_HALF) return false;

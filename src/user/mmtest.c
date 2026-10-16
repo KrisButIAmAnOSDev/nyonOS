@@ -10,6 +10,7 @@ static void ok(void) {
 }
 
 static void bad(slong got, slong want) {
+    res[RES_CHECK_BASE + idx] = 0;
     res[RES_FAIL_BASE + idx] = (ulong)got;
     res[RES_GOT_BASE + idx] = (ulong)want;
     idx++;
@@ -110,8 +111,9 @@ int main(int argc, char **argv) {
     sys_sleep(20);
     ck(sys_clock_gettime(ABI_CLOCK_MONOTONIC, &t2), 0);
     ck((t2.sec * 1000000000L + t2.nsec) - (t1.sec * 1000000000L + t1.nsec) >= 20000000L, 1);
-    ck(sys_clock_gettime(ABI_CLOCK_REALTIME, &t1), ENOSYS);
+    ck(sys_clock_gettime(ABI_CLOCK_REALTIME, &t1), 0);
     ck(sys_clock_gettime(ABI_CLOCK_MONOTONIC, (struct sys_timespec *)0), EFAULT);
+	ck(sys_clock_gettime(99, &t1), EINVAL);
 
     volatile uint32_t word = 7;
     ck(sys_futex((uint32_t *)&word, ABI_FUTEX_WAIT, 9, 0), EAGAIN);

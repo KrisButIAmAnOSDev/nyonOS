@@ -106,13 +106,31 @@ static uint32_t cluster_lba(uint32_t cluster) {
     return fs.data_start + (cluster - FS_FIRST_CLUSTER) * fs.sectors_per_cluster;
 }
 
+static uint8_t fat_sector_cache[FS_SECTOR_SIZE] __attribute__((aligned(4)));
+static uint32_t fat_sector_lba = 0xFFFFFFFFu;
+static uint32_t fat_sector_base = 0xFFFFFFFFu;
+
+static const uint8_t *fat_sector(uint32_t lba) {
+    if (fs.bytes_per_sector != FS_SECTOR_SIZE) {
+        return sector_read(lba) ? sec : NULL;
+    }
+    if (lba != fat_sector_lba || fs.fat_start != fat_sector_base) {
+        if (!sector_read(lba)) return NULL;
+        for (size_t i = 0; i < FS_SECTOR_SIZE; i++) fat_sector_cache[i] = sec[i];
+        fat_sector_lba = lba;
+        fat_sector_base = fs.fat_start;
+    }
+    return fat_sector_cache;
+}
+
 static bool fat_entry(uint32_t cluster, uint16_t *out) {
     if (cluster < FS_FIRST_CLUSTER || cluster >= FS_BAD_CLUSTER) return false;
     uint32_t byte = cluster * 2;
     uint32_t lba = fs.fat_start + byte / fs.bytes_per_sector;
     uint32_t off = byte % fs.bytes_per_sector;
-    if (!sector_read(lba)) return false;
-    *out = rd16(sec + off);
+    const uint8_t *p = fat_sector(lba);
+    if (!p) return false;
+    *out = rd16(p + off);
     return true;
 }
 
@@ -330,6 +348,29 @@ bool fs_node_read_inner(const fs_node_t *node, uint32_t offset, void *buf, uint3
     while (len) {
         uint32_t lba = cluster_lba(cluster) + within / fs.bytes_per_sector;
         uint32_t off = within % fs.bytes_per_sector;
+
+        if (off == 0 && len >= fs.bytes_per_sector && ((uint64_t)out & 1) == 0) {
+            uint32_t sectors = len / fs.bytes_per_sector;
+            uint32_t avail = (cluster_size - within) / fs.bytes_per_sector;
+            if (sectors > avail) sectors = avail;
+            if (sectors > 256) sectors = 256;
+
+            uint32_t bytes = sectors * fs.bytes_per_sector;
+            if (!block_read(fs.dev, lba, sectors, out)) return false;
+
+            out += bytes;
+            len -= bytes;
+            within += bytes;
+
+            if (len && within == cluster_size) {
+                within = 0;
+                uint32_t nx;
+                if (!fat_next(cluster, &nx)) return false;
+                cluster = nx;
+            }
+            continue;
+        }
+
         uint32_t chunk = fs.bytes_per_sector - off;
         if (chunk > len) chunk = len;
 

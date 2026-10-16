@@ -18,6 +18,7 @@
 #include "kernel/mm/heap/heap.h"
 #include "kernel/sync/sync.h"
 #include "arch/x86_64/pit/pit.h"
+#include "arch/x86_64/rtc/rtc.h"
 #include "kernel/multitask/task.h"
 #include "kernel/mm/vmm/vmm.h"
 #include "arch/x86_64/lapic/lapic.h"
@@ -201,6 +202,7 @@ void kmain(void) {
     pic_remap(0x20, 0x28);
     pic_clear_mask(2);
     pit_init(1000);
+    rtc_init();
     lapic_unmask_ext_int(lapic_virt);
     idt_init();
     cpu_detect();
@@ -311,6 +313,8 @@ void kmain(void) {
             fd_test();
             mm_test();
             futex_pair_test();
+            clktest_run();
+            forktest_run();
             sysdep_test();
             thread_test();
             mlibc_hello_test();

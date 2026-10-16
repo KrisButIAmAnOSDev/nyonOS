@@ -7,7 +7,7 @@
 
 extern void user_copy_bytes(void *dst, const void *src, size_t len);
 
-static volatile uint64_t copy_abort;
+volatile uint64_t copy_abort;
 static volatile bool copy_active;
 
 bool usermode_recover_copy(struct isr_frame *frame) {

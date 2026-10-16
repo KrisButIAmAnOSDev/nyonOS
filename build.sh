@@ -33,7 +33,7 @@ if [ ! -f fat16.img ]; then
     exit 1
 fi
 
-PROGRAMS="hello fdtest mmtest"
+PROGRAMS="hello fdtest mmtest forktest"
 if [ -f src/user/bin/mhello ]; then
     PROGRAMS="$PROGRAMS mhello"
 fi
@@ -42,6 +42,9 @@ if [ -f src/user/bin/sdtest ]; then
 fi
 if [ -f src/user/bin/thrtest ]; then
     PROGRAMS="$PROGRAMS thrtest"
+fi
+if [ -f src/user/bin/clktest ]; then
+    PROGRAMS="$PROGRAMS clktest"
 fi
 
 for prog in $PROGRAMS; do

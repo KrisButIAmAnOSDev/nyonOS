@@ -236,7 +236,6 @@ static volatile uint64_t *tty_peer(const char *name, vaddr_t rip, size_t code_by
     return res;
 }
 
-
 void tty_inject(const char *s) {
     while (*s) keyboard_inject_char(*s++);
 }
@@ -358,7 +357,6 @@ static const char *const c_fd_labels[C_CHECKS] = {
     "null buffer on stdin is EFAULT",
     "kernel pointer to stderr is EFAULT"
 };
-
 
 void fd_test(void) {
     fs_node_t node;
@@ -606,6 +604,137 @@ void mlibc_hello_test(void) {
     kprintf(PRINT_SERIAL, "  free %zu -> %zu\n", before, after);
 }
 
+void clktest_run(void) {
+    fs_node_t node;
+    if (!fs_lookup("/BIN/CLKTEST", &node) && !fs_lookup("/BIN/clktest", &node)) {
+        kprintf(PRINT_SERIAL, "CLK: /BIN/clktest not found\n");
+        return;
+    }
+
+    struct elf_image img;
+    const char *err = NULL;
+    if (elf_load(&node, &img, &err)) {
+        kprintf(PRINT_SERIAL, "CLK: load refused: %s\n", err ? err : "?");
+        return;
+    }
+
+    struct task *t = task_spawn_vmspace("clk", img.vs, img.entry, img.stack_top);
+    elf_destroy(&img);
+    if (!t) {
+        kprintf(PRINT_SERIAL, "CLK: spawn failed\n");
+        return;
+    }
+
+    uint32_t pid = t->pid;
+    for (int i = 0; i < 4000 && task_find_pid(pid); i++) pit_sleep(5);
+    bool alive = task_find_pid(pid) != NULL;
+    task_reap_now();
+
+    kprintf(PRINT_SERIAL, "CLK: program exited: ");
+    kprintchar(!alive ? 'Y' : 'N', PRINT_SERIAL);
+    kprintchar('\n', PRINT_SERIAL);
+}
+
+void forktest_run(void) {
+    fs_node_t node;
+    if (!fs_lookup("/BIN/FORKTEST", &node) && !fs_lookup("/BIN/forktest", &node)) {
+        kprintf(PRINT_SERIAL, "FORK ring3: /BIN/forktest not found\n");
+        return;
+    }
+
+    paddr_t phys;
+    if (!pmm_alloc(&phys, 1)) {
+        kprintf(PRINT_SERIAL, "FORK ring3: alloc failed\n");
+        return;
+    }
+
+    volatile uint64_t *res = (volatile uint64_t *)(vmm_hhdm_offset + phys);
+    for (int i = 0; i < C_RES_SLOTS; i++) res[i] = 0xdeadbeefdeadbeefULL;
+
+    size_t before = pmm_free_pages();
+
+    struct elf_shared shared = { .phys = phys, .virt = C_RES_VIRT, .pages = 1, .owned_by_loader = false };
+
+    struct elf_image img;
+    const char *err = NULL;
+    if (elf_load_shared(&node, &img, &err, NULL, 0, &shared)) {
+        pmm_free(phys, 1);
+        kprintf(PRINT_SERIAL, "FORK ring3: load refused: %s\n", err ? err : "?");
+        return;
+    }
+
+    struct task *t = task_spawn_vmspace("fork", img.vs, img.entry, img.stack_top);
+    elf_destroy(&img);
+    if (!t) {
+        pmm_free(phys, 1);
+        kprintf(PRINT_SERIAL, "FORK ring3: spawn failed\n");
+        return;
+    }
+
+    bool ran = false;
+    uint32_t pid = t->pid;
+    for (int i = 0; i < 2000 && task_find_pid(pid); i++) {
+        if (res[C_RES_DONE] != 0xdeadbeefdeadbeefULL) { ran = true; break; }
+        pit_sleep(5);
+    }
+    if (res[C_RES_DONE] != 0xdeadbeefdeadbeefULL) ran = true;
+    bool alive = task_find_pid(pid) != NULL;
+    task_reap_now();
+
+    if (!ran) {
+        kprintf(PRINT_SERIAL, "FORK ring3: the test never reported\n");
+        pmm_free(phys, 1);
+        return;
+    }
+
+    static const char *labels[C_MAX_CHECKS] = {
+        "fork returns child pid", "fork pid_out matches", "fork child pid differs",
+        "fork parent marker untouched", "fork waitpid returns child",
+        "fork waitpid status carries code", "fork marker still untouched after wait",
+        "clone(0) returns child pid", "clone(0) pid_out matches",
+        "clone(0) parent marker untouched", "clone(0) waitpid(-1) returns child",
+        "clone(0) waitpid status carries code",
+        "vfork returns child pid", "vfork pid_out matches",
+        "vfork child write is visible to parent",
+        "vfork waitpid returns child", "vfork status is zero",
+        "clone(CLONE_VM) returns child pid", "clone(CLONE_VM) pid_out matches",
+        "clone(CLONE_VM) child write is visible to parent",
+        "clone(CLONE_VM) waitpid returns child", "clone(CLONE_VM) status carries code",
+        "waitpid(-1,WNOHANG) with no children is ECHILD",
+        "waitpid(unknown pid,WNOHANG) is ECHILD",
+        "waitpid(pid < -1) is EINVAL",
+        "fork(NULL) is EFAULT", "vfork(NULL) is EFAULT", "getpid still positive",
+    };
+
+    int checks = 0;
+    for (int i = 0; i < C_MAX_CHECKS; i++) {
+        if (res[C_RES_CHECK_BASE + i] == 1) { checks++; continue; }
+        if (res[C_RES_CHECK_BASE + i] == 0xdeadbeefdeadbeefULL) continue;
+        kprintf(PRINT_SERIAL, "    FAIL %s: got %lld, wanted %lld\n",
+                labels[i] ? labels[i] : "?",
+                (long long)res[C_RES_FAIL_BASE + i],
+                (long long)res[C_RES_GOT_BASE + i]);
+    }
+
+    int bad = 0;
+    for (int i = 0; i < C_MAX_CHECKS; i++)
+        if (res[C_RES_CHECK_BASE + i] == 0) bad++;
+
+    kprintf(PRINT_SERIAL, "FORK ring3: %d of %d checks passed: ", checks, checks + bad);
+    kprintchar(bad == 0 && checks > 0 ? 'Y' : 'N', PRINT_SERIAL);
+    kprintchar('\n', PRINT_SERIAL);
+    kprintf(PRINT_SERIAL, "FORK ring3: test program exited: ");
+    kprintchar(!alive ? 'Y' : 'N', PRINT_SERIAL);
+    kprintchar('\n', PRINT_SERIAL);
+
+    size_t after = pmm_free_pages();
+    kprintf(PRINT_SERIAL, "FORK ring3: every child and its stack reclaimed, no leak: ");
+    kprintchar(after >= before ? 'Y' : 'N', PRINT_SERIAL);
+    kprintf(PRINT_SERIAL, "  free %zu -> %zu\n", before, after);
+
+    pmm_free(phys, 1);
+}
+
 void sysdep_test(void) {
     fs_node_t node;
     if (!fs_lookup("/BIN/SYSDEPTEST", &node) && !fs_lookup("/BIN/sdtest", &node)) {
@@ -667,7 +796,6 @@ void thread_test(void) {
     kprintchar(!alive ? 'Y' : 'N', PRINT_SERIAL);
     kprintchar('\n', PRINT_SERIAL);
 }
-
 
 static bool tty_reap(uint32_t pid) {
     for (int i = 0; i < 200 && task_find_pid(pid); i++) pit_sleep(5);

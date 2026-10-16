@@ -5,12 +5,12 @@ USER_CC = gcc
 USER_CFLAGS = -Wall -Wextra -std=gnu11 -ffreestanding -fno-stack-protector -fno-stack-check \
               -fno-builtin -fPIE -m64 -mno-red-zone -mcmodel=small \
               -fomit-frame-pointer -fno-asynchronous-unwind-tables -fno-unwind-tables -I. -I$(CURDIR)/../abi
-USER_LDFLAGS = -nostdlib -static-pie -pie -z noexecstack -z separate-code -T user.ld
+USER_LDFLAGS = -nostdlib -static-pie -pie -z noexecstack -T user.ld
 
-BINS = bin/hello bin/fdtest bin/mmtest
+BINS = bin/hello bin/fdtest bin/mmtest bin/forktest
 
 ifneq ($(NYONOS_MLIBC_CC),)
-BINS += bin/mhello bin/sdtest bin/thrtest
+BINS += bin/mhello bin/sdtest bin/thrtest bin/clktest
 endif
 
 -include $(BINS:=.o)
@@ -30,6 +30,10 @@ bin/sdtest: sdtest.c $(MLIBC_LD)
 	$(MLIBC_CC) -static -T$(MLIBC_LD) -z max-page-size=0x1000 -s $< -o $@
 
 bin/thrtest: thrtest.c $(MLIBC_LD)
+	mkdir -p "$(dir $@)"
+	$(MLIBC_CC) -static -T$(MLIBC_LD) -z max-page-size=0x1000 -s $< -o $@
+
+bin/clktest: clktest.c $(MLIBC_LD)
 	mkdir -p "$(dir $@)"
 	$(MLIBC_CC) -static -T$(MLIBC_LD) -z max-page-size=0x1000 -s $< -o $@
 

@@ -5,6 +5,7 @@
 #include "kernel/panic/panic.h"
 #include "kernel/mm/pmm/pmm.h"
 #include "kernel/mm/vmm/vmm.h"
+#include "kernel/mm/heap/heap.h"
 #include "arch/x86_64/pit/pit.h"
 #include "arch/x86_64/gdt/gdt.h"
 #include "arch/x86_64/gdt/tss.h"
@@ -16,6 +17,7 @@
 #define QW_RIP 17
 #define QW_CS 18
 #define QW_RFLAGS 19
+#define QW_RAX 16
 #define QW_RSP 20
 #define QW_SS 21
 
@@ -60,6 +62,16 @@ static void task_release(struct task *t) {
     fd_tty_task_gone(t->pid);
     fd_table_clear(t);
 
+    if (t->vs && t->vs->refcount > 1 && t->user_stack_phys &&
+        t->user_stack_top > t->user_stack_base) {
+        size_t pages = (size_t)(t->user_stack_top - t->user_stack_base) / PAGE_SIZE;
+        vmm_unmap_from(t->vs->pml4, t->user_stack_base, pages);
+        pmm_free(t->user_stack_phys, pages);
+        t->user_stack_phys = 0;
+        t->user_stack_base = 0;
+        t->user_stack_top = 0;
+    }
+
     if (t->vs) {
         vm_destroy(t->vs);
         t->vs = NULL;
@@ -88,6 +100,10 @@ static void task_release(struct task *t) {
     t->vs = NULL;
     t->zombie = false;
     t->blocked = false;
+    t->parent_pid = 0;
+    t->child_chan = &t->child_chan;
+    t->vfork_child = 0;
+    t->vfork_chan = &t->vfork_chan;
     t->wait_chan = NULL;
     t->wake_tick = 0;
     t->exit_code = 0;
@@ -96,6 +112,7 @@ static void task_release(struct task *t) {
 static void task_reap_zombies(void) {
     for (size_t i = 1; i < TASK_MAX; i++) {
         if (!tasks[i].zombie || i == current_slot) continue;
+        if (tasks[i].parent_pid) continue;
         task_release(&tasks[i]);
     }
 }
@@ -193,6 +210,8 @@ struct task *task_spawn(const char *name, void (*entry)(void)) {
     t->in_use = true;
     t->zombie = false;
     t->blocked = false;
+    t->vfork_child = 0;
+    t->vfork_chan = &t->vfork_chan;
     t->wait_chan = NULL;
     t->wake_tick = 0;
     t->debug_log = false;
@@ -268,6 +287,8 @@ static struct task *spawn_ring3(const char *name, paddr_t code_phys, size_t code
     }
 
     struct task *t = &tasks[slot];
+    t->parent_pid = 0;
+    t->child_chan = &t->child_chan;
     t->stack_base = vmm_hhdm_offset + kphys;
     t->stack_top = t->stack_base + TASK_STACK_PAGES * PAGE_SIZE;
     t->user_stack_phys = uphys;
@@ -280,6 +301,8 @@ static struct task *spawn_ring3(const char *name, paddr_t code_phys, size_t code
     t->pml4 = pml4;
     t->exit_code = 0;
     t->blocked = false;
+    t->vfork_child = 0;
+    t->vfork_chan = &t->vfork_chan;
     t->wait_chan = NULL;
     t->wake_tick = 0;
     t->zombie = false;
@@ -332,6 +355,8 @@ struct task *task_spawn_thread(struct task *parent, const char *name,
     if (!pmm_alloc(&kphys, TASK_STACK_PAGES)) { lock_release(LOCK_SCHED, &sched_lock); return NULL; }
 
     struct task *t = &tasks[slot];
+    t->parent_pid = parent->pid;
+    t->child_chan = &t->child_chan;
     t->stack_base = vmm_hhdm_offset + kphys;
     t->stack_top = t->stack_base + TASK_STACK_PAGES * PAGE_SIZE;
     t->user_stack_phys = 0;
@@ -346,6 +371,8 @@ struct task *task_spawn_thread(struct task *parent, const char *name,
     t->fs_base = fs_base;
     t->exit_code = 0;
     t->blocked = false;
+    t->vfork_child = 0;
+    t->vfork_chan = &t->vfork_chan;
     t->wait_chan = NULL;
     t->wake_tick = 0;
     t->zombie = false;
@@ -374,6 +401,208 @@ struct task *task_spawn_thread(struct task *parent, const char *name,
     return t;
 }
 
+struct task *task_spawn_fork(struct task *parent, const char *name,
+                             uint64_t entry_rip, uint64_t user_rsp,
+                             uint64_t fs_base, bool share_vm, bool clone_fds,
+                             uint32_t *tid_out) {
+    if (!parent || !name) return NULL;
+    if (!share_vm && !parent->vs) return NULL;
+    struct vmspace *vs = parent->vs;
+    if (!vs || !vs->pml4) return NULL;
+
+    lock_acquire(LOCK_SCHED, &sched_lock);
+    task_reap_zombies();
+
+    size_t slot = 0;
+    for (size_t i = 1; i < TASK_MAX; i++) {
+        if (!tasks[i].in_use && !tasks[i].zombie) { slot = i; break; }
+    }
+    if (!slot) { lock_release(LOCK_SCHED, &sched_lock); return NULL; }
+
+    paddr_t kphys;
+    if (!pmm_alloc(&kphys, TASK_STACK_PAGES)) {
+        lock_release(LOCK_SCHED, &sched_lock);
+        return NULL;
+    }
+
+    if (share_vm) vs->refcount++;
+
+    struct page_table *pml4;
+    if (share_vm) {
+        pml4 = vs->pml4;
+    } else {
+        pml4 = vmm_create_address_space();
+        if (!pml4) {
+            pmm_free(kphys, TASK_STACK_PAGES);
+            lock_release(LOCK_SCHED, &sched_lock);
+            return NULL;
+        }
+        size_t copied = 0;
+        vmm_clone_user_space(vs->pml4, pml4, &copied);
+    }
+
+    struct vmspace *child_vs = vs;
+    if (!share_vm) {
+        child_vs = (struct vmspace *)kmalloc(sizeof(struct vmspace));
+        if (!child_vs) {
+            vmm_destroy_address_space(pml4);
+            pmm_free(kphys, TASK_STACK_PAGES);
+            lock_release(LOCK_SCHED, &sched_lock);
+            return NULL;
+        }
+        child_vs->pml4 = pml4;
+        child_vs->refcount = 1;
+        for (size_t i = 0; i < vs->region_count && i < VM_MAX_REGIONS; i++)
+            child_vs->regions[i] = vs->regions[i];
+        child_vs->region_count = vs->region_count;
+        child_vs->stack_base = vs->stack_base;
+        child_vs->stack_top = vs->stack_top;
+        child_vs->stack_bottom = vs->stack_bottom;
+        child_vs->has_stack = vs->has_stack;
+    }
+
+    struct task *t = &tasks[slot];
+    t->parent_pid = parent->pid;
+    t->child_chan = &t->child_chan;
+    t->stack_base = vmm_hhdm_offset + kphys;
+    t->stack_top = t->stack_base + TASK_STACK_PAGES * PAGE_SIZE;
+    t->user_stack_phys = 0;
+    t->user_stack_base = 0;
+    t->user_stack_top = user_rsp;
+
+    if (share_vm) {
+        paddr_t cstack = 0;
+        vaddr_t sbase = vs->has_stack ? vs->stack_base : parent->user_stack_base;
+        size_t spages = vs->has_stack ? VM_STACK_PAGES : TASK_USER_STACK_PAGES;
+        uint64_t spte = sbase ? vmm_query_in(vs->pml4, sbase) : 0;
+        bool copied = false;
+
+        if ((spte & PAGE_PRESENT) && pmm_alloc(&cstack, TASK_USER_STACK_PAGES)) {
+            const uint8_t *src =
+                (const uint8_t *)(vmm_hhdm_offset + (spte & 0x000FFFFFFFFFF000ULL));
+            uint8_t *dst = (uint8_t *)(vmm_hhdm_offset + cstack);
+            for (size_t i = 0; i < spages * PAGE_SIZE; i++)
+                dst[i] = src[i];
+            copied = true;
+        }
+
+        if (copied && vmm_map_frames(vs->pml4, TASK_VFORK_STACK_VIRT, cstack,
+                                     spages, PAGE_PRESENT | PAGE_WRITE | PAGE_USER,
+                                     false, true)) {
+            t->user_stack_phys = cstack;
+            t->user_stack_base = TASK_VFORK_STACK_VIRT;
+            t->user_stack_top = TASK_VFORK_STACK_VIRT + spages * PAGE_SIZE;
+            user_rsp = t->user_stack_base + (user_rsp - sbase);
+        } else if (cstack) {
+            pmm_free(cstack, spages);
+        }
+    }
+
+    t->user_code_phys = 0;
+    t->user_code_base = 0;
+    t->user_code_pages = 0;
+    t->fs_base = fs_base;
+    t->pml4 = pml4;
+    t->vs = child_vs;
+    t->exit_code = 0;
+    t->blocked = false;
+    t->vfork_child = 0;
+    t->vfork_chan = &t->vfork_chan;
+    t->wait_chan = NULL;
+    t->wake_tick = 0;
+    t->zombie = false;
+    t->expect_fault = false;
+
+    vaddr_t frame_addr = (t->stack_top - TASK_FRAME_GUARD) & ~0xFULL;
+    struct isr_frame *f = (struct isr_frame *)frame_addr;
+    uint64_t *q = (uint64_t *)f;
+    for (size_t i = 0; i < sizeof(struct isr_frame) / 8; i++) q[i] = 0;
+
+    q[QW_RIP] = entry_rip;
+    q[QW_CS] = GDT_USER_CODE_RPL3;
+    q[QW_RFLAGS] = TASK_RFLAGS_IF;
+    q[QW_RSP] = user_rsp;
+    q[QW_SS] = GDT_USER_DATA_RPL3;
+    q[QW_RAX] = 0;
+
+    t->frame = f;
+    t->in_use = true;
+    t->debug_log = false;
+    t->pid = next_pid++;
+    t->name = name;
+
+    if (clone_fds) {
+        fd_table_clone(t, parent);
+    } else {
+        fd_table_init(t);
+        fd_install_stdio(t);
+    }
+
+    if (tid_out) *tid_out = t->pid;
+
+    lock_release(LOCK_SCHED, &sched_lock);
+    return t;
+}
+
+static void task_sleep_registered(void) {
+    uint64_t rflags;
+    __asm__ volatile("pushfq; pop %0; cli" : "=r"(rflags) :: "memory");
+
+    struct task *self = &tasks[current_slot];
+
+    for (;;) {
+        __asm__ volatile("sti; hlt" ::: "memory");
+        __asm__ volatile("cli" ::: "memory");
+        if (!__atomic_load_n(&self->blocked, __ATOMIC_ACQUIRE)) break;
+    }
+
+    self->wait_chan = NULL;
+    if (rflags & TASK_RFLAGS_IF) __asm__ volatile("sti" ::: "memory");
+}
+
+int task_wait_child(struct task *parent, int32_t want, int32_t *status_out, int32_t options) {
+    bool wnohang = (options & ABI_WNOHANG) != 0;
+    struct task *self = &tasks[current_slot];
+
+    for (;;) {
+        lock_acquire(LOCK_SCHED, &sched_lock);
+        task_reap_zombies();
+
+        size_t slot = 0;
+        int32_t code = 0;
+        for (size_t i = 1; i < TASK_MAX; i++) {
+            if (!tasks[i].zombie || tasks[i].parent_pid != parent->pid) continue;
+            if (want > 0 && (int32_t)tasks[i].pid != want) continue;
+            slot = i;
+            code = (int32_t)tasks[i].exit_code;
+            break;
+        }
+
+        if (slot) {
+            int32_t pid = (int32_t)tasks[slot].pid;
+            task_release(&tasks[slot]);
+            lock_release(LOCK_SCHED, &sched_lock);
+            if (status_out) {
+                int32_t st = (code & 0x7f) << 8;
+                if (!copyout((void *)status_out, &st, sizeof(st))) return SYS_EFAULT;
+            }
+            return pid;
+        }
+
+        if (wnohang) {
+            lock_release(LOCK_SCHED, &sched_lock);
+            return SYS_ECHILD;
+        }
+
+        self->wait_chan = &self->child_chan;
+        self->wake_tick = 0;
+        self->blocked = true;
+        lock_release(LOCK_SCHED, &sched_lock);
+
+        task_sleep_registered();
+    }
+}
+
 struct task *task_spawn_vmspace(const char *name, struct vmspace *vs, vaddr_t entry_rip, vaddr_t user_rsp) {
     if (!name || !vs || !vs->pml4) return NULL;
 
@@ -390,6 +619,8 @@ struct task *task_spawn_vmspace(const char *name, struct vmspace *vs, vaddr_t en
     if (!pmm_alloc(&kphys, TASK_STACK_PAGES)) { lock_release(LOCK_SCHED, &sched_lock); return NULL; }
 
     struct task *t = &tasks[slot];
+    t->parent_pid = 0;
+    t->child_chan = &t->child_chan;
     t->stack_base = vmm_hhdm_offset + kphys;
     t->stack_top = t->stack_base + TASK_STACK_PAGES * PAGE_SIZE;
     t->user_stack_phys = 0;
@@ -403,6 +634,8 @@ struct task *task_spawn_vmspace(const char *name, struct vmspace *vs, vaddr_t en
     t->pml4 = vs->pml4;
     t->exit_code = 0;
     t->blocked = false;
+    t->vfork_child = 0;
+    t->vfork_chan = &t->vfork_chan;
     t->wait_chan = NULL;
     t->wake_tick = 0;
     t->zombie = false;
@@ -513,19 +746,43 @@ void task_exit_code(uint64_t code) {
     __asm__ volatile("cli" ::: "memory");
 
     lock_acquire(LOCK_SCHED, &sched_lock);
+
+    if (self->parent_pid) {
+        for (size_t i = 1; i < TASK_MAX; i++) {
+            if (tasks[i].in_use && tasks[i].pid == self->parent_pid &&
+                tasks[i].wait_chan == tasks[i].child_chan) {
+                __atomic_store_n(&tasks[i].vfork_child, 0, __ATOMIC_RELAXED);
+                __atomic_store_n(&tasks[i].blocked, false, __ATOMIC_RELEASE);
+            }
+        }
+    }
+
+    for (size_t i = 1; i < TASK_MAX; i++) {
+        if (tasks[i].in_use && tasks[i].vfork_child == self->pid &&
+            tasks[i].wait_chan == tasks[i].vfork_chan) {
+            __atomic_store_n(&tasks[i].vfork_child, 0, __ATOMIC_RELEASE);
+            __atomic_store_n(&tasks[i].blocked, false, __ATOMIC_RELEASE);
+        }
+    }
+
     self->in_use = false;
     self->blocked = false;
     self->zombie = true;
+    self->frame = NULL;
+
     struct task *next = pick_next();
     if (next) {
         current_slot = (size_t)(next - tasks);
         switch_count++;
     }
+
     task_kstack_update();
     task_aspace_update();
+
     lock_release(LOCK_SCHED, &sched_lock);
 
-    if (!next) {
+    if (!next || !tasks[current_slot].frame) {
+        kprintf(PRINT_SERIAL, "task: no task left to run\n");
         for (;;) __asm__ volatile("sti; hlt" ::: "memory");
     }
 
@@ -562,6 +819,21 @@ void task_block_current(uint64_t seen_seq) {
 
 
 static uint64_t earliest_wake = UINT64_MAX;
+
+bool task_wait_vfork_child(uint32_t child) {
+    struct task *self = &tasks[current_slot];
+
+    lock_acquire(LOCK_SCHED, &sched_lock);
+    self->vfork_child = child;
+    self->wait_chan = &self->vfork_chan;
+    self->wake_tick = 0;
+    self->blocked = true;
+    lock_release(LOCK_SCHED, &sched_lock);
+
+    task_sleep_registered();
+    self->vfork_child = 0;
+    return true;
+}
 
 bool task_wait(void *chan, uint64_t deadline) {
     uint64_t rflags;

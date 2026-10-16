@@ -32,6 +32,7 @@ extern uint64_t syscall_kstack_top;
 #define SYS_EMFILE   ABI_EMFILE
 #define SYS_ENOSPC   ABI_ENOSPC
 #define SYS_ENOMEM   ABI_ENOMEM
+#define SYS_ECHILD   ABI_ECHILD
 #define SYS_ENOSYS   ABI_ENOSYS
 
 #define FD_RES_SLOTS 144

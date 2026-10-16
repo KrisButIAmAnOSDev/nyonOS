@@ -52,6 +52,7 @@ bool vmm_map_frames(struct page_table *root, vaddr_t vaddr, paddr_t paddr, size_
 bool vmm_unmap_keep_frames(struct page_table *root, vaddr_t vaddr, size_t pages, paddr_t *freed, size_t max_freed);
 
 bool vmm_range_present_in(struct page_table *root, vaddr_t addr, size_t len);
+bool vmm_clone_user_space(struct page_table *src, struct page_table *dst, size_t *copied);
 bool vmm_range_writable_in(struct page_table *root, vaddr_t addr, size_t len);
 
 #define VMM_USER_EXEC_FLAGS (PAGE_PRESENT | PAGE_WRITE)

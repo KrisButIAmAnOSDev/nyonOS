@@ -32,4 +32,23 @@ static inline void preempt_enable(void) {
 
 void preempt_init(void);
 
+static inline uint32_t preempt_open_for_block(void) {
+    uint32_t saved = __atomic_load_n(&preempt_state.count, __ATOMIC_RELAXED);
+    while (__atomic_load_n(&preempt_state.count, __ATOMIC_RELAXED) > 0)
+        __atomic_fetch_sub(&preempt_state.count, 1, __ATOMIC_RELAXED);
+    return saved;
+}
+
+static inline void preempt_close_after_block(uint32_t saved) {
+    uint32_t cur = __atomic_load_n(&preempt_state.count, __ATOMIC_RELAXED);
+    while (cur < saved) {
+        __atomic_fetch_add(&preempt_state.count, 1, __ATOMIC_RELAXED);
+        cur++;
+    }
+    while (cur > saved) {
+        __atomic_fetch_sub(&preempt_state.count, 1, __ATOMIC_RELAXED);
+        cur--;
+    }
+}
+
 #endif

@@ -16,6 +16,8 @@ void fd_test(void);
 void mm_test(void);
 void futex_pair_test(void);
 void sysdep_test(void);
+void clktest_run(void);
+void forktest_run(void);
 void thread_test(void);
 void mlibc_hello_test(void);
 void tty_isolation_test(vaddr_t a_rip, vaddr_t b_rip, vaddr_t c_rip,

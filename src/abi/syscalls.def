@@ -31,6 +31,10 @@
     X(yield        ,   24, int32_t, 0, N(0)) \
     X(newthread    ,   25, int32_t, 3, N((ulong)pid_out,entry,stack), uint32_t *pid_out, uint64_t entry, uint64_t stack) \
     X(thread_exit  ,   26, int32_t, 0, N(0)) \
+    X(fork        ,   27, int32_t, 1, N((ulong)tid_out), uint32_t *tid_out) \
+    X(vfork       ,   28, int32_t, 1, N((ulong)tid_out), uint32_t *tid_out) \
+    X(clone       ,   29, int32_t, 4, N(flags,stack,(ulong)tid_out,tcb), uint64_t flags, uint64_t stack, uintptr_t tid_out, uint64_t tcb) \
+    X(waitpid     ,   30, int32_t, 3, N(pid,(ulong)status,(ulong)options), int32_t pid, uintptr_t status, int32_t options) \
     X(set_fs_base  ,   23, int32_t, 1, N(base), uint64_t base) \
     X(console_write,  240, int64_t, 4, N(dest,attr,(ulong)buf,len), unsigned dest, unsigned attr, const void *buf, unsigned len) \
     X(debug_print  ,  241, int64_t, 2, N((ulong)msg,len), const char *msg, unsigned len)

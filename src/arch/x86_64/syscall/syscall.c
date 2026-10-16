@@ -9,6 +9,7 @@
 #include "kernel/fs/fs.h"
 #include "kernel/mm/vmm/vmspace.h"
 #include "arch/x86_64/pit/pit.h"
+#include "arch/x86_64/rtc/rtc.h"
 #include "arch/x86_64/syscall/syscall_msr.h"
 
 extern void isr_stub_syscall(void);
@@ -49,6 +50,64 @@ static int64_t sys_console_write(unsigned dest, unsigned attr, uintptr_t buf, un
     return len;
 }
 
+static int64_t fork_common(bool share_vm, bool block_parent, uintptr_t tid_out) {
+    struct task *t = task_current();
+    if (!t || !in_user()) return SYS_EINVAL;
+
+    if (!t->vs) return SYS_EINVAL;
+    if (!user_valid_range((void *)tid_out, sizeof(uint32_t))) return SYS_EFAULT;
+
+    uint64_t entry = current_frame ? (uint64_t)current_frame->rip : 0;
+    uint64_t sp = current_frame ? (uint64_t)current_frame->rsp : 0;
+    uint32_t child_pid = 0;
+
+    struct task *child = task_spawn_fork(t, "fork", entry, sp, t->fs_base,
+                                          share_vm, share_vm, &child_pid);
+    if (!child) return SYS_ENOMEM;
+
+    uint32_t out = child_pid;
+    if (!copyout((void *)tid_out, &out, sizeof(out))) return SYS_EFAULT;
+
+    if (block_parent) {
+        uint32_t saved = preempt_open_for_block();
+        task_wait_vfork_child(child_pid);
+        preempt_close_after_block(saved);
+    }
+
+    return (int64_t)child_pid;
+}
+
+static int64_t sys_fork(uintptr_t tid_out) {
+    return fork_common(false, false, tid_out);
+}
+
+static int64_t sys_vfork(uintptr_t tid_out) {
+    return fork_common(true, true, tid_out);
+}
+
+static int64_t sys_clone(uint64_t flags, uint64_t stack, uintptr_t tid_out, uint64_t tcb) {
+    struct task *t = task_current();
+    if (!t || !in_user()) return SYS_EINVAL;
+    if (!t->vs) return SYS_EINVAL;
+    if (!user_valid_range((void *)tid_out, sizeof(uint32_t))) return SYS_EFAULT;
+
+    if (flags & ABI_CLONE_THREAD) {
+        if (!stack) return SYS_EINVAL;
+        uint64_t entry = current_frame ? (uint64_t)current_frame->rip : 0;
+        uint32_t child_pid = 0;
+        struct task *child = task_spawn_fork(t, "clone", entry, stack,
+                                              (flags & ABI_CLONE_SETTLS) ? tcb : t->fs_base,
+                                              true, true, &child_pid);
+        if (!child) return SYS_ENOMEM;
+        uint32_t out = child_pid;
+        if (!copyout((void *)tid_out, &out, sizeof(out))) return SYS_EFAULT;
+        return 0;
+    }
+
+    bool share = (flags & ABI_CLONE_VM) != 0;
+    return fork_common(share, share, tid_out);
+}
+
 static int64_t sys_newthread(uintptr_t pid_out, uint64_t entry, uint64_t stack) {
     struct task *t = task_current();
     if (!t || !in_user()) return SYS_EINVAL;
@@ -71,6 +130,17 @@ static int64_t sys_thread_exit(void) {
     task_exit_code(0);
     for (;;) __asm__ volatile("hlt");
     __builtin_unreachable();
+}
+
+static int64_t sys_waitpid(int32_t pid, uintptr_t status, int32_t options) {
+    struct task *t = task_current();
+    if (!t || !in_user()) return SYS_EINVAL;
+    if (pid < -1) return SYS_EINVAL;
+
+    int32_t want = pid;
+    if (pid == -1) want = 0;
+
+    return (int64_t)task_wait_child(t, want, (int32_t *)status, options);
 }
 
 static int64_t sys_yield(void) {
@@ -328,13 +398,22 @@ static int64_t sys_munmap(uint64_t addr, uint64_t len) {
 
 static int64_t sys_clock_gettime(unsigned clk, uintptr_t ts) {
     if (!ts) return SYS_EFAULT;
-    if (clk != ABI_CLOCK_MONOTONIC) return SYS_ENOSYS;
 
     uint64_t ticks = pit_get_ticks();
     uint32_t hz = pit_frequency();
     struct sys_timespec out;
-    out.sec = (int64_t)(ticks / hz);
-    out.nsec = (int64_t)((ticks % hz) * 1000000000ULL / hz);
+
+    if (clk == ABI_CLOCK_MONOTONIC) {
+        out.sec = (int64_t)(ticks / hz);
+        out.nsec = (int64_t)((ticks % hz) * 1000000000ULL / hz);
+    } else if (clk == ABI_CLOCK_REALTIME) {
+        int64_t elapsed = (int64_t)(ticks / hz);
+        int64_t base = rtc_unix_time();
+        out.sec = base + elapsed;
+        out.nsec = (int64_t)((ticks % hz) * 1000000000ULL / hz);
+    } else {
+        return SYS_EINVAL;
+    }
 
     if (in_user()) {
         if (!copyout((void *)ts, &out, sizeof(out))) return SYS_EFAULT;
@@ -498,7 +577,7 @@ void syscall_init(void) {
 
 #define X(name, num, ret, nargs, argnames, ...)                                        \
     case SYS_##name:                                                                  \
-        frame->rax = (uint64_t)(int64_t)sys_##name(FARG##nargs);                      \
+            frame->rax = (uint64_t)(int64_t)sys_##name(FARG##nargs);                      \
         return;
 
 void syscall_dispatch(struct isr_frame *frame) {

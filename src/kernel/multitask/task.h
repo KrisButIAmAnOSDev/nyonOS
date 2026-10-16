@@ -15,6 +15,7 @@
 #define TASK_RFLAGS_IF 0x202
 #define TASK_USER_STACK_PAGES 1
 #define TASK_USER_STACK_VIRT 0x0000000040000000ULL
+#define TASK_VFORK_STACK_VIRT 0x0000000030000000ULL
 #define TASK_USER_CODE_VIRT  0x0000000000400000ULL
 
 struct task {
@@ -37,6 +38,10 @@ struct task {
     bool expect_fault;
     bool debug_log;
     uint32_t pid;
+    uint32_t parent_pid;
+    uint32_t vfork_child;
+    void *child_chan;
+    void *vfork_chan;
     void *wait_chan;
     uint64_t wake_tick;
     const char *name;
@@ -49,6 +54,7 @@ struct task *task_spawn(const char *name, void (*entry)(void));
 struct task *task_spawn_ring3(const char *name, paddr_t code_phys, size_t code_pages, vaddr_t code_virt, vaddr_t entry_rip, paddr_t shared_phys, vaddr_t shared_virt);
 struct vmspace;
 struct task *task_spawn_thread(struct task *parent, const char *name, vaddr_t entry_rip, vaddr_t user_rsp, uint64_t fs_base);
+struct task *task_spawn_fork(struct task *parent, const char *name, uint64_t entry_rip, uint64_t user_rsp, uint64_t fs_base, bool share_vm, bool clone_fds, uint32_t *tid_out);
 struct task *task_spawn_vmspace(const char *name, struct vmspace *vs, vaddr_t entry_rip, vaddr_t user_rsp);
 struct task *task_spawn_ring3_lent(const char *name, paddr_t code_phys, size_t code_pages, vaddr_t code_virt, vaddr_t entry_rip, paddr_t shared_phys, vaddr_t shared_virt);
 void task_schedule(struct isr_frame *frame);
@@ -59,6 +65,8 @@ void task_block_current(uint64_t seen_seq);
 uint64_t task_wake_seq(void);
 void task_unblock_all(void);
 bool task_wait(void *chan, uint64_t deadline);
+bool task_wait_vfork_child(uint32_t child);
+int task_wait_child(struct task *parent, int32_t want, int32_t *status_out, int32_t options);
 int task_futex_wait(void *chan, uintptr_t uaddr, uint32_t expected, uint64_t deadline);
 void task_wake_chan(void *chan);
 void task_tick(uint64_t now);
