@@ -298,7 +298,8 @@ int elf_load_shared(const fs_node *file, struct elf_image *out, const char **err
             if (read_to > read_from) {
                 uint64_t skip = read_from - vaddr_seg;
                 uint32_t want = (uint32_t)(ph[i].filesz - skip);
-                if (want > PAGE_SIZE) want = PAGE_SIZE;
+                size_t room = PAGE_SIZE - (size_t)(read_from - va);
+                if (want > room) want = (uint32_t)room;
                 if (want && !fs_node_read(file, (uint32_t)(ph[i].offset + skip), page + (read_from - va), want)) {
                     if (!(existing & PAGE_PRESENT)) pmm_free(phys, 1);
                     if (err) *err = "segment read failed";
@@ -316,17 +317,30 @@ int elf_load_shared(const fs_node *file, struct elf_image *out, const char **err
         }
     }
 
-    for (size_t i = 0; i < npages && result == 0; i++) {
-        if (!prot[i]) continue;
-        vaddr_t start = lo + i * PAGE_SIZE;
-        vaddr_t end = start + PAGE_SIZE;
-        if (i && prot[i - 1] == prot[i]) continue;
-        if (vm_region_add(vs, start, end, prot[i], VM_BACKING_ANON) != 0) {
-            kfree(prot);
-            vm_destroy(vs);
-            kfree((void *)ph);
-            if (err) *err = "too many regions";
-            return ELF_ETOOLARGE;
+    size_t run = 0;
+    uint8_t run_prot = 0;
+    bool in_run = false;
+
+    for (size_t i = 0; i <= npages; i++) {
+        uint8_t p = (i < npages) ? prot[i] : 0;
+
+        if (in_run && p != run_prot) {
+            vaddr_t rs = lo + run * PAGE_SIZE;
+            vaddr_t re = lo + i * PAGE_SIZE;
+            if (vm_region_add(vs, rs, re, run_prot, VM_BACKING_ANON) != 0) {
+                kfree(prot);
+                vm_destroy(vs);
+                kfree((void *)ph);
+                if (err) *err = "too many regions";
+                return ELF_ETOOLARGE;
+            }
+            in_run = false;
+        }
+
+        if (!in_run && p) {
+            run = i;
+            run_prot = p;
+            in_run = true;
         }
     }
 

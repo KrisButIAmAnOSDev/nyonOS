@@ -48,7 +48,10 @@ static size_t bitmap_find_free(size_t count) {
         while (avail) {
             size_t page = i + (size_t)__builtin_ctzll(avail);
 
-            if (consecutive == 0) start = page;
+            if (!consecutive || page != start + consecutive) {
+                start = page;
+                consecutive = 0;
+            }
             consecutive++;
             if (consecutive == count) return start;
 

@@ -140,7 +140,6 @@ void keyboard_handler(struct isr_frame *frame) {
     }
 
     task_wake_chan(&tty_wait_chan);
-    task_unblock_all();
 }
 
 bool keyboard_try_pop(char *out) {

@@ -470,7 +470,7 @@ void mm_test(void) {
     }
 
     uint32_t pid = t->pid;
-    for (int i = 0; i < 2000 && res[C_RES_DONE] == 0xdeadbeefdeadbeefULL && task_find_pid(pid); i++) pit_sleep(5);
+    for (int i = 0; i < 600 && res[C_RES_DONE] == 0xdeadbeefdeadbeefULL && task_find_pid(pid); i++) pit_sleep(5);
 
     bool ran = res[C_RES_DONE] != 0xdeadbeefdeadbeefULL;
     for (int i = 0; i < 400 && task_find_pid(pid); i++) pit_sleep(5);
@@ -604,6 +604,100 @@ void mlibc_hello_test(void) {
     kprintf(PRINT_SERIAL, "  free %zu -> %zu\n", before, after);
 }
 
+
+void mandel_run(void) {
+    fs_node_t node;
+    if (!fs_lookup("/BIN/MANDEL", &node) && !fs_lookup("/BIN/mandel", &node)) {
+        kprintf(PRINT_SERIAL, "MAND: /BIN/mandel not found\n");
+        return;
+    }
+
+    struct elf_image img;
+    const char *err = NULL;
+    if (elf_load(&node, &img, &err)) {
+        kprintf(PRINT_SERIAL, "MAND: load refused: %s\n", err ? err : "?");
+        return;
+    }
+
+    struct task *t = task_spawn_vmspace("mandel", img.vs, img.entry, img.stack_top);
+    elf_destroy(&img);
+    if (!t) {
+        kprintf(PRINT_SERIAL, "MAND: spawn failed\n");
+        return;
+    }
+
+    uint32_t pid = t->pid;
+    for (int i = 0; i < 8000 && task_find_pid(pid); i++) pit_sleep(5);
+    bool alive = task_find_pid(pid) != NULL;
+    task_reap_now();
+
+    kprintf(PRINT_SERIAL, "MAND: program exited: ");
+    kprintchar(!alive ? 'Y' : 'N', PRINT_SERIAL);
+    kprintchar('\n', PRINT_SERIAL);
+}
+
+void featuretest_run(void) {
+    fs_node_t node;
+    if (!fs_lookup("/BIN/FEATEST", &node) && !fs_lookup("/BIN/featest", &node)) {
+        kprintf(PRINT_SERIAL, "FEAT: /BIN/featuretest not found\n");
+        return;
+    }
+
+    struct elf_image img;
+    const char *err = NULL;
+    if (elf_load(&node, &img, &err)) {
+        kprintf(PRINT_SERIAL, "FEAT: load refused: %s\n", err ? err : "?");
+        return;
+    }
+
+    struct task *t = task_spawn_vmspace("feat", img.vs, img.entry, img.stack_top);
+    elf_destroy(&img);
+    if (!t) {
+        kprintf(PRINT_SERIAL, "FEAT: spawn failed\n");
+        return;
+    }
+
+    uint32_t pid = t->pid;
+    for (int i = 0; i < 6000 && task_find_pid(pid); i++) pit_sleep(5);
+    bool alive = task_find_pid(pid) != NULL;
+    task_reap_now();
+
+    kprintf(PRINT_SERIAL, "FEAT: program exited: ");
+    kprintchar(!alive ? 'Y' : 'N', PRINT_SERIAL);
+    kprintchar('\n', PRINT_SERIAL);
+}
+
+void proctest_run(void) {
+    fs_node_t node;
+    if (!fs_lookup("/BIN/PROCTEST", &node) && !fs_lookup("/BIN/proctest", &node)) {
+        kprintf(PRINT_SERIAL, "PROC: /BIN/proctest not found\n");
+        return;
+    }
+
+    struct elf_image img;
+    const char *err = NULL;
+    if (elf_load(&node, &img, &err)) {
+        kprintf(PRINT_SERIAL, "PROC: load refused: %s\n", err ? err : "?");
+        return;
+    }
+
+    struct task *t = task_spawn_vmspace("proc", img.vs, img.entry, img.stack_top);
+    elf_destroy(&img);
+    if (!t) {
+        kprintf(PRINT_SERIAL, "PROC: spawn failed\n");
+        return;
+    }
+
+    uint32_t pid = t->pid;
+    for (int i = 0; i < 6000 && task_find_pid(pid); i++) pit_sleep(5);
+    bool alive = task_find_pid(pid) != NULL;
+    task_reap_now();
+
+    kprintf(PRINT_SERIAL, "PROC: program exited: ");
+    kprintchar(!alive ? 'Y' : 'N', PRINT_SERIAL);
+    kprintchar('\n', PRINT_SERIAL);
+}
+
 void clktest_run(void) {
     fs_node_t node;
     if (!fs_lookup("/BIN/CLKTEST", &node) && !fs_lookup("/BIN/clktest", &node)) {
@@ -729,7 +823,7 @@ void forktest_run(void) {
 
     size_t after = pmm_free_pages();
     kprintf(PRINT_SERIAL, "FORK ring3: every child and its stack reclaimed, no leak: ");
-    kprintchar(after >= before ? 'Y' : 'N', PRINT_SERIAL);
+    kprintchar(after == before ? 'Y' : 'N', PRINT_SERIAL);
     kprintf(PRINT_SERIAL, "  free %zu -> %zu\n", before, after);
 
     pmm_free(phys, 1);

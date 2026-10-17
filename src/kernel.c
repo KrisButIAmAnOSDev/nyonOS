@@ -3,7 +3,6 @@
 #include <stdbool.h>
 #include "boot/limine/limine.h"
 #include "graphics/font/font.h"
-#include "graphics/video/video.h"
 #include "drivers/serial/serial.h"
 #include "kernel/kprintf/kprintf.h"
 #include "arch/x86_64/idt/idt.h"
@@ -313,6 +312,9 @@ void kmain(void) {
             fd_test();
             mm_test();
             futex_pair_test();
+            mandel_run();
+            featuretest_run();
+            proctest_run();
             clktest_run();
             forktest_run();
             sysdep_test();

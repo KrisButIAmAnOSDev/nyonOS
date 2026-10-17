@@ -25,6 +25,7 @@ struct block_header {
     size_t size;
     bool free;
     uint32_t magic;
+    uint32_t seg;
     struct block_header *next;
     struct block_header *prev;
 };
@@ -43,14 +44,14 @@ static uint64_t heap_committed = 0;
 static uint64_t heap_max_bytes = 0;
 
 static void coalesce(struct block_header *b) {
-    while (b->next && b->next->free) {
+    while (b->next && b->next->free && b->next->seg == b->seg) {
         struct block_header *n = b->next;
         b->size += sizeof(struct block_header) + n->size;
         b->next = n->next;
         if (b->next) b->next->prev = b;
         if (n == heap_tail_block) heap_tail_block = b;
     }
-    while (b->prev && b->prev->free) {
+    while (b->prev && b->prev->free && b->prev->seg == b->seg) {
         struct block_header *p = b->prev;
         p->size += sizeof(struct block_header) + b->size;
         p->next = b->next;
@@ -72,8 +73,8 @@ static void heap_trim(void) {
         uint8_t *bend = bstart + sizeof(struct block_header) + tail->size;
 
         if (bend != (uint8_t *)seg_end) return;
-
         if (bstart != (uint8_t *)seg->vaddr) return;
+        if (tail->seg != (uint32_t)(segment_count - 1)) return;
 
         if (tail->prev) {
             tail->prev->next = NULL;
@@ -125,6 +126,7 @@ static bool heap_grow(size_t min_extra) {
     new_block->size = chunk - sizeof(struct block_header);
     new_block->free = true;
     new_block->magic = HEAP_MAGIC;
+    new_block->seg = (uint32_t)(segment_count - 1);
     new_block->next = NULL;
     new_block->prev = tail;
 
@@ -164,6 +166,7 @@ static void split_block(struct block_header *b, size_t size) {
     new_block->size = remaining - sizeof(struct block_header);
     new_block->free = true;
     new_block->magic = HEAP_MAGIC;
+    new_block->seg = b->seg;
     new_block->next = b->next;
     new_block->prev = b;
 

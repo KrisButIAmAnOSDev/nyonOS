@@ -14,6 +14,7 @@ syscall_entry:
     push 0x1b
     push r11
     pushfq
+    or  qword ptr [rsp], 0x200
     push 0x23
     push rcx
     push 0

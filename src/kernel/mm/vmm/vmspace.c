@@ -50,7 +50,8 @@ void vm_free_range(struct vmspace *vs, vaddr_t start, vaddr_t end) {
 
     for (size_t i = 0; i < pages; i++) {
         uint64_t entry = vmm_query_in(vs->pml4, a + i * PAGE_SIZE);
-        if (entry & PAGE_PRESENT) pmm_free(entry & 0x000FFFFFFFFFF000ULL, 1);
+        if ((entry & PAGE_PRESENT) && (entry & PAGE_OWNED))
+            pmm_free(entry & 0x000FFFFFFFFFF000ULL, 1);
     }
 
     vmm_unmap_keep(vs->pml4, a, pages);

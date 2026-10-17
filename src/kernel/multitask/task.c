@@ -66,6 +66,7 @@ static void task_release(struct task *t) {
         t->user_stack_top > t->user_stack_base) {
         size_t pages = (size_t)(t->user_stack_top - t->user_stack_base) / PAGE_SIZE;
         vmm_unmap_from(t->vs->pml4, t->user_stack_base, pages);
+        vm_region_remove(t->vs, t->user_stack_base, t->user_stack_top);
         pmm_free(t->user_stack_phys, pages);
         t->user_stack_phys = 0;
         t->user_stack_base = 0;
@@ -107,6 +108,8 @@ static void task_release(struct task *t) {
     t->wait_chan = NULL;
     t->wake_tick = 0;
     t->exit_code = 0;
+    t->fs_base = 0;
+    t->copy_active = false;
 }
 
 static void task_reap_zombies(void) {
@@ -259,7 +262,7 @@ static struct task *spawn_ring3(const char *name, paddr_t code_phys, size_t code
         return NULL;
     }
 
-    if (!vmm_map_user_exec(pml4, code_virt, code_phys, code_pages, VMM_DEFAULT_FLAGS)) {
+    if (!vmm_map_user_exec(pml4, code_virt, code_phys, code_pages, VMM_USER_EXEC_FLAGS)) {
         pmm_free(kphys, TASK_STACK_PAGES);
         pmm_free(uphys, TASK_USER_STACK_PAGES);
         vmm_destroy_address_space(pml4);
@@ -268,8 +271,8 @@ static struct task *spawn_ring3(const char *name, paddr_t code_phys, size_t code
     }
 
     bool shared_ok = !shared_phys ||
-        (shared_owned ? vmm_map_user(pml4, shared_virt, shared_phys, 1, VMM_DEFAULT_FLAGS)
-                      : vmm_map_user_lent(pml4, shared_virt, shared_phys, 1, VMM_DEFAULT_FLAGS));
+        (shared_owned ? vmm_map_user(pml4, shared_virt, shared_phys, 1, VMM_USER_EXEC_FLAGS)
+                      : vmm_map_user_lent(pml4, shared_virt, shared_phys, 1, VMM_USER_EXEC_FLAGS));
     if (!shared_ok) {
         pmm_free(kphys, TASK_STACK_PAGES);
         pmm_free(uphys, TASK_USER_STACK_PAGES);
@@ -278,7 +281,7 @@ static struct task *spawn_ring3(const char *name, paddr_t code_phys, size_t code
         return NULL;
     }
 
-    if (!vmm_map_user(pml4, TASK_USER_STACK_VIRT, uphys, TASK_USER_STACK_PAGES, VMM_DEFAULT_FLAGS)) {
+    if (!vmm_map_user(pml4, TASK_USER_STACK_VIRT, uphys, TASK_USER_STACK_PAGES, VMM_USER_EXEC_FLAGS)) {
         pmm_free(kphys, TASK_STACK_PAGES);
         pmm_free(uphys, TASK_USER_STACK_PAGES);
         vmm_destroy_address_space(pml4);
@@ -402,9 +405,11 @@ struct task *task_spawn_thread(struct task *parent, const char *name,
 }
 
 struct task *task_spawn_fork(struct task *parent, const char *name,
-                             uint64_t entry_rip, uint64_t user_rsp,
+                             struct isr_frame *src,
                              uint64_t fs_base, bool share_vm, bool clone_fds,
                              uint32_t *tid_out) {
+    uint64_t entry_rip = src ? (uint64_t)src->rip : 0;
+    uint64_t user_rsp = src ? (uint64_t)src->rsp : 0;
     if (!parent || !name) return NULL;
     if (!share_vm && !parent->vs) return NULL;
     struct vmspace *vs = parent->vs;
@@ -438,7 +443,12 @@ struct task *task_spawn_fork(struct task *parent, const char *name,
             return NULL;
         }
         size_t copied = 0;
-        vmm_clone_user_space(vs->pml4, pml4, &copied);
+        if (!vmm_clone_user_space(vs->pml4, pml4, &copied)) {
+            vmm_destroy_address_space(pml4);
+            pmm_free(kphys, TASK_STACK_PAGES);
+            lock_release(LOCK_SCHED, &sched_lock);
+            return NULL;
+        }
     }
 
     struct vmspace *child_vs = vs;
@@ -475,27 +485,32 @@ struct task *task_spawn_fork(struct task *parent, const char *name,
         vaddr_t sbase = vs->has_stack ? vs->stack_base : parent->user_stack_base;
         size_t spages = vs->has_stack ? VM_STACK_PAGES : TASK_USER_STACK_PAGES;
         uint64_t spte = sbase ? vmm_query_in(vs->pml4, sbase) : 0;
-        bool copied = false;
+        vaddr_t cbase = 0;
+        bool mapped = false;
 
-        if ((spte & PAGE_PRESENT) && pmm_alloc(&cstack, TASK_USER_STACK_PAGES)) {
+        if ((spte & PAGE_PRESENT) &&
+            pmm_alloc(&cstack, spages) &&
+            vm_find_free(vs, TASK_VFORK_STACK_LO, TASK_VFORK_STACK_HI,
+                         spages * PAGE_SIZE, &cbase)) {
             const uint8_t *src =
                 (const uint8_t *)(vmm_hhdm_offset + (spte & 0x000FFFFFFFFFF000ULL));
             uint8_t *dst = (uint8_t *)(vmm_hhdm_offset + cstack);
             for (size_t i = 0; i < spages * PAGE_SIZE; i++)
                 dst[i] = src[i];
-            copied = true;
+
+            if (vmm_map_frames(vs->pml4, cbase, cstack, spages,
+                               PAGE_PRESENT | PAGE_WRITE | PAGE_USER, false, true) &&
+                vm_region_add(vs, cbase, cbase + spages * PAGE_SIZE,
+                              VM_PROT_READ | VM_PROT_WRITE, VM_BACKING_ANON) == 0) {
+                t->user_stack_phys = cstack;
+                t->user_stack_base = cbase;
+                t->user_stack_top = cbase + spages * PAGE_SIZE;
+                user_rsp = cbase + (user_rsp - sbase);
+                mapped = true;
+            }
         }
 
-        if (copied && vmm_map_frames(vs->pml4, TASK_VFORK_STACK_VIRT, cstack,
-                                     spages, PAGE_PRESENT | PAGE_WRITE | PAGE_USER,
-                                     false, true)) {
-            t->user_stack_phys = cstack;
-            t->user_stack_base = TASK_VFORK_STACK_VIRT;
-            t->user_stack_top = TASK_VFORK_STACK_VIRT + spages * PAGE_SIZE;
-            user_rsp = t->user_stack_base + (user_rsp - sbase);
-        } else if (cstack) {
-            pmm_free(cstack, spages);
-        }
+        if (!mapped && cstack) pmm_free(cstack, spages);
     }
 
     t->user_code_phys = 0;
@@ -517,6 +532,11 @@ struct task *task_spawn_fork(struct task *parent, const char *name,
     struct isr_frame *f = (struct isr_frame *)frame_addr;
     uint64_t *q = (uint64_t *)f;
     for (size_t i = 0; i < sizeof(struct isr_frame) / 8; i++) q[i] = 0;
+
+    if (src) {
+        const uint64_t *s = (const uint64_t *)src;
+        for (size_t i = 0; i < 14; i++) q[i] = s[i];
+    }
 
     q[QW_RIP] = entry_rip;
     q[QW_CS] = GDT_USER_CODE_RPL3;
@@ -824,11 +844,21 @@ bool task_wait_vfork_child(uint32_t child) {
     struct task *self = &tasks[current_slot];
 
     lock_acquire(LOCK_SCHED, &sched_lock);
-    self->vfork_child = child;
-    self->wait_chan = &self->vfork_chan;
-    self->wake_tick = 0;
-    self->blocked = true;
+
+    bool done = false;
+    for (size_t i = 1; i < TASK_MAX; i++) {
+        if (tasks[i].zombie && tasks[i].pid == child) { done = true; break; }
+    }
+
+    if (!done) {
+        self->vfork_child = child;
+        self->wait_chan = &self->vfork_chan;
+        self->wake_tick = 0;
+        self->blocked = true;
+    }
     lock_release(LOCK_SCHED, &sched_lock);
+
+    if (done) return true;
 
     task_sleep_registered();
     self->vfork_child = 0;

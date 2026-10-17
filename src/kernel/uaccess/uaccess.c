@@ -6,12 +6,27 @@
 #include "arch/x86_64/cpu/cpu.h"
 
 extern void user_copy_bytes(void *dst, const void *src, size_t len);
+extern void user_copy_str(char *dst, const char *src, size_t max);
+
+extern char user_copy_bytes_lo[];
+extern char user_copy_bytes_hi[];
+extern char user_copy_str_lo[];
+extern char user_copy_str_hi[];
 
 volatile uint64_t copy_abort;
-static volatile bool copy_active;
+
+static bool rip_in_copy_helper(uint64_t rip) {
+    if (rip >= (uint64_t)(uintptr_t)user_copy_bytes_lo &&
+        rip < (uint64_t)(uintptr_t)user_copy_bytes_hi) return true;
+    if (rip >= (uint64_t)(uintptr_t)user_copy_str_lo &&
+        rip < (uint64_t)(uintptr_t)user_copy_str_hi) return true;
+    return false;
+}
 
 bool usermode_recover_copy(struct isr_frame *frame) {
-    if (!copy_active) return false;
+    struct task *t = task_current();
+    if (!t || !t->copy_active) return false;
+    if (!rip_in_copy_helper(frame->rip)) return false;
 
     copy_abort = 1;
 
@@ -27,16 +42,19 @@ static inline void clac_if_needed(void) {
     if (cpu_smap_enabled()) __asm__ volatile("clac" ::: "memory");
 }
 
-static bool ring3_task(void) {
+static struct task *ring3_task(void) {
     struct task *t = task_current();
-    return t && t->pml4 != NULL;
+    if (!t || !t->pml4) return NULL;
+    return t;
 }
 
 static bool do_copy(void *dst, const void *src, size_t len, bool src_is_user) {
     if (len == 0) return true;
     if (!dst || !src) return false;
 
-    if (!ring3_task()) {
+    struct task *t = ring3_task();
+
+    if (!t) {
         user_copy_bytes(dst, src, len);
         return true;
     }
@@ -56,9 +74,9 @@ static bool do_copy(void *dst, const void *src, size_t len, bool src_is_user) {
     __asm__ volatile("sti" ::: "memory");
 
     copy_abort = 0;
-    copy_active = true;
+    t->copy_active = true;
     user_copy_bytes(dst, src, len);
-    copy_active = false;
+    t->copy_active = false;
 
     __asm__ volatile("cli" ::: "memory");
     clac_if_needed();
@@ -77,13 +95,14 @@ bool copyout(void *dst, const void *src, size_t len) {
 bool copyinstr(char *dst, const char *src, size_t max) {
     if (!dst || !src || max == 0) return false;
 
-    if (!ring3_task()) {
+    struct task *t = ring3_task();
+
+    if (!t) {
         size_t i = 0;
         while (i < max && src[i]) { dst[i] = src[i]; i++; }
         dst[i] = 0;
         return true;
     }
-
 
     if (!user_range_ok((uint64_t)(uintptr_t)src, 1)) return false;
 
@@ -91,19 +110,10 @@ bool copyinstr(char *dst, const char *src, size_t max) {
     __asm__ volatile("sti" ::: "memory");
 
     copy_abort = 0;
-    copy_active = true;
-    for (size_t i = 0; i < max; i++) {
-        if (copy_abort) break;
-        dst[i] = src[i];
-        if (dst[i] == 0) {
-            copy_active = false;
-            __asm__ volatile("cli" ::: "memory");
-            clac_if_needed();
-            return true;
-        }
-    }
+    t->copy_active = true;
+    user_copy_str(dst, src, max);
     bool aborted = copy_abort != 0;
-    copy_active = false;
+    t->copy_active = false;
 
     __asm__ volatile("cli" ::: "memory");
     clac_if_needed();

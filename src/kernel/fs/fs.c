@@ -26,6 +26,23 @@ static bool sector_read(uint32_t lba) {
     return block_read(fs.dev, lba, 1, sec);
 }
 
+static uint8_t dir_sector_cache[FS_SECTOR_SIZE] __attribute__((aligned(4)));
+static uint32_t dir_sector_lba = 0xFFFFFFFFu;
+static uint32_t dir_sector_base = 0xFFFFFFFFu;
+
+static const uint8_t *dir_sector(uint32_t lba) {
+    if (fs.bytes_per_sector != FS_SECTOR_SIZE) {
+        return sector_read(lba) ? sec : NULL;
+    }
+    if (lba != dir_sector_lba || fs.data_start != dir_sector_base) {
+        if (!sector_read(lba)) return NULL;
+        for (size_t i = 0; i < FS_SECTOR_SIZE; i++) dir_sector_cache[i] = sec[i];
+        dir_sector_lba = lba;
+        dir_sector_base = fs.data_start;
+    }
+    return dir_sector_cache;
+}
+
 const char *fs_fat_name(uint32_t cluster_count) {
     if (cluster_count < 4085) return "FAT12";
     if (cluster_count < 65525) return "FAT16";
@@ -161,14 +178,17 @@ static bool dirent_raw(const fs_node_t *dir, uint32_t index, uint8_t *out) {
     uint32_t per_sector = fs.bytes_per_sector / FS_DIRENT_SIZE;
     uint32_t lba;
 
-    if (dir->cluster == 0) {
+    if (dir->is_root) {
         if (index >= fs.root_entry_count) return false;
         lba = fs.root_start + index / per_sector;
         uint32_t off = (index % per_sector) * FS_DIRENT_SIZE;
-        if (!sector_read(lba)) return false;
-        for (int i = 0; i < FS_DIRENT_SIZE; i++) out[i] = sec[off + i];
+        const uint8_t *p = dir_sector(lba);
+        if (!p) return false;
+        for (int i = 0; i < FS_DIRENT_SIZE; i++) out[i] = p[off + i];
         return true;
     }
+
+    if (dir->cluster == 0) return false;
 
     uint32_t per_cluster = per_sector * fs.sectors_per_cluster;
     uint32_t cl_index = index / per_cluster;
@@ -179,8 +199,9 @@ static bool dirent_raw(const fs_node_t *dir, uint32_t index, uint8_t *out) {
 
     lba = cluster_lba(cluster) + within / per_sector;
     uint32_t off = (within % per_sector) * FS_DIRENT_SIZE;
-    if (!sector_read(lba)) return false;
-    for (int i = 0; i < FS_DIRENT_SIZE; i++) out[i] = sec[off + i];
+    const uint8_t *p = dir_sector(lba);
+    if (!p) return false;
+    for (int i = 0; i < FS_DIRENT_SIZE; i++) out[i] = p[off + i];
     return true;
 }
 
@@ -209,6 +230,7 @@ static bool parse_dirent(const uint8_t *e, fs_node_t *out) {
     out->is_dir = (attr & FS_ATTR_DIRECTORY) != 0;
     out->cluster = (uint32_t)rd16(e + 26) | ((uint32_t)rd16(e + 20) << 16);
     out->size = out->is_dir ? 0 : rd32(e + 28);
+    out->is_root = false;
 
     if (!out->is_dir && (out->cluster < FS_FIRST_CLUSTER || out->cluster >= FS_BAD_CLUSTER)) out->cluster = 0;
     return true;
@@ -248,6 +270,7 @@ static bool root_node(fs_node_t *out) {
     out->cluster = 0;
     out->size = 0;
     out->is_dir = true;
+    out->is_root = true;
     return true;
 }
 

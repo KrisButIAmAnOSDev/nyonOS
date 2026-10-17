@@ -46,6 +46,7 @@ typedef struct {
     uint32_t cluster;
     uint32_t size;
     bool is_dir;
+    bool is_root;
 } fs_node_t;
 
 bool fs_mount(block_device_t *dev);

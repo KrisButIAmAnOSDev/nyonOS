@@ -95,10 +95,12 @@ void fd_table_clone(struct task *dst, struct task *src) {
             if (!d->heap) {
                 d->heap = kmalloc((size_t)(cap - FD_INLINE) * sizeof(struct fd_entry));
                 if (!d->heap) {
+                    for (uint32_t k = i; k < cap; k++) {
+                        if (s->heap[k - FD_INLINE].obj) kobject_put(s->heap[k - FD_INLINE].obj);
+                    }
+                    for (uint32_t k = FD_INLINE; k < cap; k++) mark_free(d, k);
                     d->capacity = FD_INLINE;
                     d->grown = false;
-                    for (uint32_t w = 0; w < 4; w++) d->freebits[w] = s->freebits[w];
-                    for (uint32_t k = 0; k < FD_INLINE; k++) d->inl[k] = tmp;
                     return;
                 }
             }
@@ -364,18 +366,16 @@ int fd_slot_in_use(struct task *t, int idx) {
 }
 
 int fd_dup2(struct task *t, int oldfd, int newfd, uint32_t flags) {
-    if (oldfd == newfd) return newfd;
-
     preempt_disable();
 
     struct fd_table *ft = &t->fds;
     uint32_t oidx = (uint32_t)oldfd & FD_INDEX_MASK;
     uint8_t ogen = (uint8_t)(((uint32_t)oldfd >> FD_GEN_SHIFT) & FD_GEN_MASK);
     uint32_t nidx = (uint32_t)newfd & FD_INDEX_MASK;
+    uint8_t ngen = (uint8_t)(((uint32_t)newfd >> FD_GEN_SHIFT) & FD_GEN_MASK);
 
     struct kobject *o = NULL;
     uint16_t old_rights = 0;
-    uint8_t old_gen = 0;
     bool found = false;
 
     if (oldfd >= 0 && oidx < ft->capacity) {
@@ -383,7 +383,6 @@ int fd_dup2(struct task *t, int oldfd, int newfd, uint32_t flags) {
         if (e->obj && e->generation == ogen) {
             o = e->obj;
             old_rights = e->rights;
-            old_gen = e->generation;
             found = true;
         }
     }
@@ -391,6 +390,11 @@ int fd_dup2(struct task *t, int oldfd, int newfd, uint32_t flags) {
     if (!found || newfd < 0 || newfd >= FD_MAX_TOTAL) {
         preempt_enable();
         return FD_EBADF;
+    }
+
+    if (oidx == nidx && ogen == ngen) {
+        preempt_enable();
+        return newfd;
     }
 
     if (newfd >= (int)ft->capacity && !fd_grow(ft)) {
@@ -414,10 +418,11 @@ int fd_dup2(struct task *t, int oldfd, int newfd, uint32_t flags) {
     target->obj = o;
     target->rights = old_rights;
     target->flags = (uint16_t)(flags | FD_FLAG_CLOEXEC);
-    target->generation = old_gen;
+
+    uint32_t ret = nidx | ((uint32_t)target->generation << FD_GEN_SHIFT);
 
     preempt_enable();
-    return newfd;
+    return (int)ret;
 }
 
 int fd_dup_min(struct task *t, int oldfd, uint32_t min) {
@@ -481,7 +486,7 @@ int64_t fd_read(struct task *t, int fd, void *ubuf, uint32_t len) {
 
     struct file *f = (struct file *)o;
     int64_t r = o->ops->read_at(o, ubuf, len, f->pos);
-    if (r > 0) f->pos += (uint64_t)r;
+    if (r > 0) __atomic_fetch_add(&f->pos, (uint64_t)r, __ATOMIC_RELAXED);
 
     kobject_put(o);
     return r;
@@ -721,9 +726,13 @@ int fd_open(struct task *t, const char *path, uint32_t oflags) {
     if (node.is_dir && !(oflags & FD_OPEN_DIR)) return FD_EISDIR;
 
     uint32_t rights = 0;
-    if (node.is_dir) rights |= FD_RIGHT_GETDENT;
-    else if ((oflags & FD_OPEN_MODE) != FD_OPEN_READ) rights |= FD_RIGHT_WRITE;
-    else rights |= FD_RIGHT_READ;
+    uint32_t omode = oflags & FD_OPEN_MODE;
+    if (node.is_dir) {
+        rights |= FD_RIGHT_GETDENT;
+    } else {
+        if (omode != FD_OPEN_WRITE) rights |= FD_RIGHT_READ;
+        if (omode != FD_OPEN_READ) rights |= FD_RIGHT_WRITE;
+    }
     rights |= FD_RIGHT_DUP;
 
     struct file *f = kmalloc(sizeof(struct file));

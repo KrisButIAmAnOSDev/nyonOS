@@ -15,7 +15,8 @@
 #define TASK_RFLAGS_IF 0x202
 #define TASK_USER_STACK_PAGES 1
 #define TASK_USER_STACK_VIRT 0x0000000040000000ULL
-#define TASK_VFORK_STACK_VIRT 0x0000000030000000ULL
+#define TASK_VFORK_STACK_LO  0x0000000020000000ULL
+#define TASK_VFORK_STACK_HI  0x0000000040000000ULL
 #define TASK_USER_CODE_VIRT  0x0000000000400000ULL
 
 struct task {
@@ -37,6 +38,7 @@ struct task {
     bool blocked;
     bool expect_fault;
     bool debug_log;
+    bool copy_active;
     uint32_t pid;
     uint32_t parent_pid;
     uint32_t vfork_child;
@@ -54,7 +56,7 @@ struct task *task_spawn(const char *name, void (*entry)(void));
 struct task *task_spawn_ring3(const char *name, paddr_t code_phys, size_t code_pages, vaddr_t code_virt, vaddr_t entry_rip, paddr_t shared_phys, vaddr_t shared_virt);
 struct vmspace;
 struct task *task_spawn_thread(struct task *parent, const char *name, vaddr_t entry_rip, vaddr_t user_rsp, uint64_t fs_base);
-struct task *task_spawn_fork(struct task *parent, const char *name, uint64_t entry_rip, uint64_t user_rsp, uint64_t fs_base, bool share_vm, bool clone_fds, uint32_t *tid_out);
+struct task *task_spawn_fork(struct task *parent, const char *name, struct isr_frame *src, uint64_t fs_base, bool share_vm, bool clone_fds, uint32_t *tid_out);
 struct task *task_spawn_vmspace(const char *name, struct vmspace *vs, vaddr_t entry_rip, vaddr_t user_rsp);
 struct task *task_spawn_ring3_lent(const char *name, paddr_t code_phys, size_t code_pages, vaddr_t code_virt, vaddr_t entry_rip, paddr_t shared_phys, vaddr_t shared_virt);
 void task_schedule(struct isr_frame *frame);

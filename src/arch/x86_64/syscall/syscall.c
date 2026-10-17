@@ -57,12 +57,10 @@ static int64_t fork_common(bool share_vm, bool block_parent, uintptr_t tid_out) 
     if (!t->vs) return SYS_EINVAL;
     if (!user_valid_range((void *)tid_out, sizeof(uint32_t))) return SYS_EFAULT;
 
-    uint64_t entry = current_frame ? (uint64_t)current_frame->rip : 0;
-    uint64_t sp = current_frame ? (uint64_t)current_frame->rsp : 0;
     uint32_t child_pid = 0;
 
-    struct task *child = task_spawn_fork(t, "fork", entry, sp, t->fs_base,
-                                          share_vm, share_vm, &child_pid);
+    struct task *child = task_spawn_fork(t, "fork", current_frame, t->fs_base,
+                                          share_vm, true, &child_pid);
     if (!child) return SYS_ENOMEM;
 
     uint32_t out = child_pid;
@@ -93,9 +91,8 @@ static int64_t sys_clone(uint64_t flags, uint64_t stack, uintptr_t tid_out, uint
 
     if (flags & ABI_CLONE_THREAD) {
         if (!stack) return SYS_EINVAL;
-        uint64_t entry = current_frame ? (uint64_t)current_frame->rip : 0;
         uint32_t child_pid = 0;
-        struct task *child = task_spawn_fork(t, "clone", entry, stack,
+        struct task *child = task_spawn_fork(t, "clone", current_frame,
                                               (flags & ABI_CLONE_SETTLS) ? tcb : t->fs_base,
                                               true, true, &child_pid);
         if (!child) return SYS_ENOMEM;
