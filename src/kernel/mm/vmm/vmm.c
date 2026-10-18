@@ -290,14 +290,21 @@ static bool share_user_level(struct page_table *src, struct page_table *dst,
             }
 
             se = (e & ~PAGE_WRITE) | PAGE_COW;
-            src->entries[i] = se;
-            invlpg(v);
             nf = (se & (PAGE_PRESENT | PAGE_USER | PAGE_WRITE |
                         PAGE_PWT | PAGE_PCD | PAGE_NX)) | PAGE_COW;
-            if (owned) pmm_share_ref(phys);
-
+            bool was_shared = (e & PAGE_SHAREDREF) != 0;
+            if (owned) {
+                se |= PAGE_SHAREDREF;
+                nf |= PAGE_SHAREDREF;
+            }
+            src->entries[i] = se;
+            invlpg(v);
             if (!vmm_map_frames(dst, v, phys, 1, nf, !(se & PAGE_NX), false))
                 return false;
+            if (owned) {
+                if (!was_shared) pmm_share_ref(phys);
+                pmm_share_ref(phys);
+            }
             (*shared)++;
         } else {
             struct page_table *child =
@@ -372,15 +379,16 @@ bool vmm_cow_resolve(struct page_table *root, vaddr_t vaddr) {
         const uint8_t *src = (const uint8_t *)(vmm_hhdm_offset + old);
         uint8_t *dst = (uint8_t *)(vmm_hhdm_offset + np);
         for (size_t i = 0; i < PAGE_SIZE; i++) dst[i] = src[i];
+    }
 
-        if (!pmm_unshare_ref(old)) {
-            pmm_free(old, 1);
-        }
+    if (*entry & PAGE_SHAREDREF) {
+        if (pmm_unshare_ref(old)) pmm_free(old, 1);
     }
 
     uint64_t nf = *entry & (PAGE_PRESENT | PAGE_USER | PAGE_PWT |
                              PAGE_PCD | PAGE_NX);
     nf |= PAGE_WRITE;
+    nf &= ~(PAGE_COW | PAGE_SHAREDREF);
     if (owned) nf |= PAGE_OWNED;
     *entry = nf | np;
     invlpg(vaddr);
@@ -595,7 +603,7 @@ static void release_shared_frames(struct page_table *table, int level) {
         if (!(entry & PAGE_PRESENT)) continue;
 
         if (level == 1) {
-            if ((entry & PAGE_COW) && (entry & PAGE_OWNED)) {
+            if (entry & PAGE_SHAREDREF) {
                 if (pmm_unshare_ref(entry & VMM_PT_ADDR_MASK))
                     pmm_free(entry & VMM_PT_ADDR_MASK, 1);
             }

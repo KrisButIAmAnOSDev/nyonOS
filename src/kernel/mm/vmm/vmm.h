@@ -20,6 +20,7 @@
 #define PAGE_OWNED      (1ULL << 9)
 #define PAGE_COW        (1ULL << 10)
 #define PAGE_PINNED     (1ULL << 11)
+#define PAGE_SHAREDREF  (1ULL << 52)
 
 extern uint64_t vmm_hhdm_offset;
 #define VMM_HIGHER_HALF 0xFFFF800000000000
