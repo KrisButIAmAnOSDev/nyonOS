@@ -5,6 +5,7 @@
 #define SYS_EINVAL (-22)
 
 #define WNOHANG ABI_WNOHANG
+#define SYS_COW_CTL 32
 
 static volatile ulong *res = (volatile ulong *)RES_VIRT;
 static int idx;
@@ -33,6 +34,25 @@ static void ck_true(int v) {
 }
 
 static ulong marker;
+
+static void run_cow_case(int enable) {
+	int prev = sys_cow_ctl(enable);
+	const char *tag = enable ? "cow on" : "cow off";
+
+	uint32_t cp = 0;
+	marker = 0x5A5A;
+
+	if (sys_fork((uint32_t *)&cp) == 0) {
+		marker = 0xfeedfacecafe0000UL;
+		sys_exit(77);
+	}
+
+	int st = 0;
+	ck(sys_waitpid((int32_t)cp, (uintptr_t)&st, 0), (slong)cp);
+	ck(st, 77 << 8);
+	ck((slong)marker, 0x5A5A);
+	(void)prev;
+}
 
 static void child_touch_and_exit(int code) {
     marker = 0xfeedfacecafe0000UL;
@@ -119,6 +139,8 @@ int main(int argc, char **argv) {
     status = 0;
     ck(sys_waitpid((int32_t)cpid, (uintptr_t)&status, 0), (slong)cpid);
     ck(status, 33 << 8);
+
+    run_cow_case(0);
 
     ck(sys_waitpid(-1, 0, WNOHANG), SYS_ECHILD);
     ck(sys_waitpid(123456, 0, WNOHANG), SYS_ECHILD);

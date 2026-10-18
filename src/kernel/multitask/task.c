@@ -48,7 +48,7 @@ static void task_kstack_update(void) {
 
 static struct page_table *loaded_pml4;
 
-static void task_aspace_update(void) {
+void task_aspace_update(void) {
     struct page_table *pml4 = tasks[current_slot].pml4;
     if (!pml4) pml4 = kernel_pml4;
     if (pml4 != loaded_pml4) {
@@ -110,6 +110,7 @@ static void task_release(struct task *t) {
     t->exit_code = 0;
     t->fs_base = 0;
     t->copy_active = false;
+    for (size_t i = 0; i < TASK_FXSAVE_BYTES; i++) t->fxsave[i] = 0;
 }
 
 static void task_reap_zombies(void) {
@@ -120,7 +121,21 @@ static void task_reap_zombies(void) {
     }
 }
 
+static void task_kstack_zero(paddr_t phys) {
+    uint8_t *ks = (uint8_t *)(vmm_hhdm_offset + phys);
+    for (size_t z = 0; z < TASK_STACK_PAGES * PAGE_SIZE; z++) ks[z] = 0;
+}
+
+static inline void task_fpu_save(void) {
+    __asm__ volatile("fxsave %0" : "=m"(tasks[current_slot].fxsave));
+}
+
+static inline void task_fpu_load(void) {
+    __asm__ volatile("fxrstor %0" : : "m"(tasks[current_slot].fxsave));
+}
+
 static void task_resume(struct isr_frame *frame) {
+    task_fpu_load();
     task_resume_asm(frame);
     for (;;) __asm__ volatile("hlt");
 }
@@ -144,6 +159,7 @@ void task_init(void) {
         tasks[i].user_code_pages = 0;
         tasks[i].pml4 = NULL;
         tasks[i].exit_code = 0;
+        for (size_t j = 0; j < TASK_FXSAVE_BYTES; j++) tasks[i].fxsave[j] = 0;
         tasks[i].blocked = false;
         tasks[i].wait_chan = NULL;
         tasks[i].wake_tick = 0;
@@ -255,12 +271,14 @@ static struct task *spawn_ring3(const char *name, paddr_t code_phys, size_t code
         lock_release(LOCK_SCHED, &sched_lock);
         return NULL;
     }
+    task_kstack_zero(kphys);
     if (!pmm_alloc(&uphys, TASK_USER_STACK_PAGES)) {
         pmm_free(kphys, TASK_STACK_PAGES);
         vmm_destroy_address_space(pml4);
         lock_release(LOCK_SCHED, &sched_lock);
         return NULL;
     }
+
 
     if (!vmm_map_user_exec(pml4, code_virt, code_phys, code_pages, VMM_USER_EXEC_FLAGS)) {
         pmm_free(kphys, TASK_STACK_PAGES);
@@ -356,6 +374,7 @@ struct task *task_spawn_thread(struct task *parent, const char *name,
 
     paddr_t kphys;
     if (!pmm_alloc(&kphys, TASK_STACK_PAGES)) { lock_release(LOCK_SCHED, &sched_lock); return NULL; }
+    task_kstack_zero(kphys);
 
     struct task *t = &tasks[slot];
     t->parent_pid = parent->pid;
@@ -429,8 +448,12 @@ struct task *task_spawn_fork(struct task *parent, const char *name,
         lock_release(LOCK_SCHED, &sched_lock);
         return NULL;
     }
+    task_kstack_zero(kphys);
 
     if (share_vm) vs->refcount++;
+
+    if (share_vm && vmm_cow_enabled()) vmm_cow_privatise(vs->pml4);
+
 
     struct page_table *pml4;
     if (share_vm) {
@@ -443,7 +466,15 @@ struct task *task_spawn_fork(struct task *parent, const char *name,
             return NULL;
         }
         size_t copied = 0;
-        if (!vmm_clone_user_space(vs->pml4, pml4, &copied)) {
+        bool ok = vmm_cow_enabled()
+                      ? vmm_share_user_space(vs->pml4, pml4, &copied)
+                      : vmm_clone_user_space(vs->pml4, pml4, &copied);
+        if (ok && vmm_cow_enabled() && user_rsp) {
+            vaddr_t sp_page = user_rsp & ~(vaddr_t)(PAGE_SIZE - 1);
+            vmm_cow_resolve(vs->pml4, sp_page);
+            vmm_cow_resolve(vs->pml4, sp_page - PAGE_SIZE);
+        }
+        if (!ok) {
             vmm_destroy_address_space(pml4);
             pmm_free(kphys, TASK_STACK_PAGES);
             lock_release(LOCK_SCHED, &sched_lock);
@@ -492,11 +523,16 @@ struct task *task_spawn_fork(struct task *parent, const char *name,
             pmm_alloc(&cstack, spages) &&
             vm_find_free(vs, TASK_VFORK_STACK_LO, TASK_VFORK_STACK_HI,
                          spages * PAGE_SIZE, &cbase)) {
-            const uint8_t *src =
-                (const uint8_t *)(vmm_hhdm_offset + (spte & 0x000FFFFFFFFFF000ULL));
             uint8_t *dst = (uint8_t *)(vmm_hhdm_offset + cstack);
-            for (size_t i = 0; i < spages * PAGE_SIZE; i++)
-                dst[i] = src[i];
+            for (size_t i = 0; i < spages; i++) {
+                uint64_t page = (i == 0) ? spte
+                                         : vmm_query_in(vs->pml4, sbase + i * PAGE_SIZE);
+                if (!(page & PAGE_PRESENT)) continue;
+                const uint8_t *src = (const uint8_t *)(vmm_hhdm_offset +
+                                                       (page & 0x000FFFFFFFFFF000ULL));
+                uint8_t *out = dst + i * PAGE_SIZE;
+                for (size_t k = 0; k < PAGE_SIZE; k++) out[k] = src[k];
+            }
 
             if (vmm_map_frames(vs->pml4, cbase, cstack, spages,
                                PAGE_PRESENT | PAGE_WRITE | PAGE_USER, false, true) &&
@@ -600,12 +636,19 @@ int task_wait_child(struct task *parent, int32_t want, int32_t *status_out, int3
 
         if (slot) {
             int32_t pid = (int32_t)tasks[slot].pid;
+            int32_t st = (code & 0xFF) << 8;
+            lock_release(LOCK_SCHED, &sched_lock);
+
+            if (status_out && !copyout((void *)status_out, &st, sizeof(st))) {
+                lock_acquire(LOCK_SCHED, &sched_lock);
+                task_release(&tasks[slot]);
+                lock_release(LOCK_SCHED, &sched_lock);
+                return SYS_EFAULT;
+            }
+
+            lock_acquire(LOCK_SCHED, &sched_lock);
             task_release(&tasks[slot]);
             lock_release(LOCK_SCHED, &sched_lock);
-            if (status_out) {
-                int32_t st = (code & 0x7f) << 8;
-                if (!copyout((void *)status_out, &st, sizeof(st))) return SYS_EFAULT;
-            }
             return pid;
         }
 
@@ -637,6 +680,7 @@ struct task *task_spawn_vmspace(const char *name, struct vmspace *vs, vaddr_t en
 
     paddr_t kphys;
     if (!pmm_alloc(&kphys, TASK_STACK_PAGES)) { lock_release(LOCK_SCHED, &sched_lock); return NULL; }
+    task_kstack_zero(kphys);
 
     struct task *t = &tasks[slot];
     t->parent_pid = 0;
@@ -713,6 +757,8 @@ static void task_switch_to(struct isr_frame *frame, bool force_away) {
 
     lock_acquire(LOCK_SCHED, &sched_lock);
 
+    task_fpu_save();
+
     tasks[current_slot].frame = frame;
 
     task_reap_zombies();
@@ -784,6 +830,13 @@ void task_exit_code(uint64_t code) {
             __atomic_store_n(&tasks[i].blocked, false, __ATOMIC_RELEASE);
         }
     }
+
+    for (size_t i = 1; i < TASK_MAX; i++) {
+        if (tasks[i].parent_pid == self->pid)
+            tasks[i].parent_pid = 0;
+    }
+
+    task_fpu_save();
 
     self->in_use = false;
     self->blocked = false;

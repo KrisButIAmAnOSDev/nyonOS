@@ -19,6 +19,8 @@
 #define TASK_VFORK_STACK_HI  0x0000000040000000ULL
 #define TASK_USER_CODE_VIRT  0x0000000000400000ULL
 
+#define TASK_FXSAVE_BYTES 512
+
 struct task {
     struct isr_frame *frame;
     vaddr_t stack_base;
@@ -39,6 +41,7 @@ struct task {
     bool expect_fault;
     bool debug_log;
     bool copy_active;
+    uint8_t fxsave[TASK_FXSAVE_BYTES] __attribute__((aligned(16)));
     uint32_t pid;
     uint32_t parent_pid;
     uint32_t vfork_child;
@@ -78,6 +81,7 @@ struct task *task_current(void);
 struct task *task_find_pid(uint32_t pid);
 struct task *task_find_zombie(uint32_t pid);
 struct page_table *task_current_pml4(void);
+void task_aspace_update(void);
 uint64_t task_switch_count(void);
 
 #endif

@@ -1,5 +1,6 @@
 MLIBC_CC = $(NYONOS_MLIBC_CC)
 MLIBC_LD = $(NYONOS_MLIBC_LD)
+MLIBC_LIBC ?= /home/quan/kawkaw/nyonos-toolchain/sysroot/usr/lib/libc.a
 
 USER_CC = gcc
 USER_CFLAGS = -Wall -Wextra -std=gnu11 -ffreestanding -fno-stack-protector -fno-stack-check \
@@ -10,7 +11,7 @@ USER_LDFLAGS = -nostdlib -static-pie -pie -z noexecstack -T user.ld
 BINS = bin/hello bin/fdtest bin/mmtest bin/forktest
 
 ifneq ($(NYONOS_MLIBC_CC),)
-BINS += bin/mhello bin/sdtest bin/thrtest bin/clktest bin/proctest bin/featest bin/mandel
+BINS += bin/mhello bin/sdtest bin/thrtest bin/clktest bin/proctest bin/featest bin/mandel bin/exectest
 endif
 
 -include $(BINS:=.o)
@@ -25,27 +26,31 @@ bin/mhello: mlibc_hello.c $(MLIBC_LD)
 	mkdir -p "$(dir $@)"
 	$(MLIBC_CC) -static -T$(MLIBC_LD) -z max-page-size=0x1000 -s $< -o $@
 
-bin/sdtest: sdtest.c $(MLIBC_LD)
+bin/sdtest: sdtest.c $(MLIBC_LD) $(MLIBC_LIBC)
 	mkdir -p "$(dir $@)"
 	$(MLIBC_CC) -static -T$(MLIBC_LD) -z max-page-size=0x1000 -s $< -o $@
 
-bin/thrtest: thrtest.c $(MLIBC_LD)
+bin/thrtest: thrtest.c $(MLIBC_LD) $(MLIBC_LIBC)
 	mkdir -p "$(dir $@)"
 	$(MLIBC_CC) -static -T$(MLIBC_LD) -z max-page-size=0x1000 -s $< -o $@
 
-bin/clktest: clktest.c $(MLIBC_LD)
+bin/clktest: clktest.c $(MLIBC_LD) $(MLIBC_LIBC)
 	mkdir -p "$(dir $@)"
 	$(MLIBC_CC) -static -T$(MLIBC_LD) -z max-page-size=0x1000 -s $< -o $@
 
-bin/proctest: proctest.c $(MLIBC_LD)
+bin/proctest: proctest.c $(MLIBC_LD) $(MLIBC_LIBC)
 	mkdir -p "$(dir $@)"
 	$(MLIBC_CC) -static -T$(MLIBC_LD) -z max-page-size=0x1000 -s $< -o $@
 
-bin/featest: featest.c $(MLIBC_LD)
+bin/featest: featest.c $(MLIBC_LD) $(MLIBC_LIBC)
 	mkdir -p "$(dir $@)"
 	$(MLIBC_CC) -static -T$(MLIBC_LD) -z max-page-size=0x1000 -s $< -o $@
 
-bin/mandel: mandel.c $(MLIBC_LD)
+bin/mandel: mandel.c $(MLIBC_LD) $(MLIBC_LIBC)
+	mkdir -p "$(dir $@)"
+	$(MLIBC_CC) -static -T$(MLIBC_LD) -z max-page-size=0x1000 -s $< -o $@
+
+bin/exectest: exectest.c $(MLIBC_LD) $(MLIBC_LIBC)
 	mkdir -p "$(dir $@)"
 	$(MLIBC_CC) -static -T$(MLIBC_LD) -z max-page-size=0x1000 -s $< -o $@
 

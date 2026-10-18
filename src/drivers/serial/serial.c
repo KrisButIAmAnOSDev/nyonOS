@@ -21,16 +21,24 @@ void serial_init(void) {
     outb(0x3F8 + 4, 0x0B);
 }
 
+static int serial_wait_tx(void) {
+    for (uint32_t spins = 0; spins < 100000u; spins++) {
+        if (inb(0x3FD) & 0x20) return 1;
+        __asm__ volatile("pause" ::: "memory");
+    }
+    return 0;
+}
+
 void serial_putchar(char c) {
 
     preempt_disable();
 
     if (c == '\n') {
-        while ((inb(0x3FD) & 0x20) == 0) {}
+        if (!serial_wait_tx()) return;
         outb(0x3F8, '\r');
     }
 
-    while ((inb(0x3FD) & 0x20) == 0) {}
+    if (!serial_wait_tx()) return;
     outb(0x3F8, (uint8_t)c);
 
     preempt_enable();

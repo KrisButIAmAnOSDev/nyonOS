@@ -122,6 +122,7 @@ static void reclaim_ancestors(struct page_table *table, vaddr_t vaddr, int level
 
 void vmm_init(uint64_t hhdm_offset) {
     vmm_hhdm_offset = hhdm_offset;
+    vmm_set_cow(true);
 
     bool cpu_supports_la57 = cpu_has_5level();
     bool paging_is_5level = (read_cr4() & CR4_LA57) != 0;
@@ -244,6 +245,145 @@ static bool clone_user_level(struct page_table *src, struct page_table *dst,
             if (!clone_user_level(child, dst, v, level - 1, copied)) return false;
         }
     }
+    return true;
+}
+
+static bool cow_on;
+static size_t cow_shared_total;
+
+size_t vmm_cow_shared(void) { return cow_shared_total; }
+
+bool vmm_cow_enabled(void) {
+    return cow_on;
+}
+
+bool vmm_set_cow(bool on) {
+    if (on && !pmm_share_ready()) return false;
+    cow_on = on;
+    return true;
+}
+
+static bool share_user_level(struct page_table *src, struct page_table *dst,
+                             vaddr_t base, int level, size_t *shared) {
+    for (size_t i = 0; i < VMM_PT_ENTRIES; i++) {
+        uint64_t e = src->entries[i];
+        if (!(e & PAGE_PRESENT)) continue;
+        if (!(e & PAGE_USER)) continue;
+
+        vaddr_t v = base + ((vaddr_t)i << (12 + 9 * (level - 1)));
+
+        if (level == 1) {
+            uint64_t phys = e & VMM_PT_ADDR_MASK;
+            bool owned = (e & PAGE_OWNED) != 0;
+
+            uint64_t se = e;
+            uint64_t nf = e & (PAGE_PRESENT | PAGE_USER | PAGE_WRITE |
+                               PAGE_PWT | PAGE_PCD | PAGE_NX);
+
+            if (e & PAGE_PINNED) {
+                nf = e & (PAGE_PRESENT | PAGE_USER | PAGE_WRITE |
+                          PAGE_PWT | PAGE_PCD | PAGE_NX);
+                if (!vmm_map_frames(dst, v, phys, 1, nf, !(e & PAGE_NX), false))
+                    return false;
+                (*shared)++;
+                continue;
+            }
+
+            se = (e & ~PAGE_WRITE) | PAGE_COW;
+            src->entries[i] = se;
+            invlpg(v);
+            nf = (se & (PAGE_PRESENT | PAGE_USER | PAGE_WRITE |
+                        PAGE_PWT | PAGE_PCD | PAGE_NX)) | PAGE_COW;
+            if (owned) pmm_share_ref(phys);
+
+            if (!vmm_map_frames(dst, v, phys, 1, nf, !(se & PAGE_NX), false))
+                return false;
+            (*shared)++;
+        } else {
+            struct page_table *child =
+                (struct page_table *)(vmm_hhdm_offset + (e & VMM_PT_ADDR_MASK));
+            if (!share_user_level(child, dst, v, level - 1, shared)) return false;
+        }
+    }
+    return true;
+}
+
+bool vmm_share_user_space(struct page_table *src, struct page_table *dst, size_t *shared) {
+    size_t n = 0;
+    int levels = vmm_5level ? 5 : 4;
+    bool ok = share_user_level(src, dst, 0, levels, &n);
+    cow_shared_total += n;
+    if (shared) *shared = n;
+    return ok;
+}
+
+static void cow_privatise_level(struct page_table *root, struct page_table *table,
+                               vaddr_t base, int level) {
+    for (size_t i = 0; i < VMM_PT_ENTRIES; i++) {
+        uint64_t e = table->entries[i];
+        if (!(e & PAGE_PRESENT)) continue;
+        if (!(e & PAGE_USER)) continue;
+
+        vaddr_t v = base + ((vaddr_t)i << (12 + 9 * (level - 1)));
+
+        if (level == 1) {
+            if ((e & PAGE_COW) && (e & PAGE_OWNED))
+                vmm_cow_resolve(root, v);
+            continue;
+        }
+
+        struct page_table *child =
+            (struct page_table *)(vmm_hhdm_offset + (e & VMM_PT_ADDR_MASK));
+        cow_privatise_level(root, child, v, level - 1);
+    }
+}
+
+bool vmm_pin(struct page_table *root, vaddr_t vaddr) {
+    if (!root) return false;
+    uint64_t *entry = walk_page_table(root, vaddr, vmm_5level ? 5 : 4, false, 0);
+    if (!entry || !(*entry & PAGE_PRESENT)) return false;
+    *entry |= PAGE_PINNED;
+    return true;
+}
+
+bool vmm_cow_privatise(struct page_table *root) {
+    if (!root || !cow_on) return false;
+    cow_privatise_level(root, root, 0, vmm_5level ? 5 : 4);
+    return true;
+}
+
+bool vmm_cow_resolve(struct page_table *root, vaddr_t vaddr) {
+    if (!root) return false;
+
+    int levels = vmm_5level ? 5 : 4;
+    uint64_t *entry = walk_page_table(root, vaddr, levels, false, 0);
+    if (!entry || !(*entry & PAGE_PRESENT)) return false;
+    if (!(*entry & PAGE_COW)) return false;
+    if (*entry & PAGE_PINNED) return false;
+    if (*entry & PAGE_WRITE) return false;
+
+    paddr_t old = *entry & VMM_PT_ADDR_MASK;
+    bool owned = (*entry & PAGE_OWNED) != 0;
+    paddr_t np = old;
+
+    if (owned) {
+        if (!pmm_alloc(&np, 1)) return false;
+
+        const uint8_t *src = (const uint8_t *)(vmm_hhdm_offset + old);
+        uint8_t *dst = (uint8_t *)(vmm_hhdm_offset + np);
+        for (size_t i = 0; i < PAGE_SIZE; i++) dst[i] = src[i];
+
+        if (!pmm_unshare_ref(old)) {
+            pmm_free(old, 1);
+        }
+    }
+
+    uint64_t nf = *entry & (PAGE_PRESENT | PAGE_USER | PAGE_PWT |
+                             PAGE_PCD | PAGE_NX);
+    nf |= PAGE_WRITE;
+    if (owned) nf |= PAGE_OWNED;
+    *entry = nf | np;
+    invlpg(vaddr);
     return true;
 }
 
@@ -424,12 +564,18 @@ void vmm_switch_address_space(struct page_table *pml4) {
     cpu_flush_pcid();
 }
 
+static void release_shared_frames(struct page_table *table, int level);
+
 static void reclaim_owned_frames(struct page_table *table, int level, uint32_t *freed) {
     for (size_t i = 0; i < VMM_PT_ENTRIES; i++) {
         uint64_t entry = table->entries[i];
         if (!(entry & PAGE_PRESENT)) continue;
 
         if (level == 1) {
+            if (entry & PAGE_COW) {
+                table->entries[i] = 0;
+                continue;
+            }
             if (entry & PAGE_OWNED) {
                 pmm_free(entry & VMM_PT_ADDR_MASK, 1);
                 (*freed)++;
@@ -440,6 +586,25 @@ static void reclaim_owned_frames(struct page_table *table, int level, uint32_t *
 
         struct page_table *child = (struct page_table *)(vmm_hhdm_offset + (entry & VMM_PT_ADDR_MASK));
         reclaim_owned_frames(child, level - 1, freed);
+    }
+}
+
+static void release_shared_frames(struct page_table *table, int level) {
+    for (size_t i = 0; i < VMM_PT_ENTRIES; i++) {
+        uint64_t entry = table->entries[i];
+        if (!(entry & PAGE_PRESENT)) continue;
+
+        if (level == 1) {
+            if ((entry & PAGE_COW) && (entry & PAGE_OWNED)) {
+                if (pmm_unshare_ref(entry & VMM_PT_ADDR_MASK))
+                    pmm_free(entry & VMM_PT_ADDR_MASK, 1);
+            }
+            continue;
+        }
+
+        struct page_table *child =
+            (struct page_table *)(vmm_hhdm_offset + (entry & VMM_PT_ADDR_MASK));
+        release_shared_frames(child, level - 1);
     }
 }
 
@@ -459,6 +624,7 @@ void vmm_destroy_address_space(struct page_table *pml4) {
 
         struct page_table *table = (struct page_table *)(vmm_hhdm_offset + (entry & VMM_PT_ADDR_MASK));
 
+        release_shared_frames(table, levels - 1);
         reclaim_owned_frames(table, levels - 1, &freed);
 
         if (!table_freeable(table, levels - 1)) {

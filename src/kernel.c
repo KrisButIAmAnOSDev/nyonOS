@@ -200,10 +200,10 @@ void kmain(void) {
 
     pic_remap(0x20, 0x28);
     pic_clear_mask(2);
+    idt_init();
     pit_init(1000);
     rtc_init();
     lapic_unmask_ext_int(lapic_virt);
-    idt_init();
     cpu_detect();
     cpu_enable_nx();
     cpu_enable_smep_smap();
@@ -307,11 +307,11 @@ void kmain(void) {
             extern uint8_t user_wait_entry[];
             wait_test(TASK_USER_CODE_VIRT + (size_t)(user_wait_entry - user_test_entry), code_bytes, code_pages);
         }
-
         {
             fd_test();
             mm_test();
             futex_pair_test();
+            exectest_run();
             mandel_run();
             featuretest_run();
             proctest_run();

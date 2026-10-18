@@ -154,13 +154,28 @@ static uint8_t seg_prot(uint32_t flags) {
     return p;
 }
 
+static int elf_load_core(const fs_node *file, struct elf_image *out, const char **err,
+                         const char **argv, size_t argc, const char **envp,
+                         size_t envc, const struct elf_shared *shared);
+
 int elf_load_argv(const fs_node *file, struct elf_image *out, const char **err,
                   const char **argv, size_t argc) {
     return elf_load_shared(file, out, err, argv, argc, NULL);
 }
 
+int elf_load_env(const fs_node *file, struct elf_image *out, const char **err,
+                 const char **argv, size_t argc, const char **envp, size_t envc) {
+    return elf_load_core(file, out, err, argv, argc, envp, envc, NULL);
+}
+
 int elf_load_shared(const fs_node *file, struct elf_image *out, const char **err,
                     const char **argv, size_t argc, const struct elf_shared *shared) {
+    return elf_load_core(file, out, err, argv, argc, NULL, 0, shared);
+}
+
+static int elf_load_core(const fs_node *file, struct elf_image *out, const char **err,
+                         const char **argv, size_t argc, const char **envp,
+                         size_t envc, const struct elf_shared *shared) {
     if (err) *err = NULL;
     if (!file || !out) return ELF_EOFFSET;
     if (file->is_dir) return ELF_EOFFSET;
@@ -400,8 +415,7 @@ int elf_load_shared(const fs_node *file, struct elf_image *out, const char **err
     }
 
     const char *empty_env[1] = { NULL };
-    const char **envp = empty_env;
-    size_t envc = 0;
+    if (!envp) envp = empty_env;
 
     if (!vm_stack_push_strings(vs, argv ? argv : empty_env, argv ? argc : 0,
                                envp, envc, aux, auxc,
@@ -416,7 +430,8 @@ int elf_load_shared(const fs_node *file, struct elf_image *out, const char **err
         if (vm_region_add(vs, shared->virt, shared->virt + shared->pages * PAGE_SIZE,
                           VM_PROT_READ | VM_PROT_WRITE, VM_BACKING_NONE) != 0 ||
             !vm_commit(vs, shared->virt, shared->phys, shared->pages,
-                       VM_PROT_READ | VM_PROT_WRITE, false)) {
+                       VM_PROT_READ | VM_PROT_WRITE, false) ||
+            !vmm_pin(vs->pml4, shared->virt)) {
             if (err) *err = "cannot map the shared page";
             kfree((void *)ph);
             vm_destroy(vs);

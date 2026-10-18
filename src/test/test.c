@@ -605,6 +605,37 @@ void mlibc_hello_test(void) {
 }
 
 
+void exectest_run(void) {
+    fs_node_t node;
+    if (!fs_lookup("/BIN/EXECTEST", &node) && !fs_lookup("/BIN/exectest", &node)) {
+        kprintf(PRINT_SERIAL, "EXEC: /BIN/exectest not found\n");
+        return;
+    }
+
+    struct elf_image img;
+    const char *err = NULL;
+    if (elf_load(&node, &img, &err)) {
+        kprintf(PRINT_SERIAL, "EXEC: load refused: %s\n", err ? err : "?");
+        return;
+    }
+
+    struct task *t = task_spawn_vmspace("exec", img.vs, img.entry, img.stack_top);
+    elf_destroy(&img);
+    if (!t) {
+        kprintf(PRINT_SERIAL, "EXEC: spawn failed\n");
+        return;
+    }
+
+    uint32_t pid = t->pid;
+    for (int i = 0; i < 6000 && task_find_pid(pid); i++) pit_sleep(5);
+    bool alive = task_find_pid(pid) != NULL;
+    task_reap_now();
+
+    kprintf(PRINT_SERIAL, "EXEC: program exited: ");
+    kprintchar(!alive ? 'Y' : 'N', PRINT_SERIAL);
+    kprintchar('\n', PRINT_SERIAL);
+}
+
 void mandel_run(void) {
     fs_node_t node;
     if (!fs_lookup("/BIN/MANDEL", &node) && !fs_lookup("/BIN/mandel", &node)) {
@@ -783,8 +814,9 @@ void forktest_run(void) {
 
     static const char *labels[C_MAX_CHECKS] = {
         "fork returns child pid", "fork pid_out matches", "fork child pid differs",
-        "fork parent marker untouched", "fork waitpid returns child",
-        "fork waitpid status carries code", "fork marker still untouched after wait",
+        "fork parent pid is its own", "fork parent marker untouched",
+        "fork waitpid returns child", "fork waitpid status carries code",
+        "fork marker still untouched after wait",
         "clone(0) returns child pid", "clone(0) pid_out matches",
         "clone(0) parent marker untouched", "clone(0) waitpid(-1) returns child",
         "clone(0) waitpid status carries code",
@@ -794,10 +826,13 @@ void forktest_run(void) {
         "clone(CLONE_VM) returns child pid", "clone(CLONE_VM) pid_out matches",
         "clone(CLONE_VM) child write is visible to parent",
         "clone(CLONE_VM) waitpid returns child", "clone(CLONE_VM) status carries code",
+        "cow off: waitpid returns child", "cow off: child exit status is 77",
+        "cow off: parent memory untouched",
         "waitpid(-1,WNOHANG) with no children is ECHILD",
         "waitpid(unknown pid,WNOHANG) is ECHILD",
         "waitpid(pid < -1) is EINVAL",
-        "fork(NULL) is EFAULT", "vfork(NULL) is EFAULT", "getpid still positive",
+        "fork(NULL) is EFAULT", "vfork(NULL) is EFAULT",
+        "getpid is positive",
     };
 
     int checks = 0;
@@ -817,6 +852,12 @@ void forktest_run(void) {
     kprintf(PRINT_SERIAL, "FORK ring3: %d of %d checks passed: ", checks, checks + bad);
     kprintchar(bad == 0 && checks > 0 ? 'Y' : 'N', PRINT_SERIAL);
     kprintchar('\n', PRINT_SERIAL);
+    size_t cow_pages = vmm_cow_shared();
+    kprintf(PRINT_SERIAL, "FORK ring3: COW on=%c shared %zu pages: ",
+            vmm_cow_enabled() ? 'Y' : 'N', cow_pages);
+    kprintchar((vmm_cow_enabled() && cow_pages > 0) ? 'Y' : 'N', PRINT_SERIAL);
+    kprintchar('\n', PRINT_SERIAL);
+
     kprintf(PRINT_SERIAL, "FORK ring3: test program exited: ");
     kprintchar(!alive ? 'Y' : 'N', PRINT_SERIAL);
     kprintchar('\n', PRINT_SERIAL);

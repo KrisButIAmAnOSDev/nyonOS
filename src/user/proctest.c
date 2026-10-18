@@ -43,14 +43,13 @@ int main(void) {
 	pid_t any = waitpid(-1, &status, WNOHANG);
 	ck(any < 0, "waitpid with no children fails");
 
-	struct timespec ts = { 0, 120 * 1000 * 1000 };
-	struct timespec rem;
-	clock_gettime(CLOCK_MONOTONIC, &ts);
-	if (nanosleep(&ts, &rem) == 0) {
-		struct timespec after;
+	struct timespec req = { 0, 120 * 1000 * 1000 };
+	struct timespec t0, after, rem;
+	clock_gettime(CLOCK_MONOTONIC, &t0);
+	if (nanosleep(&req, &rem) == 0) {
 		clock_gettime(CLOCK_MONOTONIC, &after);
-		long long ns = (after.tv_sec - ts.tv_sec) * 1000000000LL
-			     + (after.tv_nsec - ts.tv_nsec);
+		long long ns = (after.tv_sec - t0.tv_sec) * 1000000000LL
+			     + (after.tv_nsec - t0.tv_nsec);
 		ck(ns >= 100000000LL, "nanosleep slept at least 100ms");
 	} else {
 		failures++;

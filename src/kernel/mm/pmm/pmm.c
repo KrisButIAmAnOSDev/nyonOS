@@ -8,8 +8,10 @@
 static spinlock_t pmm_lock = SPINLOCK_INIT;
 
 static uint64_t *pmm_bitmap = NULL;
+static uint8_t *pmm_share = NULL;
 static size_t bitmap_pages = 0;
 static size_t total_pages = 0;
+static size_t usable_pages = 0;
 static size_t free_pages = 0;
 
 static uint64_t pmm_hhdm_offset = 0;
@@ -23,6 +25,29 @@ static void bitmap_set(size_t bit) {
 
 static void bitmap_clear(size_t bit) {
     pmm_bitmap[bit / 64] &= ~(1ULL << (bit % 64));
+}
+
+void pmm_share_ref(paddr_t addr) {
+    if (addr & (PAGE_SIZE - 1)) return;
+    size_t page = addr / PAGE_SIZE;
+    if (page >= total_pages) return;
+    lock_acquire(LOCK_PMM, &pmm_lock);
+    if (pmm_share[page] != 0xFF) pmm_share[page]++;
+    lock_release(LOCK_PMM, &pmm_lock);
+}
+
+bool pmm_unshare_ref(paddr_t addr) {
+    if (addr & (PAGE_SIZE - 1)) return false;
+    size_t page = addr / PAGE_SIZE;
+    if (page >= total_pages) return false;
+    lock_acquire(LOCK_PMM, &pmm_lock);
+    if (pmm_share[page] == 0) {
+        lock_release(LOCK_PMM, &pmm_lock);
+        return false;
+    }
+    bool last = (--pmm_share[page] == 0);
+    lock_release(LOCK_PMM, &pmm_lock);
+    return last;
 }
 
 static bool bitmap_test(size_t bit) {
@@ -70,12 +95,24 @@ void pmm_init(struct limine_memmap_response *memmap, uint64_t hhdm_offset) {
         if (entry->type == LIMINE_MEMMAP_USABLE) {
             paddr_t end = entry->base + entry->length;
             if (end > max_addr) max_addr = end;
+            usable_pages += (entry->length + PAGE_SIZE - 1) / PAGE_SIZE;
         }
     }
 
     total_pages = (max_addr + PAGE_SIZE - 1) / PAGE_SIZE;
     bitmap_pages = (total_pages + 63) / 64;
     size_t bitmap_size = bitmap_pages * 8;
+
+    paddr_t share_phys = 0;
+    for (size_t i = 0; i < memmap->entry_count; i++) {
+        struct limine_memmap_entry *entry = memmap->entries[i];
+        if (entry->type == LIMINE_MEMMAP_USABLE && entry->length >= total_pages) {
+            share_phys = entry->base;
+            entry->base += total_pages;
+            entry->length -= total_pages;
+            break;
+        }
+    }
 
     paddr_t bitmap_phys = 0;
     for (size_t i = 0; i < memmap->entry_count; i++) {
@@ -94,6 +131,10 @@ void pmm_init(struct limine_memmap_response *memmap, uint64_t hhdm_offset) {
     }
 
     pmm_bitmap = (uint64_t *)(pmm_hhdm_offset + bitmap_phys);
+    if (share_phys) {
+        pmm_share = (uint8_t *)(pmm_hhdm_offset + share_phys);
+        for (size_t i = 0; i < total_pages; i++) pmm_share[i] = 0;
+    }
 
     for (size_t i = 0; i < bitmap_pages; i++) {
         pmm_bitmap[i] = ~0ULL;
@@ -217,4 +258,6 @@ void pmm_free(paddr_t addr, size_t pages) {
 }
 
 size_t pmm_total_pages(void) { return total_pages; }
+
+bool pmm_share_ready(void) { return pmm_share != NULL; }
 size_t pmm_free_pages(void) { return free_pages; }

@@ -5,14 +5,18 @@
 #include <math.h>
 #include <ctype.h>
 #include <errno.h>
+#include <errno.h>
 #include <time.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <sys/uio.h>
+#include <sys/stat.h>
 #include <limits.h>
 #include <stdint.h>
 #include <stdarg.h>
 #include <inttypes.h>
 #include <pthread.h>
+#include <sched.h>
 #include <sys/wait.h>
 
 static int ok_count;
@@ -36,6 +40,15 @@ static int cmp_int(const void *a, const void *b) {
 static void *worker(void *arg) {
 	*(int *)arg += 41;
 	return arg;
+}
+
+static void rep_check(int cond, const char *what) {
+	if (cond) {
+		ok_count++;
+	} else {
+		bad_count++;
+		printf("    FAIL %s\n", what);
+	}
 }
 
 static void t_math(void) {
@@ -96,6 +109,75 @@ static void t_time(void) {
 	                                  clock_gettime(CLOCK_MONOTONIC, &ts) == 0 && ts.tv_sec > 0; }));
 }
 
+static void t_tier2(void) {
+	unsigned char ent[64];
+	memset(ent, 0, sizeof ent);
+	int ge = getentropy(ent, sizeof ent);
+	int nonzero = 0, distinct = 0;
+	for (size_t i = 0; i < sizeof ent; i++) if (ent[i]) nonzero++;
+	unsigned char ent2[64];
+	getentropy(ent2, sizeof ent2);
+	for (size_t i = 0; i < sizeof ent; i++) if (ent[i] != ent2[i]) distinct++;
+	rep_check(ge == 0 && nonzero > 0 && distinct > 0, "getentropy");
+
+	int acc = access("/TEST.TXT", F_OK);
+	printf("    access(/TEST.TXT,F_OK)=%d errno=%d\n", acc, errno);
+	rep_check(acc == 0, "access F_OK on an existing file");
+	rep_check(access("/NOPE.TXT", F_OK) != 0, "access F_OK on a missing file");
+
+	long sc = sysconf(_SC_PAGESIZE);
+	rep_check(sc == 4096, "sysconf _SC_PAGESIZE");
+	rep_check(sysconf(_SC_NPROCESSORS_ONLN) >= 1, "sysconf nproc");
+
+	mode_t old = umask(022);
+	rep_check(old == 0, "umask returns the previous mask");
+	rep_check(umask(old) == 022, "umask round-trips");
+
+	const char *a = "hello ", *b = "vectored";
+	struct iovec iov[2] = { { (void *)a, 6 }, { (void *)b, 8 } };
+	rep_check(writev(1, iov, 2) == 14, "writev");
+
+}
+
+static volatile int fpu_bad;
+
+static void *fpu_worker(void *arg) {
+	double mine = *(double *)arg;
+	double keep = mine;
+
+	__asm__ volatile("movsd %0, %%xmm3" :: "m"(keep) : "xmm3");
+
+	for (int i = 0; i < 400; i++) {
+		__asm__ volatile("" ::: "memory");
+		sched_yield();
+	}
+
+	double back;
+	__asm__ volatile("movsd %%xmm3, %0" : "=m"(back));
+	if (back != mine) fpu_bad = 1;
+	return 0;
+}
+
+static void t_fpu(void) {
+	double a = 1.5, b = -2734.125;
+	fpu_bad = 0;
+
+	pthread_t ta, tb;
+	if (pthread_create(&ta, NULL, fpu_worker, &a) != 0) {
+		rep("pthread_create for fpu a", 0);
+		return;
+	}
+	if (pthread_create(&tb, NULL, fpu_worker, &b) != 0) {
+		pthread_join(ta, NULL);
+		rep("pthread_create for fpu b", 0);
+		return;
+	}
+	pthread_join(ta, NULL);
+	pthread_join(tb, NULL);
+
+	rep("xmm registers survive context switches", fpu_bad == 0);
+}
+
 static void t_inttypes(void) {
 	char b[64];
 	snprintf(b, sizeof b, "%" PRId64 " %" PRIu32, (int64_t)-5, (uint32_t)7);
@@ -128,6 +210,8 @@ int main(void) {
 	t_stdio();
 	t_ctype();
 	t_time();
+	t_fpu();
+	t_tier2();
 	t_inttypes();
 	t_pthread();
 	t_proc();

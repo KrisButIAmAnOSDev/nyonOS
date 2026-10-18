@@ -1,8 +1,10 @@
+#include "kernel/mm/heap/heap.h"
+#include "kernel/mm/vmm/vmm.h"
+#include "kernel/exec/elf.h"
 #include "syscall.h"
 #include "kernel/kprintf/kprintf.h"
 #include "kernel/panic/panic.h"
 #include "kernel/uaccess/uaccess.h"
-#include "kernel/mm/vmm/vmm.h"
 #include "kernel/multitask/task.h"
 #include "kernel/sync/preempt.h"
 #include "kernel/fd/fd.h"
@@ -138,6 +140,148 @@ static int64_t sys_waitpid(int32_t pid, uintptr_t status, int32_t options) {
     if (pid == -1) want = 0;
 
     return (int64_t)task_wait_child(t, want, (int32_t *)status, options);
+}
+
+#define EXEC_MAX_ARGS 256
+#define EXEC_MAX_PATH 512
+
+static void exec_free_vec(char **vec) {
+    if (!vec) return;
+    for (size_t i = 0; vec[i]; i++) kfree(vec[i]);
+    kfree(vec);
+}
+
+static char **exec_copy_vec(uintptr_t user_vec, size_t *out_n) {
+    const char *empty[1] = { NULL };
+    *out_n = 0;
+
+    if (!user_vec) {
+        char **v = kmalloc(sizeof(char *));
+        if (!v) return NULL;
+        v[0] = NULL;
+        return v;
+    }
+
+    char **out = kmalloc(sizeof(char *) * (EXEC_MAX_ARGS + 1));
+    if (!out) return NULL;
+
+    size_t n = 0;
+    for (;;) {
+        uintptr_t up;
+        if (!copyin(&up, (const void *)(user_vec + n * sizeof(uintptr_t)), sizeof(up))) {
+            exec_free_vec(out);
+            return NULL;
+        }
+        if (!up) break;
+        if (n >= EXEC_MAX_ARGS) {
+            exec_free_vec(out);
+            return NULL;
+        }
+
+        size_t len = 0;
+        if (!copyinstr(NULL, (const char *)up, 0)) { }
+        char probe[2];
+        if (!copyin(probe, (const void *)up, 1)) {
+            exec_free_vec(out);
+            return NULL;
+        }
+        char *s = kmalloc(EXEC_MAX_PATH);
+        if (!s) {
+            exec_free_vec(out);
+            return NULL;
+        }
+        for (size_t i = 0; i + 1 < EXEC_MAX_PATH; i++) {
+            char c;
+            if (!copyin(&c, (const void *)(up + i), 1)) break;
+            s[i] = c;
+            if (!c) { s[i + 1] = 0; break; }
+            len = i + 1;
+        }
+        s[len] = 0;
+        out[n++] = s;
+    }
+
+    out[n] = NULL;
+    *out_n = n;
+    return out;
+}
+
+static int64_t sys_execve(uintptr_t path, uintptr_t uargv, uintptr_t uenvp) {
+    struct task *t = task_current();
+    struct isr_frame *frame = current_frame;
+
+    if (!t || !in_user()) return SYS_EINVAL;
+    if (!frame) return SYS_EFAULT;
+
+    char kpath[EXEC_MAX_PATH];
+    if (!copyinstr(kpath, (const char *)path, sizeof kpath)) return SYS_EFAULT;
+
+    size_t argc = 0, envc = 0;
+    char **argv = exec_copy_vec(uargv, &argc);
+    if (!argv) return SYS_EINVAL;
+    char **envp = exec_copy_vec(uenvp, &envc);
+    if (!envp) {
+        exec_free_vec(argv);
+        return SYS_EINVAL;
+    }
+
+    fs_node_t node;
+    if (!fs_lookup(kpath, &node)) {
+        exec_free_vec(argv);
+        exec_free_vec(envp);
+        return SYS_ENOENT;
+    }
+
+    struct elf_image img;
+    const char *err = NULL;
+    if (elf_load_env(&node, &img, &err, (const char **)argv, argc,
+                     (const char **)envp, envc)) {
+        exec_free_vec(argv);
+        exec_free_vec(envp);
+        return SYS_EINVAL;
+    }
+
+    exec_free_vec(argv);
+    exec_free_vec(envp);
+
+    struct vmspace *old_vs = t->vs;
+    struct page_table *old_pml4 = t->pml4;
+
+    t->vs = img.vs;
+    t->pml4 = img.vs->pml4;
+    t->user_stack_phys = 0;
+    t->user_stack_base = img.vs->stack_base;
+    t->user_stack_top = img.vs->stack_top;
+    t->user_code_phys = 0;
+    t->user_code_base = 0;
+    t->user_code_pages = 0;
+    t->fs_base = 0;
+    t->exit_code = 0;
+    t->zombie = false;
+    t->blocked = false;
+    t->wait_chan = NULL;
+
+    task_aspace_update();
+
+    if (old_vs && old_vs != img.vs) vm_destroy(old_vs);
+    if (old_pml4 && old_pml4 != img.vs->pml4) vmm_destroy_address_space(old_pml4);
+
+    frame->rip = img.entry;
+    frame->cs = 0x23;
+    frame->rflags = 0x202;
+    frame->rsp = img.stack_top;
+    frame->ss = 0x1b;
+    frame->rax = 0;
+
+    return 0;
+}
+
+static int64_t sys_cow_ctl(int32_t on) {
+    bool prev = vmm_cow_enabled();
+    if (on < 0) return (int64_t)(prev ? 1 : 0);
+    if (on && !vmm_set_cow(true)) return SYS_ENOSYS;
+    if (!on) vmm_set_cow(false);
+    return (int64_t)(prev ? 1 : 0);
 }
 
 static int64_t sys_yield(void) {

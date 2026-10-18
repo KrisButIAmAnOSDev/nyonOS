@@ -93,6 +93,8 @@ const char *elf_error_text(int err);
 
 int elf_load(const fs_node *file, struct elf_image *out, const char **err);
 int elf_load_argv(const fs_node *file, struct elf_image *out, const char **err, const char **argv, size_t argc);
+int elf_load_env(const fs_node *file, struct elf_image *out, const char **err,
+                 const char **argv, size_t argc, const char **envp, size_t envc);
 
 
 struct elf_shared {

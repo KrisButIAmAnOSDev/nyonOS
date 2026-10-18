@@ -18,6 +18,8 @@
 #define PAGE_GLOBAL     (1ULL << 8)
 #define PAGE_NX         (1ULL << 63)
 #define PAGE_OWNED      (1ULL << 9)
+#define PAGE_COW        (1ULL << 10)
+#define PAGE_PINNED     (1ULL << 11)
 
 extern uint64_t vmm_hhdm_offset;
 #define VMM_HIGHER_HALF 0xFFFF800000000000
@@ -53,6 +55,13 @@ bool vmm_unmap_keep_frames(struct page_table *root, vaddr_t vaddr, size_t pages,
 
 bool vmm_range_present_in(struct page_table *root, vaddr_t addr, size_t len);
 bool vmm_clone_user_space(struct page_table *src, struct page_table *dst, size_t *copied);
+bool vmm_share_user_space(struct page_table *src, struct page_table *dst, size_t *shared);
+bool vmm_cow_resolve(struct page_table *root, vaddr_t vaddr);
+bool vmm_cow_privatise(struct page_table *root);
+bool vmm_pin(struct page_table *root, vaddr_t vaddr);
+bool vmm_cow_enabled(void);
+size_t vmm_cow_shared(void);
+bool vmm_set_cow(bool on);
 bool vmm_range_writable_in(struct page_table *root, vaddr_t addr, size_t len);
 
 #define VMM_USER_EXEC_FLAGS (PAGE_PRESENT | PAGE_WRITE)

@@ -4,6 +4,7 @@
 #include "kernel/panic/panic.h"
 #include "kernel/uaccess/uaccess.h"
 #include "kernel/multitask/task.h"
+#include "kernel/mm/vmm/vmm.h"
 #include "arch/x86_64/pic/pic.h"
 #include "arch/x86_64/pit/pit.h"
 
@@ -50,8 +51,13 @@ void idt_init(void) {
         } else if (i == 1) {
             ist = 3;
             flags = 0xEE;
-        } else if (i == 0 || i == 6 || i == 12 || i == 13 || i == 14) {
+        } else if (i == 0 || i == 6 || i == 12) {
+            ist = 5;
             flags = 0xEE;
+        } else if (i == 13) {
+            ist = 5;
+        } else if (i == 14) {
+            ist = 4;
         }
 
         idt_set_descriptor(i, stub_table[i], flags, ist);
@@ -99,6 +105,14 @@ static int exception_signal(uint64_t vector) {
 }
 
 void exception_handler(struct isr_frame* frame) {
+
+    if (frame->interrupt_number == 14 && (frame->error_code & 2)) {
+        struct task *cow = task_current();
+        if (cow && cow->pml4 &&
+            vmm_cow_resolve(cow->pml4, (vaddr_t)read_cr2())) {
+            return;
+        }
+    }
 
     if ((frame->cs & 3) == 0 && usermode_recover_copy(frame)) return;
 

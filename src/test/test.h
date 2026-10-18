@@ -16,6 +16,7 @@ void fd_test(void);
 void mm_test(void);
 void futex_pair_test(void);
 void sysdep_test(void);
+void exectest_run(void);
 void mandel_run(void);
 void featuretest_run(void);
 void proctest_run(void);

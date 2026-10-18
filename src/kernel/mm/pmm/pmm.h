@@ -22,6 +22,9 @@ void pmm_init(struct limine_memmap_response *memmap, uint64_t hhdm_offset);
 bool pmm_alloc(paddr_t *out, size_t pages);
 void pmm_free(paddr_t addr, size_t pages);
 size_t pmm_total_pages(void);
+void pmm_share_ref(paddr_t addr);
+bool pmm_unshare_ref(paddr_t addr);
+bool pmm_share_ready(void);
 size_t pmm_free_pages(void);
 
 #endif

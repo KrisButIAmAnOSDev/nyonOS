@@ -43,6 +43,10 @@ fi
 if [ -f src/user/bin/thrtest ]; then
     PROGRAMS="$PROGRAMS thrtest"
 fi
+if [ -f src/user/bin/exectest ]; then
+    PROGRAMS="$PROGRAMS exectest"
+fi
+
 if [ -f src/user/bin/mandel ]; then
     PROGRAMS="$PROGRAMS mandel"
 fi

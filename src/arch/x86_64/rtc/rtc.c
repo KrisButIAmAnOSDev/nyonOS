@@ -28,7 +28,7 @@ static inline uint8_t inb(uint16_t port) {
 }
 
 static uint8_t cmos_read(uint8_t reg) {
-    outb(CMOS_INDEX, (uint8_t)(0x80 | reg));
+    outb(CMOS_INDEX, reg);
     return inb(CMOS_DATA);
 }
 
@@ -45,7 +45,10 @@ struct rtc_fields {
 };
 
 static void rtc_snapshot(struct rtc_fields *f) {
-    while (cmos_update_in_progress()) { }
+    for (uint32_t spins = 0; spins < 1000000u; spins++) {
+        if (!cmos_update_in_progress()) break;
+        __asm__ volatile("pause" ::: "memory");
+    }
 
     f->sec = cmos_read(CMOS_SEC);
     f->min = cmos_read(CMOS_MIN);
@@ -76,6 +79,8 @@ static int rtc_read_fields(struct rtc_fields *out) {
 
         if (a.sec == b.sec && a.min == b.min && a.hour == b.hour &&
             a.day == b.day && a.month == b.month && a.year == b.year) {
+            int pm = (!hour24 && (a.hour & 0x80)) ? 1 : 0;
+
             if (!binary) {
                 a.sec = from_bcd(a.sec);
                 a.min = from_bcd(a.min);
@@ -84,10 +89,12 @@ static int rtc_read_fields(struct rtc_fields *out) {
                 a.month = from_bcd(a.month);
                 a.year = from_bcd(a.year);
             }
-            if (!hour24 && (a.hour & 0x80)) {
-                a.hour = (uint8_t)(((a.hour & 0x7F) + 12) % 24);
-            } else {
-                a.hour &= 0x7F;
+
+            if (!hour24) {
+                uint8_t h = (uint8_t)(a.hour & 0x7F);
+                if (h == 12) h = 0;
+                if (pm) h = (uint8_t)(h + 12);
+                a.hour = h;
             }
 
             if (a.month < 1 || a.month > 12) return -1;

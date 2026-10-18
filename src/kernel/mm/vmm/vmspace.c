@@ -198,7 +198,7 @@ bool vm_stack_push_strings(struct vmspace *vs, const char **strs, size_t count,
                            const char **envp, size_t envc, const struct vm_auxv *aux, size_t auxc,
                            uint64_t *argc_out, uint64_t *stack_out, uint64_t *argv_out, uint64_t *auxv_out) {
     if (!vs || !vs->pml4 || !vs->has_stack) return false;
-    if (count > 32 || envc > 32 || auxc > 32) return false;
+    if (count > 128 || envc > 128 || auxc > 128) return false;
 
     uint64_t vbase = 0;
     uint8_t *base = stack_page(vs, &vbase);
@@ -209,10 +209,15 @@ bool vm_stack_push_strings(struct vmspace *vs, const char **strs, size_t count,
 
     uint8_t *top = base + (vs->stack_top - vbase);
     uint8_t *floor = base + (vs->stack_base - vbase);
-    if (floor < base) floor = base;
 
-    uint64_t argv_ptr[32];
-    uint64_t envp_ptr[32];
+    if (floor < base) {
+        size_t back = (size_t)(base - floor);
+        size_t extra = (back / PAGE_SIZE) * PAGE_SIZE;
+        floor = base - extra;
+    }
+
+    uint64_t argv_ptr[128];
+    uint64_t envp_ptr[128];
 
     for (size_t i = 0; i < count; i++) {
         size_t sl = 0;
