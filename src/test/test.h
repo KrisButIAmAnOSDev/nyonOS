@@ -22,6 +22,7 @@ void featuretest_run(void);
 void proctest_run(void);
 void clktest_run(void);
 void forktest_run(void);
+void shell_run(void);
 void thread_test(void);
 void mlibc_hello_test(void);
 void tty_isolation_test(vaddr_t a_rip, vaddr_t b_rip, vaddr_t c_rip,

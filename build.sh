@@ -76,6 +76,10 @@ for prog in $PROGRAMS; do
     mcopy -i fat16.img@@1M "src/user/bin/$prog" "::/BIN/$prog"
 done
 
+if [ -f ../bash/bash ]; then
+    mcopy -i fat16.img@@1M ../bash/bash ::/BIN/BASH
+fi
+
 PATH=$PATH:/usr/sbin:/sbin sgdisk nyonOS.img -n 1:2048 -t 1:ef00 -m 1
 
 mformat -i nyonOS.img@@1M -T 126976 -h 64 -s 32 ::

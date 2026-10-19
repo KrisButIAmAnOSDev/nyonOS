@@ -5,6 +5,7 @@
 #include "kernel/uaccess/uaccess.h"
 #include "kernel/multitask/task.h"
 #include "kernel/mm/vmm/vmm.h"
+#include "kernel/mm/vmm/vmspace.h"
 #include "arch/x86_64/pic/pic.h"
 #include "arch/x86_64/pit/pit.h"
 
@@ -121,6 +122,11 @@ void exception_handler(struct isr_frame* frame) {
         const char *name = t && t->name ? t->name : "ring3";
         uint64_t vector = frame->interrupt_number;
         int signal = exception_signal(vector);
+
+        if (vector == 14 && t && t->vs &&
+            vm_grow_stack(t->vs, (vaddr_t)read_cr2())) {
+            return;
+        }
 
         if (!t || !t->expect_fault) {
             kprintf(PRINT_BOTH, "\ntask %s killed by CPU exception, vector 0x%llx\n", name, (unsigned long long)vector);

@@ -1,5 +1,6 @@
 #include "kernel/mm/heap/heap.h"
 #include "kernel/mm/vmm/vmm.h"
+#include "kernel/tty/tty.h"
 #include "kernel/exec/elf.h"
 #include "syscall.h"
 #include "kernel/kprintf/kprintf.h"
@@ -282,6 +283,94 @@ static int64_t sys_cow_ctl(int32_t on) {
     if (on && !vmm_set_cow(true)) return SYS_ENOSYS;
     if (!on) vmm_set_cow(false);
     return (int64_t)(prev ? 1 : 0);
+}
+
+static int64_t sys_poll(uintptr_t fds_ptr, uint32_t nfds, int32_t timeout,
+                        uintptr_t events_ptr) {
+    if (nfds > 1024) return SYS_EINVAL;
+
+    struct sys_pollfd fds[64];
+    uint32_t n = nfds > 64 ? 64 : nfds;
+
+    for (uint32_t i = 0; i < n; i++) {
+        if (!copyin(&fds[i], (const void *)(fds_ptr + i * sizeof(struct sys_pollfd)),
+                    sizeof(struct sys_pollfd)))
+            return SYS_EFAULT;
+        fds[i].revents = 0;
+    }
+
+    struct task *t = task_current();
+    if (!t) return SYS_EINVAL;
+
+    uint64_t deadline = 0;
+    if (timeout > 0) deadline = pit_get_ticks() + pit_ms_to_ticks((uint64_t)timeout);
+
+    int32_t ready = 0;
+    for (;;) {
+        ready = 0;
+        for (uint32_t i = 0; i < n; i++) {
+            uint16_t rev = 0;
+            if (fds[i].fd < 0) { fds[i].revents = ABI_POLLNVAL; ready++; continue; }
+            if (!tty_poll_ready(fds[i].fd, fds[i].events, &rev)) {
+                rev = 0;
+            } else {
+                fds[i].revents = rev;
+                ready++;
+            }
+        }
+        if (ready > 0) break;
+        if (timeout == 0) break;
+        if (deadline && pit_get_ticks() >= deadline) break;
+        if (!tty_wait_input(deadline)) break;
+    }
+
+    for (uint32_t i = 0; i < n; i++)
+        if (!copyout((void *)(fds_ptr + i * sizeof(struct sys_pollfd)), &fds[i],
+                     sizeof(struct sys_pollfd)))
+            return SYS_EFAULT;
+
+    if (events_ptr) {
+        int32_t out = ready;
+        if (!copyout((void *)events_ptr, &out, sizeof(out))) return SYS_EFAULT;
+    }
+
+    return ready;
+}
+
+static int64_t sys_tcgetattr(int fd, uintptr_t attr_ptr) {
+    struct sys_termios attr;
+    if (!tty_termios_get(fd, &attr)) return SYS_EINVAL;
+    if (!copyout((void *)attr_ptr, &attr, sizeof(attr))) return SYS_EFAULT;
+    return 0;
+}
+
+static int64_t sys_tcsetattr(int fd, int act, uintptr_t attr_ptr) {
+    struct sys_termios attr;
+    if (!copyin(&attr, (const void *)attr_ptr, sizeof(attr))) return SYS_EFAULT;
+    if (!tty_termios_set(fd, act, &attr)) return SYS_EINVAL;
+    return 0;
+}
+
+static int64_t sys_tcgetwinsize(int fd, uintptr_t ws_ptr) {
+    struct sys_winsize ws;
+    if (!tty_winsize_get(fd, &ws)) return SYS_EINVAL;
+    if (!copyout((void *)ws_ptr, &ws, sizeof(ws))) return SYS_EFAULT;
+    return 0;
+}
+
+static int64_t sys_tcsetwinsize(int fd, uintptr_t ws_ptr) {
+    struct sys_winsize ws;
+    if (!copyin(&ws, (const void *)ws_ptr, sizeof(ws))) return SYS_EFAULT;
+    if (!tty_winsize_set(fd, &ws)) return SYS_EINVAL;
+    return 0;
+}
+
+static int64_t sys_ttyname(int fd, uintptr_t buf_ptr, uint64_t size) {
+    if (size > 256) size = 256;
+    char buf[256];
+    if (!tty_name(fd, buf, (size_t)size)) return SYS_EINVAL;
+    if (!copyout((void *)buf_ptr, buf, (size_t)size)) return SYS_EFAULT;
+    return 0;
 }
 
 static int64_t sys_yield(void) {
@@ -600,6 +689,66 @@ static int64_t sys_getpid(void) {
     struct task *t = task_current();
     if (!t) return SYS_ENOSYS;
     return t->pid;
+}
+
+static int64_t sys_getppid(void) {
+    struct task *t = task_current();
+    if (!t) return SYS_ENOSYS;
+    return (int64_t)(int32_t)t->parent_pid;
+}
+
+static int64_t sys_getid0(void) {
+    struct task *t = task_current();
+    if (!t) return SYS_ENOSYS;
+    return 0;
+}
+
+static int64_t sys_getuid(void) { return sys_getid0(); }
+static int64_t sys_geteuid(void) { return sys_getid0(); }
+static int64_t sys_getgid(void) { return sys_getid0(); }
+static int64_t sys_getegid(void) { return sys_getid0(); }
+
+static int64_t sys_getresid(uint64_t rp, uint64_t ep, uint64_t sp) {
+    uint32_t *r = (uint32_t *)rp, *e = (uint32_t *)ep, *s = (uint32_t *)sp;
+    struct task *t = task_current();
+    if (!t || !in_user()) return SYS_EINVAL;
+    uint32_t id = 0;
+    if (r && !copyout(r, &id, sizeof(id))) return SYS_EFAULT;
+    if (e && !copyout(e, &id, sizeof(id))) return SYS_EFAULT;
+    if (s && !copyout(s, &id, sizeof(id))) return SYS_EFAULT;
+    return 0;
+}
+
+static int64_t sys_getresuid(uint64_t r, uint64_t e, uint64_t s) { return sys_getresid(r, e, s); }
+static int64_t sys_getresgid(uint64_t r, uint64_t e, uint64_t s) { return sys_getresid(r, e, s); }
+
+static char sys_hostname[64];
+
+static int64_t sys_sethostname(uint64_t namep, uint64_t lenp) {
+    const char *name = (const char *)namep;
+    size_t len = (size_t)lenp;
+    struct task *t = task_current();
+    if (!t || !in_user()) return SYS_EINVAL;
+    if (len >= sizeof(sys_hostname)) len = sizeof(sys_hostname) - 1;
+    if (!name) return SYS_EFAULT;
+
+    char tmp[sizeof(sys_hostname)];
+    if (!copyin(tmp, name, len)) return SYS_EFAULT;
+    tmp[len] = 0;
+    for (size_t i = 0; i <= len; i++) sys_hostname[i] = tmp[i];
+    return 0;
+}
+
+static int64_t sys_gethostname(uint64_t namep, uint64_t lenp) {
+    char *name = (char *)namep;
+    size_t len = (size_t)lenp;
+    struct task *t = task_current();
+    if (!t || !in_user()) return SYS_EINVAL;
+    if (!name) return SYS_EFAULT;
+    if (len >= sizeof(sys_hostname)) len = sizeof(sys_hostname) - 1;
+    if (!copyout(name, sys_hostname, len)) return SYS_EFAULT;
+    if (copyout(name + len, "", 1)) return SYS_EFAULT;
+    return 0;
 }
 
 static int64_t sys_sleep(unsigned ms) {

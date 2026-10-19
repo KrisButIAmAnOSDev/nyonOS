@@ -51,6 +51,7 @@ bool vm_map_anon_zeroed(struct vmspace *vs, vaddr_t vaddr, size_t pages, uint8_t
 bool vm_commit(struct vmspace *vs, vaddr_t vaddr, paddr_t phys, size_t pages, uint8_t prot, bool owned);
 
 bool vm_setup_stack(struct vmspace *vs);
+bool vm_grow_stack(struct vmspace *vs, vaddr_t addr);
 struct vm_auxv {
     uint64_t type;
     uint64_t value;

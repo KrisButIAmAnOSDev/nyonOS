@@ -74,6 +74,42 @@ struct sys_timespec {
     int64_t nsec;
 };
 
+struct sys_pollfd {
+    int32_t fd;
+    int16_t events;
+    int16_t revents;
+};
+
+struct sys_termios {
+    uint32_t c_iflag;
+    uint32_t c_oflag;
+    uint32_t c_cflag;
+    uint32_t c_lflag;
+    uint8_t c_line;
+    uint8_t c_cc[32];
+    uint32_t c_ibaud;
+    uint32_t c_obaud;
+};
+
+struct sys_winsize {
+    uint16_t ws_row;
+    uint16_t ws_col;
+    uint16_t ws_xpixel;
+    uint16_t ws_ypixel;
+};
+
+#define ABI_POLLIN   0x001
+#define ABI_POLLOUT  0x004
+#define ABI_POLLERR  0x008
+#define ABI_POLLHUP  0x010
+#define ABI_POLLNVAL 0x020
+
+#define ABI_TCGETATTR 0
+#define ABI_TCSETATTR 1
+#define ABI_TCSANOW   0
+#define ABI_TCSADRAIN 1
+#define ABI_TCSaflUSH 2
+
 #define ABI_CLOCK_REALTIME  0
 #define ABI_CLOCK_MONOTONIC 1
 

@@ -169,6 +169,17 @@ bool vm_map_anon_zeroed(struct vmspace *vs, vaddr_t vaddr, size_t pages, uint8_t
     return true;
 }
 
+bool vm_grow_stack(struct vmspace *vs, vaddr_t addr) {
+    if (!vs || !vs->has_stack) return false;
+    if (addr >= vs->stack_base || addr < vs->stack_bottom) return false;
+
+    vaddr_t need = addr & ~(vaddr_t)(PAGE_SIZE - 1);
+    size_t pages = (size_t)((vs->stack_base - need) / PAGE_SIZE);
+    if (pages == 0) return false;
+
+    return vm_map_anon_zeroed(vs, need, pages, VM_PROT_READ | VM_PROT_WRITE, true);
+}
+
 bool vm_setup_stack(struct vmspace *vs) {
     if (!vs) return false;
 

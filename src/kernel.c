@@ -9,6 +9,7 @@
 #include "arch/x86_64/gdt/gdt.h"
 #include "arch/x86_64/pic/pic.h"
 #include "drivers/keyboard/keyboard.h"
+#include "kernel/tty/tty.h"
 #include "arch/x86_64/cpu/cpu.h"
 #include "kernel/crypto/crypto.h"
 #include "kernel/exec/elf.h"
@@ -173,6 +174,7 @@ void kmain(void) {
     }
 
     kprintf_attach((volatile uint32_t *)fb->address, fb->width, fb->height);
+    tty_set_display_size((uint16_t)fb->height, (uint16_t)fb->width);
 
     if (memmap_request.response == NULL) {
         kprintf(PRINT_SERIAL, "nyonOS: No memmap response!\n");
@@ -332,6 +334,8 @@ void kmain(void) {
 
         elf_run_test();
     }
+
+    shell_run();
 
     for (;;) {
         uint64_t seq = task_wake_seq();

@@ -370,16 +370,13 @@ bool vmm_cow_resolve(struct page_table *root, vaddr_t vaddr) {
     if (*entry & PAGE_WRITE) return false;
 
     paddr_t old = *entry & VMM_PT_ADDR_MASK;
-    bool owned = (*entry & PAGE_OWNED) != 0;
-    paddr_t np = old;
+    paddr_t np;
 
-    if (owned) {
-        if (!pmm_alloc(&np, 1)) return false;
+    if (!pmm_alloc(&np, 1)) return false;
 
-        const uint8_t *src = (const uint8_t *)(vmm_hhdm_offset + old);
-        uint8_t *dst = (uint8_t *)(vmm_hhdm_offset + np);
-        for (size_t i = 0; i < PAGE_SIZE; i++) dst[i] = src[i];
-    }
+    const uint8_t *src = (const uint8_t *)(vmm_hhdm_offset + old);
+    uint8_t *dst = (uint8_t *)(vmm_hhdm_offset + np);
+    for (size_t i = 0; i < PAGE_SIZE; i++) dst[i] = src[i];
 
     if (*entry & PAGE_SHAREDREF) {
         if (pmm_unshare_ref(old)) pmm_free(old, 1);
@@ -389,7 +386,7 @@ bool vmm_cow_resolve(struct page_table *root, vaddr_t vaddr) {
                              PAGE_PCD | PAGE_NX);
     nf |= PAGE_WRITE;
     nf &= ~(PAGE_COW | PAGE_SHAREDREF);
-    if (owned) nf |= PAGE_OWNED;
+    nf |= PAGE_OWNED;
     *entry = nf | np;
     invlpg(vaddr);
     return true;

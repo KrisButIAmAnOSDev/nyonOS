@@ -636,6 +636,42 @@ void exectest_run(void) {
     kprintchar('\n', PRINT_SERIAL);
 }
 
+void shell_run(void) {
+    fs_node_t node;
+    if (!fs_lookup("/BIN/BASH", &node) && !fs_lookup("/BIN/bash", &node)) {
+        kprintf(PRINT_SERIAL, "SHELL: /BIN/bash not present\n");
+        return;
+    }
+
+    static const char *args[] = { "bash", NULL };
+    struct elf_image img;
+    const char *err = NULL;
+    if (elf_load_argv(&node, &img, &err, args, 1)) {
+        kprintf(PRINT_SERIAL, "SHELL: load refused: %s\n", err ? err : "?");
+        return;
+    }
+
+    struct task *t = task_spawn_vmspace("bash", img.vs, img.entry, img.stack_top);
+    elf_destroy(&img);
+    if (!t) {
+        kprintf(PRINT_SERIAL, "SHELL: spawn failed\n");
+        return;
+    }
+
+    keyboard_set_owner(t->pid);
+    kprintf(PRINT_SERIAL, "SHELL: bash started as pid %u, type to run it\n", t->pid);
+
+    uint32_t pid = t->pid;
+    for (;;) {
+        if (!task_find_pid(pid)) {
+            keyboard_set_owner(0);
+            kprintf(PRINT_SERIAL, "SHELL: bash exited\n");
+            return;
+        }
+        pit_sleep(20);
+    }
+}
+
 void mandel_run(void) {
     fs_node_t node;
     if (!fs_lookup("/BIN/MANDEL", &node) && !fs_lookup("/BIN/mandel", &node)) {
