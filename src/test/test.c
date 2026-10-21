@@ -252,7 +252,8 @@ static const char *const c_stdin_lines[] = {
     "second line\n",
     "abcdefghij\n",
     "xy\n",
-    "back\bspace\n"
+    "back\bspace\n",
+    "rawmode"
 };
 #define C_STDIN_LINES ((int)(sizeof(c_stdin_lines) / sizeof(c_stdin_lines[0])))
 
@@ -339,8 +340,17 @@ static const char *const c_fd_labels[C_CHECKS] = {
     "remainder content is efghij",
     "backspace-edited line length",
     "backspace-edited line content is baspace",
+    "tcgetattr returns the terminal attributes",
+    "canonical mode is set by default",
+    "nonblocking mode can be set on stdin",
+    "canonical read without a newline is EAGAIN",
+    "raw mode can be set on stdin",
+    "raw read returns the bytes without a newline",
+    "raw read content matches",
+    "canonical mode can be restored",
+    "blocking mode can be restored on stdin",
     "stdout default destination is PRINT_BOTH",
-    "stderr default destination is PRINT_SERIAL",
+    "stderr default destination is PRINT_BOTH",
     "stderr destination can be changed",
     "changing stderr leaves stdout alone",
     "write to stderr returns the byte count",

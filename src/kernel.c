@@ -9,6 +9,7 @@
 #include "arch/x86_64/gdt/gdt.h"
 #include "arch/x86_64/pic/pic.h"
 #include "drivers/keyboard/keyboard.h"
+#include "drivers/pci/pci.h"
 #include "kernel/tty/tty.h"
 #include "arch/x86_64/cpu/cpu.h"
 #include "kernel/crypto/crypto.h"
@@ -223,6 +224,13 @@ void kmain(void) {
     heap_init();
 
     if (!ata_init()) kprintf(PRINT_SERIAL, "ATA: no drive found\n");
+
+    pci_init();
+    pci_assign_bars();
+    for (int i = 0; i < pci_device_count(); i++) {
+        pci_device_t *dev = (pci_device_t *)pci_device_at(i);
+        pci_program_bars(dev);
+    }
 
     task_init();
     task_spawn("aqua", task_aqua);

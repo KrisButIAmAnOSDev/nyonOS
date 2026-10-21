@@ -55,7 +55,8 @@ void pit_init(uint32_t frequency_hz) {
 
 void pit_sleep(uint64_t ms) {
     uint64_t target = pit_ticks + (ms * pit_frequency_hz) / 1000;
-    while (pit_ticks < target) __asm__ volatile("hlt");
+    if (target <= pit_ticks) return;
+    task_wait(NULL, target);
 }
 
 uint64_t pit_ms_to_ticks(uint64_t ms) {

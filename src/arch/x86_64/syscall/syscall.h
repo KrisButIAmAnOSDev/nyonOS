@@ -49,7 +49,7 @@ extern uint64_t syscall_kstack_top;
 #define C_MAX_CHECKS  (C_RES_GOT_BASE - C_RES_CHECK_BASE)
 #define C_RES_STDIN_REQ 448
 #define C_RES_STDIN_ACK 456
-#define C_CHECKS       99
+#define C_CHECKS       108
 
 void syscall_init(void);
 void syscall_dispatch(struct isr_frame *frame);

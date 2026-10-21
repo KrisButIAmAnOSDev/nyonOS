@@ -52,6 +52,16 @@ bool tty_termios_set(int fd, int act, const struct sys_termios *in) {
     return true;
 }
 
+bool tty_canonical(void) {
+    if (!tty_ready) tty_init();
+    return (console_termios.c_lflag & TTY_ICANON) != 0;
+}
+
+bool tty_echo(void) {
+    if (!tty_ready) tty_init();
+    return (console_termios.c_lflag & TTY_ECHO) != 0;
+}
+
 bool tty_winsize_get(int fd, struct sys_winsize *out) {
     (void)fd;
     *out = console_winsize;
@@ -81,9 +91,8 @@ bool tty_poll_ready(int fd, uint16_t events, uint16_t *revents) {
     if (!tty_ready) tty_init();
 
     /* The console is the only pollable device that can block. */
-    if (keyboard_owner() != 0) {
-        if (events & ABI_POLLIN) *revents |= ABI_POLLIN;
-    } else if (keyboard_line_ready()) {
+    bool ready = tty_canonical() ? keyboard_line_ready() : keyboard_has_input();
+    if (ready) {
         if (events & ABI_POLLIN) *revents |= ABI_POLLIN;
     }
 
@@ -94,5 +103,5 @@ bool tty_poll_ready(int fd, uint16_t events, uint16_t *revents) {
 
 bool tty_wait_input(uint64_t deadline) {
     task_wait(keyboard_wait_chan(), deadline);
-    return keyboard_line_ready();
+    return tty_canonical() ? keyboard_line_ready() : keyboard_has_input();
 }

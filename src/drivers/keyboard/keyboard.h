@@ -14,6 +14,7 @@ void keyboard_set_owner(uint32_t pid);
 uint32_t keyboard_owner(void);
 bool keyboard_inject_char(char c);
 bool keyboard_line_ready(void);
+bool keyboard_has_input(void);
 void *keyboard_wait_chan(void);
 
 #endif

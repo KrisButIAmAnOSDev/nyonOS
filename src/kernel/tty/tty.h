@@ -10,6 +10,8 @@ void tty_init(void);
 
 bool tty_termios_get(int fd, struct sys_termios *out);
 bool tty_termios_set(int fd, int act, const struct sys_termios *in);
+bool tty_canonical(void);
+bool tty_echo(void);
 bool tty_winsize_get(int fd, struct sys_winsize *out);
 bool tty_winsize_set(int fd, const struct sys_winsize *in);
 bool tty_name(int fd, char *buf, size_t size);

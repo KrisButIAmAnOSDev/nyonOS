@@ -256,12 +256,29 @@ int main(void) {
     buf[9] = 0;
     ck(streq(buf, "bacspace\n"), 1);
 
+    {
+        struct sys_termios attr;
+        ck(sys_tcgetattr(0, &attr), 0);
+        ck(attr.c_lflag & 2, 2);
+        ck(sys_fcntl(0, F_SETFL, O_NONBLOCK), 0);
+        ask_stdin(6);
+        ck(sys_read(0, buf, 8), EAGAIN);
+        attr.c_lflag &= ~2u;
+        ck(sys_tcsetattr(0, 0, &attr), 0);
+        ck(sys_read(0, buf, 8), 7);
+        buf[7] = 0;
+        ck(streq(buf, "rawmode"), 1);
+        attr.c_lflag |= 2u;
+        ck(sys_tcsetattr(0, 0, &attr), 0);
+        ck(sys_fcntl(0, F_SETFL, 0), 0);
+    }
+
     ck(sys_ioctl(1, KTTY_GETDEST, 0), 2);
-    ck(sys_ioctl(2, KTTY_GETDEST, 0), 0);
+    ck(sys_ioctl(2, KTTY_GETDEST, 0), 2);
     sys_ioctl(2, KTTY_SETDEST, 1);
     ck(sys_ioctl(2, KTTY_GETDEST, 0), 1);
     ck(sys_ioctl(1, KTTY_GETDEST, 0), 2);
-    sys_ioctl(2, KTTY_SETDEST, 0);
+    sys_ioctl(2, KTTY_SETDEST, 2);
 
     ck(sys_write(2, "2", 1), 1);
     ck(sys_dup2(1, 60, 0), 60);
@@ -270,7 +287,7 @@ int main(void) {
     ck(sys_close(60), 0);
 
     ck(sys_dup2(2, 61, 0), 61);
-    ck(sys_ioctl(61, KTTY_GETDEST, 0), 0);
+    ck(sys_ioctl(61, KTTY_GETDEST, 0), 2);
     ck(sys_write(61, "4", 1), 1);
     ck(sys_close(61), 0);
 

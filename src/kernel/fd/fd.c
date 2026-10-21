@@ -6,6 +6,7 @@
 #include "kernel/sync/preempt.h"
 #include "kernel/multitask/task.h"
 #include "drivers/keyboard/keyboard.h"
+#include "kernel/tty/tty.h"
 
 static struct console the_ttyin;
 static struct console the_ttyout;
@@ -631,10 +632,23 @@ static int64_t console_read_at(struct kobject *o, void *ubuf, uint32_t len, uint
     }
     preempt_enable();
     if (owner != me) return FD_EIO;
-    if (!keyboard_line_ready()) return FD_EAGAIN;
 
     char *s = (char *)ubuf;
     uint32_t i = 0;
+
+    if (!tty_canonical()) {
+        preempt_disable();
+        while (i < len) {
+            char c;
+            if (!keyboard_try_pop(&c)) break;
+            s[i++] = c;
+        }
+        preempt_enable();
+        if (i == 0) return FD_EAGAIN;
+        return (int64_t)i;
+    }
+
+    if (!keyboard_line_ready()) return FD_EAGAIN;
 
     preempt_disable();
     while (i < len) {
@@ -660,7 +674,8 @@ static int console_wait_readable(struct kobject *o) {
     int r;
     for (;;) {
         if (keyboard_owner() != me) { r = FD_EIO; break; }
-        if (keyboard_line_ready()) { r = 0; break; }
+        bool ready = tty_canonical() ? keyboard_line_ready() : keyboard_has_input();
+        if (ready) { r = 0; break; }
         task_wait(keyboard_wait_chan(), 0);
     }
 
@@ -701,7 +716,7 @@ int fd_install_stdio(struct task *t) {
         the_ttyout.dest = PRINT_BOTH;
 
         kobject_init(&the_ttyerr.obj, KOBJ_CONSOLE, FD_RIGHT_WRITE | FD_RIGHT_DUP, &tty_err_ops);
-        the_ttyerr.dest = PRINT_SERIAL;
+        the_ttyerr.dest = PRINT_BOTH;
 
         console_ready = true;
     }

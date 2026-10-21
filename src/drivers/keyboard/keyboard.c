@@ -2,6 +2,7 @@
 #include "kernel/kprintf/kprintf.h"
 #include "arch/x86_64/pic/pic.h"
 #include "kernel/multitask/task.h"
+#include "kernel/tty/tty.h"
 #include <stdbool.h>
 #include "kernel/sync/preempt.h"
 
@@ -50,6 +51,10 @@ static bool keyboard_buffer_push(char c) {
 
 void *keyboard_wait_chan(void) {
     return &tty_wait_chan;
+}
+
+bool keyboard_has_input(void) {
+    return buffer_head != buffer_tail;
 }
 
 bool keyboard_line_ready(void) {
@@ -134,9 +139,14 @@ void keyboard_handler(struct isr_frame *frame) {
 
     keyboard_buffer_push(c);
 
-    if (!stdin_owner && !kprintf_busy()) {
-        if (c == '\b') kprintf(PRINT_SCREEN, " \b\b");
-        else kprintf(PRINT_SCREEN, "%c", c);
+    if (!stdin_owner) {
+        if (!kprintf_busy()) {
+            if (c == '\b') kprintf(PRINT_SCREEN, " \b\b");
+            else kprintf(PRINT_SCREEN, "%c", c);
+        }
+    } else if (tty_canonical() && tty_echo()) {
+        if (c == '\b') kprintf(PRINT_BOTH, " \b\b");
+        else kprintf(PRINT_BOTH, "%c", c);
     }
 
     task_wake_chan(&tty_wait_chan);
