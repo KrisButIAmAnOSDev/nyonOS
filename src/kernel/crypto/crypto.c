@@ -3,6 +3,7 @@
 #include "kernel/sync/preempt.h"
 #include "arch/x86_64/pit/pit.h"
 #include "arch/x86_64/cpu/cpu.h"
+#include "arch/x86_64/syscall/syscall_msr.h"
 
 #define CHACHA_ROUNDS 20
 #define CHACHA_WORDS 16
@@ -19,10 +20,11 @@ typedef struct {
     size_t produced;
 } chacha_ctx;
 
-static chacha_ctx rng;
-static uint32_t pool[POOL_WORDS];
-static bool pool_ready;
+static chacha_ctx rng[MAX_CPUS];
+static uint32_t pool[MAX_CPUS][POOL_WORDS];
+static bool pool_ready[MAX_CPUS];
 static bool seeded_once;
+static uint8_t crypto_seed_key[CRYPTO_MAX_ENTROPY];
 
 static inline uint32_t rotl32(uint32_t v, int n) {
     return (v << n) | (v >> (32 - n));
@@ -152,6 +154,24 @@ static uint64_t mix64(uint64_t h, uint8_t b) {
     return (h ^ b) * 0x100000001b3ULL;
 }
 
+static void crypto_seed_cpu(uint32_t id) {
+    if (id >= MAX_CPUS) return;
+
+    uint8_t seed[CRYPTO_MAX_ENTROPY];
+    uint64_t h = 0xcbf29ce484222325ULL;
+    for (size_t i = 0; i < sizeof(seed); i++) {
+        h = mix64(h, crypto_seed_key[i]);
+        h = mix64(h, (uint8_t)id);
+        h = mix64(h, (uint8_t)(id >> 8));
+        seed[i] = (uint8_t)(h >> 32);
+    }
+
+    chacha_init(&rng[id], seed, (uint64_t)id + 1);
+    for (size_t i = 0; i < sizeof(pool[id]); i++) ((uint8_t *)pool[id])[i] = 0;
+    chacha_bytes(&rng[id], pool[id], sizeof(pool[id]));
+    pool_ready[id] = true;
+}
+
 void crypto_init(void) {
     static uint8_t raw[CRYPTO_GATHER];
     for (size_t i = 0; i < sizeof(raw); i++) raw[i] = 0;
@@ -179,11 +199,9 @@ void crypto_init(void) {
         }
     }
 
-    chacha_init(&rng, seed, 1);
+    for (size_t i = 0; i < sizeof(crypto_seed_key); i++) crypto_seed_key[i] = seed[i];
 
-    for (size_t i = 0; i < sizeof(pool); i++) ((uint8_t *)pool)[i] = 0;
-    chacha_bytes(&rng, pool, sizeof(pool));
-    pool_ready = true;
+    for (uint32_t id = 0; id < MAX_CPUS; id++) crypto_seed_cpu(id);
     seeded_once = true;
 
     kprintf(PRINT_SERIAL, "CRYPTO: chacha20 seeded, entropy: %s%s%s%s%s\n",
@@ -197,13 +215,15 @@ void crypto_init(void) {
 }
 
 bool crypto_seeded(void) {
-    return seeded_once && pool_ready;
+    uint32_t id = cpu_id();
+    return seeded_once && id < MAX_CPUS && pool_ready[id];
 }
 
 void crypto_random_bytes(void *out, size_t len) {
     uint8_t *p = (uint8_t *)out;
+    uint32_t id = cpu_id();
 
-    if (!pool_ready) {
+    if (id >= MAX_CPUS || !pool_ready[id]) {
         for (size_t i = 0; i < len; i++) p[i] = 0;
         return;
     }
@@ -212,16 +232,17 @@ void crypto_random_bytes(void *out, size_t len) {
         preempt_disable();
         size_t i;
         for (i = 0; i < POOL_WORDS; i++) {
-            if (pool[i]) break;
+            if (__atomic_load_n(&pool[id][i], __ATOMIC_RELAXED)) break;
         }
         if (i == POOL_WORDS) {
             preempt_enable();
-            chacha_bytes(&rng, pool, sizeof(pool));
+            chacha_bytes(&rng[id], pool[id], sizeof(pool[id]));
             continue;
         }
-        uint32_t v = pool[i];
-        pool[i] = 0;
+        uint32_t v = __atomic_exchange_n(&pool[id][i], 0, __ATOMIC_ACQUIRE);
         preempt_enable();
+
+        if (!v) continue;
 
         size_t take = len < 4 ? len : 4;
         for (size_t j = 0; j < take; j++) p[j] = (uint8_t)(v >> (8 * j));

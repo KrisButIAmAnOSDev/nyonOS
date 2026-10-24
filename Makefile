@@ -28,6 +28,8 @@ DEP = $(OBJ:.o=.d)
 DEPFLAGS = -MMD -MP
 OUTPUT := nyonOS
 QEMU_CPU = qemu64,+nx,+smep,+smap,+pcid,+rdrand,+rdseed,+fsgsbase,+invpcid
+QEMU_SMP ?= 1
+QEMU_KVM ?=
 
 QEMU = qemu-system-x86_64 -cpu $(QEMU_CPU) \
        -drive format=raw,file=nyonOS.img \
@@ -37,12 +39,17 @@ QEMU = qemu-system-x86_64 -cpu $(QEMU_CPU) \
 EXCLUDE = $(shell find -L src/user -type f 2>/dev/null)
 
 ASM_ABI = obj/syscalls_asm.h
+PERCPU_OFF = obj/percpu_off.h
 
 $(ASM_ABI): src/abi/syscalls.def src/abi/abi.h scripts/gen_asm_abi.py
 	mkdir -p obj
 	python3 scripts/gen_asm_abi.py src/abi/syscalls.def src/abi/abi.h $@
 
-.PHONY: all kernel image run clean run-ihatedisplay
+$(PERCPU_OFF): src/arch/x86_64/cpu/cpu.h scripts/gen_percpu_off.py
+	mkdir -p obj
+	python3 scripts/gen_percpu_off.py src $@
+
+.PHONY: all kernel image run clean run-kvm run-ihatedisplay run-ihatedisplay-kvm
 
 all: kernel
 
@@ -56,7 +63,7 @@ obj/%.c.o: %.c
 	mkdir -p "$(dir $@)"
 	$(CC) $(CFLAGS) $(DEPFLAGS) -c $< -o $@
 
-obj/%.s.o: %.s $(ASM_ABI)
+obj/%.s.o: %.s $(ASM_ABI) $(PERCPU_OFF)
 	mkdir -p "$(dir $@)"
 	$(CC) $(CFLAGS) -x assembler-with-cpp -Iobj -c $< -o $@
 
@@ -64,7 +71,7 @@ obj/%.S.o: %.S
 	mkdir -p "$(dir $@)"
 	$(CC) $(CFLAGS) $(DEPFLAGS) -c $< -o $@
 
-image: kernel user $(ASM_ABI)
+image: kernel user $(ASM_ABI) $(PERCPU_OFF)
 	./build.sh
 
 user:
@@ -74,15 +81,21 @@ run:
 	$(MAKE) clean
 	$(MAKE) kernel
 	./build.sh
-	$(QEMU)
+	qemu-system-x86_64 $(QEMU_KVM) -smp $(QEMU_SMP) -cpu $(QEMU_CPU) -drive format=raw,file=nyonOS.img -drive format=raw,file=fat16.img -d int,cpu_reset -D qemu.log -serial stdio -no-reboot -k en-us
+
+run-kvm:
+	$(MAKE) run QEMU_KVM=-enable-kvm
 
 run-ihatedisplay: image
-	$(QEMU) -display none
+	qemu-system-x86_64 $(QEMU_KVM) -smp $(QEMU_SMP) -cpu $(QEMU_CPU) -drive format=raw,file=nyonOS.img -drive format=raw,file=fat16.img -d int,cpu_reset -D qemu.log -serial stdio -no-reboot -k en-us -display none
+
+run-ihatedisplay-kvm:
+	$(MAKE) run-ihatedisplay QEMU_KVM=-enable-kvm
 
 clean:
 	rm -rf bin obj
 	$(MAKE) -C src/user clean
 
-.PHONY: all kernel image run run-ihatedisplay clean
+.PHONY: all kernel image run run-kvm run-ihatedisplay run-ihatedisplay-kvm clean
 
 -include $(DEP)

@@ -96,8 +96,8 @@ void fd_table_clone(struct task *dst, struct task *src) {
             if (!d->heap) {
                 d->heap = kmalloc((size_t)(cap - FD_INLINE) * sizeof(struct fd_entry));
                 if (!d->heap) {
-                    for (uint32_t k = i; k < cap; k++) {
-                        if (s->heap[k - FD_INLINE].obj) kobject_put(s->heap[k - FD_INLINE].obj);
+                    for (uint32_t k = 0; k < i; k++) {
+                        if (d->inl[k].obj) kobject_put(d->inl[k].obj);
                     }
                     for (uint32_t k = FD_INLINE; k < cap; k++) mark_free(d, k);
                     d->capacity = FD_INLINE;
@@ -217,9 +217,11 @@ int fd_alloc(struct task *t, struct kobject *obj, uint32_t rights, uint32_t flag
         break;
     }
 
+    bool needs_grow = (ret == FD_EMFILE) && !ft->grown;
+
     preempt_enable();
 
-    if (ret == FD_EMFILE && !ft->grown) {
+    if (needs_grow) {
         preempt_disable();
         bool ok = fd_grow(ft);
         preempt_enable();
@@ -633,6 +635,7 @@ static int64_t file_lseek(struct kobject *o, int64_t off, int whence) {
 static int64_t console_write_at(struct kobject *o, const void *ubuf, uint32_t len, uint64_t off) {
     (void)off;
     const struct console *c = (const struct console *)o;
+    if (c->dest == PRINT_NONE) return (int64_t)len;
     const char *s = (const char *)ubuf;
     for (uint32_t i = 0; i < len; i++) kprintchar(s[i], c->dest);
     return (int64_t)len;
@@ -662,7 +665,7 @@ int fd_console_dest(int fd, struct task *t, uint32_t *dest) {
 }
 
 int fd_console_set_dest(int fd, struct task *t, uint32_t dest) {
-    if (dest > PRINT_BOTH) return FD_EINVAL;
+    if (dest > PRINT_NONE) return FD_EINVAL;
     struct kobject *o = fd_get_checked(t, fd, KOBJ_CONSOLE, FD_RIGHT_WRITE);
     if (!o) return FD_EBADF;
     ((struct console *)o)->dest = dest;

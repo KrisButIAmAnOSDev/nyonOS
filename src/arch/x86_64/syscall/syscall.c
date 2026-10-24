@@ -18,7 +18,6 @@
 
 extern void isr_stub_syscall(void);
 
-uint64_t syscall_kstack_top;
 
 typedef uint64_t (*syscall_handler_t)(struct isr_frame *f);
 
@@ -29,9 +28,47 @@ static bool in_user(void) {
     return t && t->pml4 != NULL;
 }
 
-static int64_t sys_console_write(unsigned dest, unsigned attr, uintptr_t buf, unsigned len) {
+static size_t path_join(struct task *t, const char *in, char *out, size_t max) {
+    if (!t || !in || !out || max < 2) return 0;
 
-    if (dest > PRINT_BOTH) return SYS_EINVAL;
+    size_t n = 0;
+    out[n++] = '/';
+
+    const char *parts[2];
+    parts[0] = (in[0] == '/') ? NULL : t->cwd;
+    parts[1] = in;
+
+    for (int i = 0; i < 2; i++) {
+        if (!parts[i]) continue;
+        const char *p = parts[i];
+        while (*p) {
+            while (*p == '/') p++;
+            const char *st = p;
+            while (*p && *p != '/') p++;
+            size_t l = (size_t)(p - st);
+            if (!l) break;
+            if (l == 1 && st[0] == '.') continue;
+            if (l == 2 && st[0] == '.' && st[1] == '.') {
+                if (n > 1) {
+                    n--;
+                    while (n > 1 && out[n - 1] != '/') n--;
+                }
+                continue;
+            }
+            if (n + l + 2 >= max) return 0;
+            if (n > 1) out[n++] = '/';
+            for (size_t k = 0; k < l; k++) out[n++] = st[k];
+        }
+    }
+
+    out[n] = 0;
+    return n;
+}
+
+static int64_t sys_console_write(unsigned dest, unsigned attr, uintptr_t buf, unsigned len) {
+    (void)attr;
+
+    if (dest > PRINT_NONE) return SYS_EINVAL;
     if (!buf || len == 0) return SYS_EINVAL;
     if (len > SYS_MAX_IO) len = SYS_MAX_IO;
 
@@ -43,11 +80,9 @@ static int64_t sys_console_write(unsigned dest, unsigned attr, uintptr_t buf, un
         src = iobuf;
     }
 
-    uint32_t kattr = KATTR(dest, attr);
-
     preempt_disable();
     for (uint64_t i = 0; i < len; i++) {
-        kprintchar(src[i], kattr);
+        kprintchar(src[i], dest);
     }
     preempt_enable();
 
@@ -154,7 +189,6 @@ static void exec_free_vec(char **vec) {
 }
 
 static char **exec_copy_vec(uintptr_t user_vec, size_t *out_n) {
-    const char *empty[1] = { NULL };
     *out_n = 0;
 
     if (!user_vec) {
@@ -181,7 +215,6 @@ static char **exec_copy_vec(uintptr_t user_vec, size_t *out_n) {
         }
 
         size_t len = 0;
-        if (!copyinstr(NULL, (const char *)up, 0)) { }
         char probe[2];
         if (!copyin(probe, (const void *)up, 1)) {
             exec_free_vec(out);
@@ -215,8 +248,10 @@ static int64_t sys_execve(uintptr_t path, uintptr_t uargv, uintptr_t uenvp) {
     if (!t || !in_user()) return SYS_EINVAL;
     if (!frame) return SYS_EFAULT;
 
+    char kpath_raw[EXEC_MAX_PATH];
     char kpath[EXEC_MAX_PATH];
-    if (!copyinstr(kpath, (const char *)path, sizeof kpath)) return SYS_EFAULT;
+    if (!copyinstr(kpath_raw, (const char *)path, sizeof kpath_raw)) return SYS_EFAULT;
+    if (!path_join(t, kpath_raw, kpath, sizeof kpath)) return SYS_ENAMETOOLONG;
 
     size_t argc = 0, envc = 0;
     char **argv = exec_copy_vec(uargv, &argc);
@@ -322,10 +357,50 @@ static int copy_path(const char *up, char *out, size_t out_max) {
     return out[0] ? 0 : ABI_EFAULT;
 }
 
+static int copy_path_resolved(uintptr_t up, char *out, size_t out_max) {
+    char raw[256];
+    int cp_err = copy_path((const char *)up, raw, sizeof raw);
+    if (cp_err < 0) return cp_err;
+    struct task *t = task_current();
+    if (!t) return ABI_EINVAL;
+    if (!path_join(t, raw, out, out_max)) return ABI_ENAMETOOLONG;
+    return 0;
+}
+
+static int64_t sys_chdir(uintptr_t path) {
+    struct task *t = task_current();
+    if (!t) return SYS_ENOSYS;
+
+    char kpath[256];
+    int cp_err = copy_path_resolved(path, kpath, sizeof kpath);
+    if (cp_err < 0) return cp_err;
+
+    fs_node_t node;
+    if (!fs_lookup(kpath, &node)) return SYS_ENOENT;
+    if (!node.is_dir) return SYS_ENOTDIR;
+
+    size_t n = 0;
+    while (kpath[n]) n++;
+    for (size_t i = 0; i <= n; i++) t->cwd[i] = kpath[i];
+    return 0;
+}
+
+static int64_t sys_getcwd(uintptr_t buf, uint64_t size) {
+    struct task *t = task_current();
+    if (!t || !in_user()) return SYS_EINVAL;
+    if (!buf || size == 0) return SYS_EINVAL;
+
+    size_t n = 0;
+    while (t->cwd[n]) n++;
+    if (n + 1 > size) return SYS_EINVAL;
+    if (!copyout((void *)buf, t->cwd, n + 1)) return SYS_EFAULT;
+    return (int64_t)n;
+}
+
 static int64_t sys_mkdir(uintptr_t path, unsigned mode) {
     (void)mode;
     char kpath[256];
-    int cp_err = copy_path((const char *)path, kpath, sizeof kpath);
+    int cp_err = copy_path_resolved(path, kpath, sizeof kpath);
     if (cp_err < 0) return cp_err;
     return (int64_t)fs_mkdir(kpath, NULL);
 }
@@ -334,7 +409,7 @@ static int64_t sys_mkdirat(int dirfd, uintptr_t path, unsigned mode) {
     (void)dirfd;
     (void)mode;
     char kpath[256];
-    int cp_err = copy_path((const char *)path, kpath, sizeof kpath);
+    int cp_err = copy_path_resolved(path, kpath, sizeof kpath);
     if (cp_err < 0) return cp_err;
     return (int64_t)fs_mkdir(kpath, NULL);
 }
@@ -342,7 +417,7 @@ static int64_t sys_mkdirat(int dirfd, uintptr_t path, unsigned mode) {
 static int64_t sys_unlinkat(int dirfd, uintptr_t path, int flags) {
     (void)dirfd;
     char kpath[256];
-    int cp_err = copy_path((const char *)path, kpath, sizeof kpath);
+    int cp_err = copy_path_resolved(path, kpath, sizeof kpath);
     if (cp_err < 0) return cp_err;
     if (flags & 0x200) return (int64_t)fs_rmdir(kpath);
     return (int64_t)fs_unlink(kpath);
@@ -350,14 +425,14 @@ static int64_t sys_unlinkat(int dirfd, uintptr_t path, int flags) {
 
 static int64_t sys_rmdir(uintptr_t path) {
     char kpath[256];
-    int cp_err = copy_path((const char *)path, kpath, sizeof kpath);
+    int cp_err = copy_path_resolved(path, kpath, sizeof kpath);
     if (cp_err < 0) return cp_err;
     return (int64_t)fs_rmdir(kpath);
 }
 
 static int64_t sys_truncate(uintptr_t path, int64_t length) {
     char kpath[256];
-    int cp_err = copy_path((const char *)path, kpath, sizeof kpath);
+    int cp_err = copy_path_resolved(path, kpath, sizeof kpath);
     if (cp_err < 0) return cp_err;
     if (length < 0) return SYS_EINVAL;
     fs_node_t node;
@@ -401,7 +476,7 @@ static int64_t sys_utimensat(int dirfd, uintptr_t path, uintptr_t times, int fla
 
     if (path) {
         char kpath[256];
-        int cp_err = copy_path((const char *)path, kpath, sizeof kpath);
+        int cp_err = copy_path_resolved(path, kpath, sizeof kpath);
     if (cp_err < 0) return cp_err;
         return (int64_t)fs_utimens(kpath, tv.msec);
     }
@@ -520,7 +595,7 @@ static int64_t sys_open(uintptr_t path, int flags) {
     if (!path) return SYS_EFAULT;
 
     char kpath[256];
-    int cp_err = copy_path((const char *)path, kpath, sizeof(kpath));
+    int cp_err = copy_path_resolved(path, kpath, sizeof kpath);
     if (cp_err < 0) return cp_err;
 
     int fd = fd_open(t, kpath, flags);
@@ -631,7 +706,7 @@ static int64_t sys_stat(uintptr_t path, uintptr_t st) {
     struct sys_stat *out = in_user() ? &kst : (struct sys_stat *)st;
 
     char kpath[256];
-    int cp_err = copy_path((const char *)path, kpath, sizeof(kpath));
+    int cp_err = copy_path_resolved(path, kpath, sizeof(kpath));
     if (cp_err < 0) return cp_err;
 
     fs_node_t n;
@@ -884,7 +959,7 @@ static int64_t sys_gethostname(uint64_t namep, uint64_t lenp) {
     if (!name) return SYS_EFAULT;
     if (len >= sizeof(sys_hostname)) len = sizeof(sys_hostname) - 1;
     if (!copyout(name, sys_hostname, len)) return SYS_EFAULT;
-    if (copyout(name + len, "", 1)) return SYS_EFAULT;
+    if (!copyout(name + len, "", 1)) return SYS_EFAULT;
     return 0;
 }
 

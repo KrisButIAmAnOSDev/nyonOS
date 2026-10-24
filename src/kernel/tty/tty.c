@@ -27,9 +27,9 @@ void tty_init(void) {
     console_termios.c_cflag = 0;
     console_termios.c_lflag = TTY_ISIG | TTY_ICANON | TTY_ECHO;
     console_termios.c_line = 0;
-    console_termios.c_cc[TTY_VINTR] = 3;   /* ^C */
-    console_termios.c_cc[TTY_VEOF] = 4;    /* ^D */
-    console_termios.c_cc[TTY_VKILL] = 3;   /* ^\ */
+    console_termios.c_cc[TTY_VINTR] = 3;
+    console_termios.c_cc[TTY_VEOF] = 4;
+    console_termios.c_cc[TTY_VKILL] = 3;
     console_termios.c_ibaud = 0;
     console_termios.c_obaud = 0;
     console_winsize.ws_row = 25;
@@ -103,7 +103,6 @@ bool tty_poll_ready(int fd, uint16_t events, uint16_t *revents) {
 
     if (!tty_ready) tty_init();
 
-    /* The console is the only pollable device that can block. */
     if (tty_input_ready()) {
         if (events & ABI_POLLIN) *revents |= ABI_POLLIN;
     }

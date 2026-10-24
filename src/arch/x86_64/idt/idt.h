@@ -47,6 +47,8 @@ extern struct idtr idtr;
 extern void* isr_stub_table[];
 
 void idt_init(void);
+void idt_reload(void);
+void idt_install(uint8_t vector, void *stub, uint8_t flags);
 void idt_set_descriptor(uint8_t vector, void* isr, uint8_t flags, uint8_t ist);
 void exception_handler(struct isr_frame* frame);
 void irq_dispatch(struct isr_frame* frame);

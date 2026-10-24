@@ -8,7 +8,6 @@
 
 #define SYS_MAX_IO 65536u
 
-extern uint64_t syscall_kstack_top;
 
 #define SYSCALL_VECTOR 0x80
 

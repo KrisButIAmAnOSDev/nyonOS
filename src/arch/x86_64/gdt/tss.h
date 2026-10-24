@@ -16,8 +16,8 @@ struct tss {
     uint16_t iomap_base;
 } __attribute__((packed));
 
-void tss_init(uint64_t hhdm_offset);
-void tss_set_rsp0(uint64_t rsp);
-uint64_t tss_addr(void);
+void tss_init(uint64_t hhdm_offset, uint32_t id);
+void tss_set_rsp0(uint32_t id, uint64_t rsp);
+uint64_t tss_addr(uint32_t id);
 
 #endif

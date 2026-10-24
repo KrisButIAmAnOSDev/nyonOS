@@ -3,52 +3,33 @@
 
 #include <stdint.h>
 #include <stdbool.h>
-#include "kernel/panic/panic.h"
-
-#define PREEMPT_CACHELINE 64
-
-struct preempt_state {
-    char pad0[PREEMPT_CACHELINE];
-    uint32_t count;
-    char pad1[PREEMPT_CACHELINE];
-};
-
-extern struct preempt_state preempt_state;
 
 static inline uint32_t preempt_count(void) {
-    return __atomic_load_n(&preempt_state.count, __ATOMIC_RELAXED);
+    extern uint32_t percpu_preempt_count_read(void);
+    return percpu_preempt_count_read();
 }
 
 static inline void preempt_disable(void) {
-    __atomic_add_fetch(&preempt_state.count, 1, __ATOMIC_RELAXED);
+    extern void percpu_preempt_count_inc(void);
+    percpu_preempt_count_inc();
 }
 
 static inline void preempt_enable(void) {
-    uint32_t prev = __atomic_fetch_sub(&preempt_state.count, 1, __ATOMIC_RELAXED);
-    if (prev == 0) {
-        panic_assert("preempt_enable with no matching preempt_disable");
-    }
+    extern void percpu_preempt_count_dec(void);
+    percpu_preempt_count_dec();
 }
 
 void preempt_init(void);
 
 static inline uint32_t preempt_open_for_block(void) {
-    uint32_t saved = __atomic_load_n(&preempt_state.count, __ATOMIC_RELAXED);
-    while (__atomic_load_n(&preempt_state.count, __ATOMIC_RELAXED) > 0)
-        __atomic_fetch_sub(&preempt_state.count, 1, __ATOMIC_RELAXED);
+    uint32_t saved = preempt_count();
+    while (preempt_count() > 0) preempt_enable();
     return saved;
 }
 
 static inline void preempt_close_after_block(uint32_t saved) {
-    uint32_t cur = __atomic_load_n(&preempt_state.count, __ATOMIC_RELAXED);
-    while (cur < saved) {
-        __atomic_fetch_add(&preempt_state.count, 1, __ATOMIC_RELAXED);
-        cur++;
-    }
-    while (cur > saved) {
-        __atomic_fetch_sub(&preempt_state.count, 1, __ATOMIC_RELAXED);
-        cur--;
-    }
+    while (preempt_count() < saved) preempt_disable();
+    while (preempt_count() > saved) preempt_enable();
 }
 
 #endif

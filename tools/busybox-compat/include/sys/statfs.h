@@ -29,4 +29,4 @@ int fstatfs(int __fd, struct statfs *__buf);
 }
 #endif
 
-#endif /* _SYS_STATFS_H */
+#endif

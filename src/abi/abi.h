@@ -42,6 +42,8 @@
 #define ABI_O_APPEND    0x400
 #define ABI_O_CLOEXEC   0x80000
 
+#define ABI_PRINT_NONE 3
+
 #define ABI_SEEK_SET 0
 #define ABI_SEEK_CUR 1
 #define ABI_SEEK_END 2

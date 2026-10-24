@@ -9,6 +9,11 @@
 
 static volatile uint32_t *fb;
 static uint32_t fb_w, fb_h, cur_x, cur_y, home_x;
+static uint32_t cur_fg = COLOR_WHITE;
+static uint32_t cur_bg = COLOR_BLACK;
+static int ansi_state;
+static char ansi_params[16];
+static size_t ansi_n;
 
 void kprintf_attach(volatile uint32_t *framebuffer, uint32_t width, uint32_t height) {
     fb = framebuffer;
@@ -23,7 +28,14 @@ void kprintf_home(uint32_t x, uint32_t y) {
     cur_y = y;
 }
 
+void kprintf_reset_colors(void) {
+    cur_fg = COLOR_WHITE;
+    cur_bg = COLOR_BLACK;
+    ansi_state = 0;
+}
+
 void kprintf_clear(void) {
+    kprintf_reset_colors();
     if (!fb) return;
     for (uint32_t y = 0; y < fb_h; y++) {
         for (uint32_t x = 0; x < fb_w; x++) {
@@ -54,15 +66,161 @@ static void screen_newline(void) {
     if (cur_y + GLYPH_H > fb_h) screen_scroll();
 }
 
-static void screen_char(char c, uint32_t color) {
+static uint32_t ansi_color(uint32_t idx) {
+    static const uint32_t normal[8] = {
+        0x000000, 0xAA0000, 0x00AA00, 0xAA5500,
+        0x0000AA, 0xAA00AA, 0x00AAAA, 0xAAAAAA
+    };
+    static const uint32_t bright[8] = {
+        0x555555, 0xFF5555, 0x55FF55, 0xFFFF55,
+        0x5555FF, 0xFF55FF, 0x55FFFF, 0xFFFFFF
+    };
+    if (idx < 8) return normal[idx];
+    if (idx < 16) return bright[idx - 8];
+    if (idx < 232) {
+        uint32_t i = idx - 16;
+        uint32_t lvl[6] = { 0, 95, 135, 175, 215, 255 };
+        uint32_t r = lvl[(i / 36) % 6];
+        uint32_t g = lvl[(i / 6) % 6];
+        uint32_t b = lvl[i % 6];
+        return (r << 16) | (g << 8) | b;
+    }
+    if (idx < 256) {
+        uint32_t v = 8 + (idx - 232) * 10;
+        return (v << 16) | (v << 8) | v;
+    }
+    return COLOR_WHITE;
+}
+
+static size_t ansi_ints(int *v, size_t max) {
+    size_t n = 0;
+    long cur = -1;
+    for (size_t i = 0; i < ansi_n; i++) {
+        char c = ansi_params[i];
+        if (c >= '0' && c <= '9') {
+            if (cur < 0) cur = 0;
+            cur = cur * 10 + (c - '0');
+        } else if (c == ';') {
+            if (n < max) v[n++] = (int)cur;
+            cur = -1;
+        }
+    }
+    if (cur >= 0 && n < max) v[n++] = (int)cur;
+    return n;
+}
+
+static void ansi_erase_range(uint32_t x0, uint32_t x1) {
     if (!fb) return;
+    for (uint32_t x = x0; x < x1 && x < fb_w; x++)
+        for (int row = 0; row < GLYPH_H && cur_y + (uint32_t)row < fb_h; row++)
+            fb[(cur_y + (uint32_t)row) * fb_w + x] = cur_bg;
+}
+
+static void ansi_run(char final) {
+    int v[8];
+    size_t n = ansi_ints(v, 8);
+    int p0 = n > 0 ? v[0] : -1;
+    uint32_t step = (p0 > 1 ? (uint32_t)p0 : 1) * GLYPH_H;
+
+    if (final == 'm') {
+        if (n == 0) { cur_fg = COLOR_WHITE; cur_bg = COLOR_BLACK; return; }
+        for (size_t i = 0; i < n; i++) {
+            int p = v[i];
+            if (p == 0) { cur_fg = COLOR_WHITE; cur_bg = COLOR_BLACK; }
+            else if (p == 39) cur_fg = COLOR_WHITE;
+            else if (p == 49) cur_bg = COLOR_BLACK;
+            else if (p >= 30 && p <= 37) cur_fg = ansi_color((uint32_t)(p - 30));
+            else if (p >= 90 && p <= 97) cur_fg = ansi_color((uint32_t)(p - 82));
+            else if (p >= 40 && p <= 47) cur_bg = ansi_color((uint32_t)(p - 40));
+            else if (p >= 100 && p <= 107) cur_bg = ansi_color((uint32_t)(p - 92));
+            else if (p == 38 && i + 2 < n && v[i + 1] == 5) { cur_fg = ansi_color((uint32_t)v[i + 2]); i += 2; }
+            else if (p == 48 && i + 2 < n && v[i + 1] == 5) { cur_bg = ansi_color((uint32_t)v[i + 2]); i += 2; }
+        }
+        return;
+    }
+    if (final == 'J') {
+        if (p0 == 2) {
+            kprintf_clear();
+            cur_x = home_x;
+            cur_y = 0;
+        }
+        return;
+    }
+    if (final == 'K') {
+        if (p0 == 1) ansi_erase_range(home_x, cur_x + GLYPH_W);
+        else if (p0 == 2) ansi_erase_range(home_x, fb_w);
+        else ansi_erase_range(cur_x, fb_w);
+        return;
+    }
+    if (final == 'A') {
+        if (cur_y >= step) cur_y -= step;
+        return;
+    }
+    if (final == 'B') {
+        cur_y += step;
+        if (cur_y + GLYPH_H > fb_h) cur_y = fb_h - GLYPH_H;
+        return;
+    }
+    if (final == 'C') {
+        uint32_t hstep = (p0 > 1 ? (uint32_t)p0 : 1) * GLYPH_W;
+        cur_x += hstep;
+        if (cur_x + GLYPH_W > fb_w) cur_x = fb_w - GLYPH_W;
+        return;
+    }
+    if (final == 'D') {
+        uint32_t hstep = (p0 > 1 ? (uint32_t)p0 : 1) * GLYPH_W;
+        if (cur_x >= home_x + hstep) cur_x -= hstep;
+        else cur_x = home_x;
+        return;
+    }
+    if (final == 'G') {
+        if (p0 >= 1) cur_x = home_x + (uint32_t)(p0 - 1) * GLYPH_W;
+        if (cur_x + GLYPH_W > fb_w) cur_x = fb_w - GLYPH_W;
+        return;
+    }
+    if (final == 'H' || final == 'f') {
+        cur_x = home_x;
+        cur_y = 0;
+        return;
+    }
+}
+
+static void screen_char(char c) {
+    if (!fb) return;
+
+    if (ansi_state == 2) {
+        if (c >= 0x40 && c <= 0x7e) {
+            ansi_state = 0;
+            ansi_params[ansi_n] = 0;
+            ansi_run(c);
+        } else if ((c >= '0' && c <= '9') || c == ';' || c == '?') {
+            if (ansi_n < sizeof ansi_params - 1) ansi_params[ansi_n++] = c;
+        } else {
+            ansi_state = 0;
+        }
+        return;
+    }
+    if (ansi_state == 1) {
+        if (c == '[') { ansi_state = 2; ansi_n = 0; }
+        else ansi_state = 0;
+        return;
+    }
+    if (c == 27) { ansi_state = 1; return; }
+
     if (c == '\n') { screen_newline(); return; }
-    if (c == '\r') return;
+    if (c == '\r') { cur_x = home_x; return; }
+    if (c == '\t') {
+        uint32_t col = (cur_x - home_x) / GLYPH_W;
+        col = (col + 8) & ~(uint32_t)7;
+        cur_x = home_x + col * GLYPH_W;
+        if (cur_x + GLYPH_W > fb_w) screen_newline();
+        return;
+    }
 
     if (c == '\b') {
         if (cur_x >= home_x + GLYPH_W) {
             cur_x -= GLYPH_W;
-            draw_char(fb, ' ', cur_x, cur_y, 0x000000, fb_w, fb_h);
+            draw_char(fb, ' ', cur_x, cur_y, cur_bg, cur_bg, fb_w, fb_h);
         }
         return;
     }
@@ -72,22 +230,17 @@ static void screen_char(char c, uint32_t color) {
     if (cur_x + GLYPH_W > fb_w) screen_newline();
     if (cur_y + GLYPH_H > fb_h) return;
 
-    draw_char(fb, (uint8_t)c, cur_x, cur_y, color, fb_w, fb_h);
+    draw_char(fb, (uint8_t)c, cur_x, cur_y, cur_fg, cur_bg, fb_w, fb_h);
     cur_x += GLYPH_W;
 }
 
 static uint8_t attr_flags(uint32_t attr) { return (uint8_t)(attr & 0xFF); }
-static uint32_t attr_color(uint32_t attr) {
-    uint32_t c = attr >> 8;
-    return c ? c : COLOR_WHITE;
-}
 
 void kprintchar(char c, uint32_t attr) {
     uint8_t flags = attr_flags(attr);
-    uint32_t color = attr_color(attr);
 
     if (flags == PRINT_SCREEN) {
-        screen_char(c, color);
+        screen_char(c);
         return;
     }
     if (flags == PRINT_SERIAL) {
@@ -95,7 +248,7 @@ void kprintchar(char c, uint32_t attr) {
         return;
     }
     serial_putchar(c);
-    screen_char(c, color);
+    screen_char(c);
 }
 
 static void put_unsigned(uint64_t v, unsigned base, bool upper, uint32_t attr, int min_digits, char pad) {

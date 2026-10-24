@@ -5,6 +5,7 @@
 #include "arch/x86_64/idt/idt.h"
 #include "arch/x86_64/cpu/cpu.h"
 
+
 extern void user_copy_bytes(void *dst, const void *src, size_t len);
 extern void user_copy_str(char *dst, const char *src, size_t max);
 
@@ -12,8 +13,6 @@ extern char user_copy_bytes_lo[];
 extern char user_copy_bytes_hi[];
 extern char user_copy_str_lo[];
 extern char user_copy_str_hi[];
-
-volatile uint64_t copy_abort;
 
 static bool rip_in_copy_helper(uint64_t rip) {
     if (rip >= (uint64_t)(uintptr_t)user_copy_bytes_lo &&
@@ -24,11 +23,10 @@ static bool rip_in_copy_helper(uint64_t rip) {
 }
 
 bool usermode_recover_copy(struct isr_frame *frame) {
-    struct task *t = task_current();
-    if (!t || !t->copy_active) return false;
+    if (!*percpu_copy_active()) return false;
     if (!rip_in_copy_helper(frame->rip)) return false;
 
-    copy_abort = 1;
+    percpu_copy_abort_set();
 
     frame->rip += 1;
     return true;
@@ -73,15 +71,14 @@ static bool do_copy(void *dst, const void *src, size_t len, bool src_is_user) {
     stac_if_needed();
     __asm__ volatile("sti" ::: "memory");
 
-    copy_abort = 0;
-    t->copy_active = true;
+    percpu_copy_begin();
     user_copy_bytes(dst, src, len);
-    t->copy_active = false;
+    percpu_copy_end();
 
     __asm__ volatile("cli" ::: "memory");
     clac_if_needed();
 
-    return copy_abort == 0;
+    return percpu_copy_abort_get() == 0;
 }
 
 bool copyin(void *dst, const void *src, size_t len) {
@@ -109,11 +106,10 @@ bool copyinstr(char *dst, const char *src, size_t max) {
     stac_if_needed();
     __asm__ volatile("sti" ::: "memory");
 
-    copy_abort = 0;
-    t->copy_active = true;
+    percpu_copy_begin();
     user_copy_str(dst, src, max);
-    bool aborted = copy_abort != 0;
-    t->copy_active = false;
+    bool aborted = percpu_copy_abort_get() != 0;
+    percpu_copy_end();
 
     __asm__ volatile("cli" ::: "memory");
     clac_if_needed();

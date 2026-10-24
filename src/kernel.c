@@ -52,6 +52,25 @@ static volatile struct limine_memmap_request memmap_request = {
     .revision = 0
 };
 
+__attribute__((used, section(".limine_requests")))
+static volatile struct limine_paging_mode_request limine_paging_request = {
+    .id = LIMINE_PAGING_MODE_REQUEST_ID,
+    .revision = 0
+};
+
+__attribute__((used, section(".limine_requests")))
+static volatile struct limine_mp_request limine_mp_request = {
+    .id = LIMINE_MP_REQUEST_ID,
+    .revision = 0,
+    .flags = 0
+};
+
+__attribute__((used, section(".limine_requests")))
+static volatile struct limine_executable_cmdline_request limine_cmdline_request = {
+    .id = LIMINE_EXECUTABLE_CMDLINE_REQUEST_ID,
+    .revision = 0
+};
+
 __attribute__((used, section(".limine_requests_start")))
 static volatile uint64_t limine_requests_start_marker[] = LIMINE_REQUESTS_START_MARKER;
 
@@ -119,6 +138,69 @@ static void busy_wait_ms(uint64_t ms) {
     uint64_t start = pit_get_ticks();
     while (pit_get_ticks() - start < ms) __asm__ volatile("hlt");
 }
+
+static uint64_t smp_hhdm_offset;
+static volatile uint32_t smp_go[MAX_CPUS];
+
+static void cpu_idle(void) {
+    for (;;) {
+        __asm__ volatile("sti; hlt" ::: "memory");
+    }
+}
+
+static void bsp_mp_done(struct limine_mp_info *info) {
+    (void)info;
+}
+
+static uint64_t ap_stack_top[MAX_CPUS];
+
+static void ap_entry(struct limine_mp_info *info) {
+    if (!info) { cpu_idle(); return; }
+
+    uint32_t id = info->processor_id;
+    uint64_t top = (id < MAX_CPUS) ? ap_stack_top[id] : 0;
+    if (top) __asm__ volatile("mov %0, %%rsp" :: "r"(top) : "memory");
+
+    vmm_switch_address_space(kernel_pml4);
+
+    extern void isr_stub_resched(void);
+    idt_install(LAPIC_RESCHED_VECTOR, (void *)isr_stub_resched, 0x8E);
+    idt_reload();
+    cpu_bootstrap_ap(id, info->lapic_id, smp_hhdm_offset);
+
+    while (id >= MAX_CPUS || !__atomic_load_n(&smp_go[id], __ATOMIC_ACQUIRE)) {
+        __asm__ volatile("pause" ::: "memory");
+    }
+
+    task_init_cpu();
+    lapic_timer_set(cpu_self()->lapic_base, LAPIC_TIMER_PERIOD, LAPIC_TIMER_DIV);
+
+    __asm__ volatile("sti" ::: "memory");
+
+    for (;;) __asm__ volatile("hlt" ::: "memory");
+}
+
+static void lock_invariant_test(void) {
+    spinlock_t probe = SPINLOCK_INIT;
+    uint32_t depth0 = sync_lock_depth();
+    uint32_t pre0 = preempt_count();
+
+    lock_acquire(LOCK_HEAP, &probe);
+    bool depth_inside = sync_lock_depth() == depth0 + 1;
+    busy_wait_ms(40);
+    lock_release(LOCK_HEAP, &probe);
+
+    uint32_t depth1 = sync_lock_depth();
+    uint32_t pre1 = preempt_count();
+
+    bool ok = depth_inside && depth1 == depth0 && pre0 == 0 && pre1 == 0;
+
+    kprintf(PRINT_SERIAL, "LOCK test: lock across a timer tick survived: ");
+    kprintchar(ok ? 'Y' : 'N', PRINT_SERIAL);
+    kprintf(PRINT_SERIAL, "  depth %u->%u preempt %u->%u cpu %u\n",
+            depth0, depth1, pre0, pre1, cpu_id());
+}
+
 
 static void task_aqua(void) {
     for (int round = 0; round < 4; round++) {
@@ -192,7 +274,9 @@ void kmain(void) {
     pmm_init(memmap_request.response, hhdm_offset);
     vmm_init(hhdm_offset);
 
-    gdt_init(hhdm_offset);
+    gdt_init(hhdm_offset, 0);
+
+    cpu_bootstrap();
 
     paddr_t lapic_phys = 0xFEE00000;
     vaddr_t lapic_virt = hhdm_offset + lapic_phys;
@@ -207,11 +291,60 @@ void kmain(void) {
     pit_init(1000);
     rtc_init();
     lapic_unmask_ext_int(lapic_virt);
+
+    if (limine_paging_request.response) {
+        cpu_paging_mode_report(limine_paging_request.response->mode, true);
+    }
+
+    smp_hhdm_offset = hhdm_offset;
+
+    cpu_mark_online(0, 0);
     cpu_detect();
     cpu_enable_nx();
     cpu_enable_smep_smap();
     cpu_enable_sse_user();
     cpu_enable_pcid();
+
+    kprintf(PRINT_SERIAL, "CPU: limine says %s paging, vmm says %s, agree: %c\n",
+            cpu_paging_mode_name(), vmm_5level ? "5-level" : "4-level",
+            cpu_paging_mode_matches() ? 'Y' : 'N');
+    {
+        uint32_t ncpu = 1;
+        struct limine_mp_response *mp = (struct limine_mp_response *)limine_mp_request.response;
+        if (mp) {
+            ncpu = (uint32_t)mp->cpu_count;
+            if (ncpu > MAX_CPUS) ncpu = MAX_CPUS;
+            for (uint32_t i = 0; i < ncpu; i++) {
+                struct limine_mp_info *mi = mp->cpus[i];
+                if (!mi) continue;
+                mi->goto_address = (i == 0) ? bsp_mp_done : ap_entry;
+            }
+            cpu_set_detected(ncpu);
+        }
+
+        for (uint32_t i = 1; i < ncpu; i++) {
+            paddr_t sp = 0;
+            if (pmm_alloc(&sp, 4)) ap_stack_top[i] = vmm_hhdm_offset + sp + 4 * PAGE_SIZE;
+            __atomic_store_n(&smp_go[i], 1, __ATOMIC_RELEASE);
+        }
+
+        if (mp && ncpu > 1) mp->cpus[0]->goto_address(mp->cpus[0]);
+
+        {
+            uint64_t start = cpu_rdtsc();
+            while (cpu_online_count() < ncpu && cpu_rdtsc() - start < 20000000000ULL) {
+                __asm__ volatile("pause" ::: "memory");
+            }
+        }
+
+        kprintf(PRINT_SERIAL, "SMP: limine reports %u cpus, online %u, bsp lapic_id=%u\n",
+                ncpu, cpu_online_count(),
+                (unsigned)lapic_id_read(hhdm_offset + LAPIC_DEFAULT_PHYS));
+    }
+
+    kprintf(PRINT_SERIAL, "CPU: percpu self=%p id=%u online=%u of %u\n",
+            (void *)cpu_self(), cpu_id(), cpu_online_count(), cpu_count());
+
     crypto_init();
     syscall_init();
     irq_install(0, pit_handler);
@@ -233,6 +366,7 @@ void kmain(void) {
     }
 
     task_init();
+    lock_invariant_test();
     task_spawn("aqua", task_aqua);
     task_spawn("seth", task_seth);
 
@@ -240,8 +374,8 @@ void kmain(void) {
 
     kprintf_clear();
     kprintf_home(0, 0);
-    kprintf(KATTR(PRINT_BOTH, COLOR_MAGENTA), "nyonn nyon nyonn ulelelel nyon leleel nyonn\n");
-    kprintf(KATTR(PRINT_SCREEN, COLOR_CYAN), "kawkaw from deltarune\n");
+    kprintf(PRINT_BOTH, "\x1b[35mnyonn nyon nyonn ulelelel nyon leleel nyonn\x1b[0m\n");
+    kprintf(PRINT_SCREEN, "\x1b[36mkawkaw from deltarune\x1b[0m\n");
     kprintf(PRINT_SERIAL, "ululululululelelleelele uleeelle nyon -another kawkaw\n");
 
     {
@@ -347,6 +481,19 @@ void kmain(void) {
     }
 
     shell_run();
+
+    {
+        uint32_t n = cpu_count();
+        uint64_t total = 0;
+        for (uint32_t i = 0; i < n; i++) total += cpu_resched_count(i);
+        kprintf(PRINT_SERIAL, "SMP: %llu resched total across %u cpus\n",
+                (unsigned long long)total, n);
+        for (uint32_t i = 0; i < n; i++) {
+            kprintf(PRINT_SERIAL, "SMP: cpu%u resched %llu switches %llu\n", i,
+                    (unsigned long long)cpu_resched_count(i),
+                    (unsigned long long)cpu_switch_count(i));
+        }
+    }
 
     for (;;) {
         uint64_t seq = task_wake_seq();

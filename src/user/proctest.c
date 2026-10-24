@@ -17,8 +17,6 @@ static void ck(int cond, const char *what) {
 	}
 }
 
-/* On its own page, so the parent's read of it is not preceded by a write
-   to the same page that would resolve the copy and hide the race. */
 static volatile int child_ran __attribute__((aligned(4096)));
 
 int main(void) {

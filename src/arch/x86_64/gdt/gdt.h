@@ -19,7 +19,7 @@ struct gdt_pointer {
     uint64_t base;
 } __attribute__((packed));
 
-void gdt_init(uint64_t hhdm_offset);
+void gdt_init(uint64_t hhdm_offset, uint32_t id);
 void gdt_dump(void);
 
 #endif

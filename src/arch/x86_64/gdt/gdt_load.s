@@ -1,7 +1,5 @@
 .intel_syntax noprefix
 
-.extern gdt_tss_desc
-
 .global gdt_load
 .type gdt_load,@function
 gdt_load:
@@ -21,8 +19,10 @@ gdt_load:
     mov gs, ax
     mov ss, ax
 
-    mov rax, offset gdt_tss_desc
+    mov rax, rsi
     and byte ptr [rax + 5], 0xfd
     mov ax, 0x28
     ltr ax
     ret
+
+.size gdt_load, . - gdt_load

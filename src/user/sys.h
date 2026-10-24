@@ -23,6 +23,8 @@ typedef unsigned char uchar;
 #define AT_FDCWD      (-100)
 #define AT_REMOVEDIR  0x200
 
+#define PRINT_NONE ABI_PRINT_NONE
+
 #define SEEK_SET ABI_SEEK_SET
 #define SEEK_CUR ABI_SEEK_CUR
 #define SEEK_END ABI_SEEK_END

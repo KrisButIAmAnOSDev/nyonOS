@@ -3,6 +3,7 @@
 #include "kernel/sync/preempt.h"
 #include "kernel/kprintf/kprintf.h"
 #include "arch/x86_64/rtc/rtc.h"
+#include "arch/x86_64/cpu/cpu.h"
 
 static void fat_stamp(int64_t unix_sec, uint16_t *out_time, uint16_t *out_date);
 
@@ -10,7 +11,10 @@ static void fat_stamp(int64_t unix_sec, uint16_t *out_time, uint16_t *out_date);
 #define FS_SCAN_MAX 4096
 
 static fs_volume_t fs;
-static uint8_t sec[FS_SECTOR_SIZE] __attribute__((aligned(4)));
+
+static uint8_t fs_sectors[MAX_CPUS][FS_SECTOR_SIZE] __attribute__((aligned(4)));
+
+#define sec (fs_sectors[cpu_id()])
 
 static uint16_t rd16(const uint8_t *p) {
     return (uint16_t)(p[0] | (p[1] << 8));
@@ -150,8 +154,14 @@ static bool sector_write(uint32_t lba, const void *buf) {
     return block_write(fs.dev, lba, 1, buf);
 }
 
-static bool fat_entry(uint32_t cluster, uint16_t *out) {
+static bool cluster_ok(uint32_t cluster) {
     if (cluster < FS_FIRST_CLUSTER || cluster >= FS_BAD_CLUSTER) return false;
+    if (!fs.mounted) return false;
+    return cluster < FS_FIRST_CLUSTER + fs.cluster_count;
+}
+
+static bool fat_entry(uint32_t cluster, uint16_t *out) {
+    if (!cluster_ok(cluster)) return false;
     uint32_t byte = cluster * 2;
     uint32_t lba = fs.fat_start + byte / fs.bytes_per_sector;
     uint32_t off = byte % fs.bytes_per_sector;
@@ -211,7 +221,7 @@ static bool fat_free_chain(uint32_t cluster) {
 }
 
 static bool cluster_nth(uint32_t cluster, uint32_t skip, uint32_t *out) {
-    if (cluster < FS_FIRST_CLUSTER || cluster >= FS_BAD_CLUSTER) return false;
+    if (!cluster_ok(cluster)) return false;
     for (uint32_t i = 0; i < skip; i++) {
         uint32_t nx;
         if (!fat_next(cluster, &nx)) return false;
@@ -312,7 +322,7 @@ static bool parse_dirent(const uint8_t *e, fs_node_t *out) {
     out->size = out->is_dir ? 0 : rd32(e + 28);
     out->is_root = false;
 
-    if (!out->is_dir && (out->cluster < FS_FIRST_CLUSTER || out->cluster >= FS_BAD_CLUSTER)) out->cluster = 0;
+    if (!out->is_dir && !cluster_ok(out->cluster)) out->cluster = 0;
     return true;
 }
 
@@ -960,7 +970,7 @@ bool fs_node_read_inner(const fs_node_t *node, uint32_t offset, void *buf, uint3
     if (node->is_dir) return false;
     if (len == 0) return true;
     if (offset >= node->size) return false;
-    if (node->cluster < FS_FIRST_CLUSTER || node->cluster >= FS_BAD_CLUSTER) return false;
+    if (!cluster_ok(node->cluster)) return false;
 
     if (len > node->size - offset) len = node->size - offset;
     if (len == 0) return false;

@@ -5,14 +5,14 @@
 .global user_copy_bytes_lo
 user_copy_bytes_lo:
 
-.extern copy_abort
+#include "percpu_off.h"
 
 user_copy_bytes:
     test rdx, rdx
     jz .done
     cld
 .loop:
-    mov r8, [rip + copy_abort]
+    mov r8, gs:PERCPU_COPY_ABORT_OFF
     test r8, r8
     jnz .done
     movsb
@@ -35,7 +35,7 @@ user_copy_str:
     jz .done2
     cld
 .loop2:
-    mov r8, [rip + copy_abort]
+    mov r8, gs:PERCPU_COPY_ABORT_OFF
     test r8, r8
     jnz .done2
     lodsb

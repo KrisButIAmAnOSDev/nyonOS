@@ -3,6 +3,9 @@
 .extern exception_handler
 .extern irq_dispatch
 .extern keyboard_handler
+.extern smp_resched_handler
+
+.set RESCHED_VECTOR, 0xFD
 
 .macro ISR_NOERRCODE num
 .global isr_stub_\num
@@ -18,6 +21,12 @@ isr_stub_\num:
     push \num
     jmp isr_common
 .endm
+
+.global isr_stub_resched
+isr_stub_resched:
+    push 0
+    push RESCHED_VECTOR
+    jmp isr_common
 
 .global isr_common
 isr_common:
@@ -39,11 +48,16 @@ isr_common:
 
     mov rdi, rsp
     mov rsi, [rsp + 120]
+    cmp rsi, RESCHED_VECTOR
+    je 3f
     cmp rsi, 32
     jl 1f
     cmp rsi, 47
     jg 1f
     call irq_dispatch
+    jmp 2f
+3:
+    call smp_resched_handler
     jmp 2f
 1:
     call exception_handler

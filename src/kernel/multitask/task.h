@@ -49,12 +49,15 @@ struct task {
     void *vfork_chan;
     void *wait_chan;
     uint64_t wake_tick;
+    volatile uint64_t wake_gen;
     const char *name;
     struct fd_table fds;
+    char cwd[FD_PATH_MAX];
 };
 
 void task_resume_asm(struct isr_frame *frame);
 void task_init(void);
+void task_init_cpu(void);
 struct task *task_spawn(const char *name, void (*entry)(void));
 struct task *task_spawn_ring3(const char *name, paddr_t code_phys, size_t code_pages, vaddr_t code_virt, vaddr_t entry_rip, paddr_t shared_phys, vaddr_t shared_virt);
 struct vmspace;
@@ -64,6 +67,7 @@ struct task *task_spawn_vmspace(const char *name, struct vmspace *vs, vaddr_t en
 struct task *task_spawn_ring3_lent(const char *name, paddr_t code_phys, size_t code_pages, vaddr_t code_virt, vaddr_t entry_rip, paddr_t shared_phys, vaddr_t shared_virt);
 void task_schedule(struct isr_frame *frame);
 void task_yield(struct isr_frame *frame);
+void smp_resched_handler(struct isr_frame *frame);
 void task_exit(void);
 void task_exit_code(uint64_t code);
 void task_block_current(uint64_t seen_seq);
@@ -77,6 +81,7 @@ void task_wake_chan(void *chan);
 void task_tick(uint64_t now);
 bool task_current_blocked(void);
 void task_reap_now(void);
+
 struct task *task_current(void);
 struct task *task_find_pid(uint32_t pid);
 struct task *task_find_zombie(uint32_t pid);
