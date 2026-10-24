@@ -805,6 +805,7 @@ void task_exit_code(uint64_t code) {
 
     self->exit_code = code;
     fd_tty_task_gone(self->pid);
+    fd_table_clear(self);
 
     if (!self->expect_fault)
         kprintf(PRINT_SERIAL, "task: %s exited with code %llu\n", self->name, (unsigned long long)code);

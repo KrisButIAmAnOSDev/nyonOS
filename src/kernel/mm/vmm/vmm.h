@@ -52,6 +52,7 @@ bool vmm_unmap_keep(struct page_table *root, vaddr_t vaddr, size_t pages);
 uint64_t vmm_query_in(struct page_table *root, vaddr_t vaddr);
 
 bool vmm_map_frames(struct page_table *root, vaddr_t vaddr, paddr_t paddr, size_t pages, uint64_t flags, bool exec, bool owned);
+bool vmm_protect(struct page_table *root, vaddr_t addr, size_t pages, uint8_t prot);
 bool vmm_unmap_keep_frames(struct page_table *root, vaddr_t vaddr, size_t pages, paddr_t *freed, size_t max_freed);
 
 bool vmm_range_present_in(struct page_table *root, vaddr_t addr, size_t len);
@@ -64,6 +65,10 @@ bool vmm_cow_enabled(void);
 size_t vmm_cow_shared(void);
 bool vmm_set_cow(bool on);
 bool vmm_range_writable_in(struct page_table *root, vaddr_t addr, size_t len);
+
+#define VM_PROT_READ   1
+#define VM_PROT_WRITE  2
+#define VM_PROT_EXEC   4
 
 #define VMM_USER_EXEC_FLAGS (PAGE_PRESENT | PAGE_WRITE)
 #define VMM_DEFAULT_FLAGS (PAGE_PRESENT | PAGE_WRITE | PAGE_GLOBAL)

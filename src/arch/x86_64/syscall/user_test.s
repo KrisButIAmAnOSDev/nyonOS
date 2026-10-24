@@ -1026,19 +1026,29 @@ msg_eol_end:
 .endm
 
 .macro TGETFG fd
+    sub rsp, 8
     mov rax, SYS_IOCTL
     mov rdi, \fd
     mov rsi, KTTY_GETFG
-    xor rdx, rdx
+    mov rdx, rsp
     syscall
+    test rax, rax
+    jnz 1f
+    mov rax, [rsp]
+1:
+    add rsp, 8
 .endm
 
 .macro TSETFG pid
+    sub rsp, 8
+    mov rax, \pid
+    mov [rsp], eax
     mov rax, SYS_IOCTL
     xor rdi, rdi
     mov rsi, KTTY_SETFG
-    mov rdx, \pid
+    mov rdx, rsp
     syscall
+    add rsp, 8
 .endm
 
 

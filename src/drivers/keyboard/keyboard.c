@@ -3,6 +3,7 @@
 #include "arch/x86_64/pic/pic.h"
 #include "kernel/multitask/task.h"
 #include "kernel/tty/tty.h"
+#include "kernel/fd/fd.h"
 #include <stdbool.h>
 #include "kernel/sync/preempt.h"
 
@@ -55,6 +56,13 @@ void *keyboard_wait_chan(void) {
 
 bool keyboard_has_input(void) {
     return buffer_head != buffer_tail;
+}
+
+bool keyboard_has_char(char c) {
+    if (!c) return false;
+    for (size_t i = buffer_tail; i != buffer_head; i = (i + 1) % 256)
+        if (keyboard_buffer[i] == c) return true;
+    return false;
 }
 
 bool keyboard_line_ready(void) {
@@ -150,6 +158,7 @@ void keyboard_handler(struct isr_frame *frame) {
     }
 
     task_wake_chan(&tty_wait_chan);
+    poll_notify();
 }
 
 bool keyboard_try_pop(char *out) {
@@ -168,6 +177,7 @@ bool keyboard_inject_char(char c) {
     __asm__ volatile("pushfq; pop %0; cli" : "=r"(rflags) :: "memory");
     bool kept = keyboard_buffer_push(c);
     task_wake_chan(&tty_wait_chan);
+    poll_notify();
     if (rflags & 0x200) __asm__ volatile("sti" ::: "memory");
     return kept;
 }

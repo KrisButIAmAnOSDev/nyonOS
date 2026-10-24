@@ -2,6 +2,9 @@
 #include "kernel/block/block.h"
 #include "kernel/sync/preempt.h"
 #include "kernel/kprintf/kprintf.h"
+#include "arch/x86_64/rtc/rtc.h"
+
+static void fat_stamp(int64_t unix_sec, uint16_t *out_time, uint16_t *out_date);
 
 #define FS_PATH_MAX 128
 #define FS_SCAN_MAX 4096
@@ -25,6 +28,7 @@ static bool is_pow2(uint32_t v) {
 static bool sector_read(uint32_t lba) {
     return block_read(fs.dev, lba, 1, sec);
 }
+
 
 static uint8_t dir_sector_cache[FS_SECTOR_SIZE] __attribute__((aligned(4)));
 static uint32_t dir_sector_lba = 0xFFFFFFFFu;
@@ -140,6 +144,12 @@ static const uint8_t *fat_sector(uint32_t lba) {
     return fat_sector_cache;
 }
 
+static bool sector_write(uint32_t lba, const void *buf) {
+    dir_sector_lba = 0xFFFFFFFFu;
+    fat_sector_lba = 0xFFFFFFFFu;
+    return block_write(fs.dev, lba, 1, buf);
+}
+
 static bool fat_entry(uint32_t cluster, uint16_t *out) {
     if (cluster < FS_FIRST_CLUSTER || cluster >= FS_BAD_CLUSTER) return false;
     uint32_t byte = cluster * 2;
@@ -160,6 +170,46 @@ static bool fat_next(uint32_t cluster, uint32_t *out) {
     return true;
 }
 
+static bool fat_set(uint32_t cluster, uint16_t value) {
+    if (cluster < FS_FIRST_CLUSTER || cluster >= FS_BAD_CLUSTER) return false;
+    uint32_t byte = cluster * 2;
+    uint32_t lba = fs.fat_start + byte / fs.bytes_per_sector;
+    uint32_t off = byte % fs.bytes_per_sector;
+    uint8_t buf[FS_SECTOR_SIZE];
+    if (!block_read(fs.dev, lba, 1, buf)) return false;
+    buf[off] = (uint8_t)(value & 0xFF);
+    buf[off + 1] = (uint8_t)(value >> 8);
+    return sector_write(lba, buf);
+}
+
+static bool fat_alloc(uint32_t *out) {
+    uint32_t per_sector = fs.bytes_per_sector / 2;
+    uint32_t limit = fs.cluster_count + FS_FIRST_CLUSTER;
+    for (uint32_t s = 0; s < fs.sectors_per_fat; s++) {
+        uint8_t buf[FS_SECTOR_SIZE];
+        if (!block_read(fs.dev, fs.fat_start + s, 1, buf)) return false;
+        for (uint32_t i = 0; i < per_sector; i++) {
+            uint32_t cluster = s * per_sector + i;
+            if (cluster < FS_FIRST_CLUSTER) continue;
+            if (cluster >= limit) return false;
+            uint16_t v = (uint16_t)(buf[i * 2] | (buf[i * 2 + 1] << 8));
+            if (v == 0) { *out = cluster; return true; }
+        }
+    }
+    return false;
+}
+
+static bool fat_free_chain(uint32_t cluster) {
+    while (cluster >= FS_FIRST_CLUSTER && cluster < FS_BAD_CLUSTER) {
+        uint16_t next;
+        if (!fat_entry(cluster, &next)) return false;
+        if (!fat_set(cluster, 0)) return false;
+        if (next >= FS_EOC_MIN) break;
+        cluster = next;
+    }
+    return true;
+}
+
 static bool cluster_nth(uint32_t cluster, uint32_t skip, uint32_t *out) {
     if (cluster < FS_FIRST_CLUSTER || cluster >= FS_BAD_CLUSTER) return false;
     for (uint32_t i = 0; i < skip; i++) {
@@ -171,20 +221,17 @@ static bool cluster_nth(uint32_t cluster, uint32_t skip, uint32_t *out) {
     return true;
 }
 
-static bool dirent_raw(const fs_node_t *dir, uint32_t index, uint8_t *out) {
+static bool dirent_locate(const fs_node_t *dir, uint32_t index, uint32_t *lba_out,
+                           uint32_t *off_out) {
     if (!dir || !dir->is_dir) return false;
     if (index >= FS_SCAN_MAX) return false;
 
     uint32_t per_sector = fs.bytes_per_sector / FS_DIRENT_SIZE;
-    uint32_t lba;
 
     if (dir->is_root) {
         if (index >= fs.root_entry_count) return false;
-        lba = fs.root_start + index / per_sector;
-        uint32_t off = (index % per_sector) * FS_DIRENT_SIZE;
-        const uint8_t *p = dir_sector(lba);
-        if (!p) return false;
-        for (int i = 0; i < FS_DIRENT_SIZE; i++) out[i] = p[off + i];
+        *lba_out = fs.root_start + index / per_sector;
+        *off_out = (index % per_sector) * FS_DIRENT_SIZE;
         return true;
     }
 
@@ -197,12 +244,45 @@ static bool dirent_raw(const fs_node_t *dir, uint32_t index, uint8_t *out) {
     uint32_t cluster;
     if (!cluster_nth(dir->cluster, cl_index, &cluster)) return false;
 
-    lba = cluster_lba(cluster) + within / per_sector;
-    uint32_t off = (within % per_sector) * FS_DIRENT_SIZE;
+    *lba_out = cluster_lba(cluster) + within / per_sector;
+    *off_out = (within % per_sector) * FS_DIRENT_SIZE;
+    return true;
+}
+
+static bool dirent_raw(const fs_node_t *dir, uint32_t index, uint8_t *out) {
+    uint32_t lba, off;
+    if (!dirent_locate(dir, index, &lba, &off)) return false;
     const uint8_t *p = dir_sector(lba);
     if (!p) return false;
     for (int i = 0; i < FS_DIRENT_SIZE; i++) out[i] = p[off + i];
     return true;
+}
+
+static bool dirent_store(uint32_t lba, uint32_t off, const uint8_t *e) {
+    uint8_t buf[FS_SECTOR_SIZE];
+    if (!block_read(fs.dev, lba, 1, buf)) return false;
+    for (int i = 0; i < FS_DIRENT_SIZE; i++) buf[off + i] = e[i];
+    return sector_write(lba, buf);
+}
+
+static void dirent_build(uint8_t *e, const char *name83, uint8_t attr, uint32_t cluster,
+                         uint32_t size) {
+    for (int i = 0; i < FS_DIRENT_SIZE; i++) e[i] = 0;
+    for (int i = 0; i < 11; i++) e[i] = (uint8_t)(name83[i] ? name83[i] : ' ');
+    e[11] = attr;
+    uint16_t ft, fdt;
+    fat_stamp(rtc_unix_time(), &ft, &fdt);
+    e[14] = (uint8_t)(ft & 0xFF);  e[15] = (uint8_t)(ft >> 8);
+    e[16] = (uint8_t)(fdt & 0xFF); e[17] = (uint8_t)(fdt >> 8);
+    e[18] = (uint8_t)(fdt & 0xFF); e[19] = (uint8_t)(fdt >> 8);
+    e[22] = (uint8_t)(ft & 0xFF);  e[23] = (uint8_t)(ft >> 8);
+    e[24] = (uint8_t)(fdt & 0xFF); e[25] = (uint8_t)(fdt >> 8);
+    e[26] = (uint8_t)(cluster & 0xFF);
+    e[27] = (uint8_t)((cluster >> 8) & 0xFF);
+    e[28] = (uint8_t)(size & 0xFF);
+    e[29] = (uint8_t)((size >> 8) & 0xFF);
+    e[30] = (uint8_t)((size >> 16) & 0xFF);
+    e[31] = (uint8_t)((size >> 24) & 0xFF);
 }
 
 static void trim83(const uint8_t *raw, char *out) {
@@ -289,6 +369,536 @@ static bool name_eq(const char *a, const char *b) {
     return *a == 0 && *b == 0;
 }
 
+static bool fs_lookup_inner(const char *path, fs_node_t *out);
+static int fs_node_write_inner(fs_node_t *node, uint32_t offset, const void *buf,
+                               uint32_t len);
+
+static bool dir_find(const fs_node_t *dir, const char *name, uint32_t *raw_index,
+                     fs_node_t *out) {
+    for (uint32_t i = 0; i < FS_SCAN_MAX; i++) {
+        uint8_t e[FS_DIRENT_SIZE];
+        if (!dirent_raw(dir, i, e)) break;
+        fs_node_t tmp;
+        if (!parse_dirent(e, &tmp)) continue;
+        if (name_eq(tmp.name, name)) {
+            if (raw_index) *raw_index = i;
+            if (out) *out = tmp;
+            return true;
+        }
+    }
+    return false;
+}
+
+static void dir_node(fs_node_t *out, uint32_t cluster) {
+    out->name[0] = 0;
+    out->name[1] = 0;
+    out->attr = FS_ATTR_DIRECTORY;
+    out->cluster = cluster;
+    out->size = 0;
+    out->is_dir = true;
+    out->is_root = false;
+    out->dir_cluster = 0;
+    out->dir_index = 0;
+}
+
+static int fs_resolve_parent(const char *path, fs_node_t *parent, char *name,
+                              uint32_t name_max) {
+    if (!path || !parent || !name) return ABI_EINVAL;
+
+    uint32_t n = 0;
+    for (const char *p = path; *p; p++) {
+        if (n >= FS_PATH_MAX - 1) return ABI_ENAMETOOLONG;
+        n++;
+    }
+    if (n == 0) return ABI_EINVAL;
+
+    char buf[FS_PATH_MAX];
+    for (uint32_t i = 0; i < n; i++) buf[i] = path[i];
+    buf[n] = 0;
+
+    uint32_t cut = n;
+    while (cut > 0 && buf[cut - 1] != '/') cut--;
+
+    uint32_t name_len = n - cut;
+    if (name_len == 0 || name_len >= name_max) return ABI_ENAMETOOLONG;
+
+    for (uint32_t i = 0; i < name_len; i++) name[i] = buf[cut + i];
+    name[name_len] = 0;
+
+    if (cut == 0) {
+        if (!root_node(parent)) return ABI_ENOENT;
+    } else {
+        buf[cut - 1] = 0;
+        if (!fs_lookup_inner(buf, parent)) return ABI_ENOENT;
+    }
+    if (!parent->is_dir) return ABI_ENOTDIR;
+    return 0;
+}
+
+static int name_to_83(const char *name, char out[11]) {
+    char base[16];
+    char ext[8];
+    uint32_t bn = 0, en = 0;
+
+    const char *nend = name;
+    while (*nend) nend++;
+
+    const char *dot = NULL;
+    for (const char *p = name; p < nend; p++) {
+        if (*p == '.') dot = p;
+    }
+
+    const char *eend = dot ? dot : nend;
+    for (const char *p = name; p < eend; p++) {
+        char c = *p;
+        if (c >= 'a' && c <= 'z') c = (char)(c - 32);
+        if (c == ' ' || c == '/') return ABI_EINVAL;
+        if (bn >= 8) return ABI_ENAMETOOLONG;
+        base[bn++] = c;
+    }
+
+    if (dot) {
+        for (const char *p = dot + 1; *p; p++) {
+            char c = *p;
+            if (c >= 'a' && c <= 'z') c = (char)(c - 32);
+            if (c == ' ' || c == '/') return ABI_EINVAL;
+            if (en >= 3) return ABI_ENAMETOOLONG;
+            ext[en++] = c;
+        }
+    }
+
+    if (bn == 0) return ABI_EINVAL;
+
+    for (int i = 0; i < 8; i++) out[i] = (i < (int)bn) ? base[i] : ' ';
+    for (int i = 0; i < 3; i++) out[8 + i] = (i < (int)en) ? ext[i] : ' ';
+    return 0;
+}
+
+static bool fat_extend(uint32_t cluster, uint32_t *out) {
+    uint16_t next;
+    if (!fat_entry(cluster, &next)) return false;
+    if (next < FS_EOC_MIN) { *out = next; return true; }
+
+    uint32_t nc;
+    if (!fat_alloc(&nc)) return false;
+    if (!fat_set(nc, FS_EOC_MIN)) return false;
+    if (!fat_set(cluster, (uint16_t)nc)) return false;
+    *out = nc;
+    return true;
+}
+
+static bool dirent_find_free(const fs_node_t *dir, uint32_t *lba_out, uint32_t *off_out,
+                              uint32_t *index_out) {
+    uint32_t per_sector = fs.bytes_per_sector / FS_DIRENT_SIZE;
+
+    if (dir->is_root) {
+        for (uint32_t i = 0; i < fs.root_entry_count; i++) {
+            uint32_t lba, off;
+            if (!dirent_locate(dir, i, &lba, &off)) return false;
+            uint8_t buf[FS_SECTOR_SIZE];
+            if (!block_read(fs.dev, lba, 1, buf)) return false;
+            if (buf[off] == 0x00 || buf[off] == 0xE5) {
+                *lba_out = lba;
+                *off_out = off;
+                *index_out = i;
+                return true;
+            }
+        }
+        return false;
+    }
+
+    uint8_t zero[FS_SECTOR_SIZE];
+    for (size_t i = 0; i < sizeof zero; i++) zero[i] = 0;
+
+    uint32_t cluster = dir->cluster;
+    uint32_t index = 0;
+
+    for (;;) {
+        uint32_t base = cluster_lba(cluster);
+        for (uint32_t s = 0; s < fs.sectors_per_cluster; s++) {
+            uint32_t lba = base + s;
+            uint8_t buf[FS_SECTOR_SIZE];
+            if (!block_read(fs.dev, lba, 1, buf)) return false;
+            for (uint32_t i = 0; i < per_sector; i++) {
+                uint32_t off = i * FS_DIRENT_SIZE;
+                if (buf[off] == 0x00 || buf[off] == 0xE5) {
+                    *lba_out = lba;
+                    *off_out = off;
+                    *index_out = index + i;
+                    return true;
+                }
+            }
+            index += per_sector;
+        }
+
+        uint32_t nc;
+        if (!fat_extend(cluster, &nc)) return false;
+        for (uint32_t s = 0; s < fs.sectors_per_cluster; s++) {
+            if (!sector_write(cluster_lba(nc) + s, zero)) return false;
+        }
+        cluster = nc;
+    }
+}
+
+static int fs_node_sync_entry(fs_node_t *node) {
+    if (!node || node->is_root) return ABI_EIO;
+
+    fs_node_t parent;
+    if (node->dir_cluster == 0) {
+        if (!root_node(&parent)) return ABI_EIO;
+    } else {
+        dir_node(&parent, node->dir_cluster);
+    }
+
+    uint32_t lba, off;
+    if (!dirent_locate(&parent, node->dir_index, &lba, &off)) return ABI_EIO;
+
+    uint8_t buf[FS_SECTOR_SIZE];
+    if (!block_read(fs.dev, lba, 1, buf)) return ABI_EIO;
+
+    buf[off + 26] = (uint8_t)(node->cluster & 0xFF);
+    buf[off + 27] = (uint8_t)((node->cluster >> 8) & 0xFF);
+    buf[off + 28] = (uint8_t)(node->size & 0xFF);
+    buf[off + 29] = (uint8_t)((node->size >> 8) & 0xFF);
+    buf[off + 30] = (uint8_t)((node->size >> 16) & 0xFF);
+    buf[off + 31] = (uint8_t)((node->size >> 24) & 0xFF);
+
+    return sector_write(lba, buf) ? 0 : ABI_EIO;
+}
+
+static void fat_stamp(int64_t unix_sec, uint16_t *out_time, uint16_t *out_date) {
+    int64_t days = unix_sec / 86400;
+    int64_t rem = unix_sec % 86400;
+    if (rem < 0) { rem += 86400; days--; }
+
+    int64_t z = days + 719468;
+    int64_t era = (z >= 0 ? z : z - 146096) / 146097;
+    uint64_t doe = (uint64_t)(z - era * 146097);
+    uint64_t yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    int64_t year = (int64_t)yoe + era * 400;
+    uint64_t doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    uint64_t mp = (5 * doy + 2) / 153;
+    uint64_t day = doy - (153 * mp + 2) / 5 + 1;
+    uint64_t month = mp + (mp < 10 ? 3 : -9);
+    year += (month <= 2);
+
+    if (year < 1980) year = 1980;
+    if (year > 2107) year = 2107;
+
+    uint32_t hh = (uint32_t)(rem / 3600);
+    uint32_t mm = (uint32_t)((rem % 3600) / 60);
+    uint32_t ss = (uint32_t)(rem % 60);
+
+    *out_time = (uint16_t)((hh << 11) | (mm << 5) | (ss / 2));
+    *out_date = (uint16_t)(((year - 1980) << 9) | (month << 5) | day);
+}
+
+static int fs_node_utimens_inner(fs_node_t *node, int64_t mtime) {
+    if (!node || node->is_root) return 0;
+
+    fs_node_t parent;
+    if (node->dir_cluster == 0) {
+        if (!root_node(&parent)) return ABI_EIO;
+    } else {
+        dir_node(&parent, node->dir_cluster);
+    }
+
+    uint32_t lba, off;
+    if (!dirent_locate(&parent, node->dir_index, &lba, &off)) return ABI_EIO;
+
+    uint8_t buf[512];
+    if (!block_read(fs.dev, lba, 1, buf)) return ABI_EIO;
+    uint16_t ft, fd2;
+    fat_stamp(mtime, &ft, &fd2);
+    buf[off + 18] = fd2 & 0xFF; buf[off + 19] = fd2 >> 8;
+    buf[off + 22] = ft & 0xFF;  buf[off + 23] = ft >> 8;
+    buf[off + 24] = fd2 & 0xFF; buf[off + 25] = fd2 >> 8;
+    return sector_write(lba, buf) ? 0 : ABI_EIO;
+}
+
+int fs_node_utimens(fs_node_t *node, int64_t mtime) {
+    preempt_disable();
+    int r = fs_node_utimens_inner(node, mtime);
+    preempt_enable();
+    return r;
+}
+
+int fs_utimens(const char *path, int64_t mtime) {
+    fs_node_t node;
+    if (!fs.mounted) return ABI_EIO;
+    bool ok = fs_lookup(path, &node);
+    if (!ok) return ABI_ENOENT;
+    return fs_node_utimens(&node, mtime);
+}
+
+static int fs_node_resize_inner(fs_node_t *node, uint32_t size) {
+    if (!fs.mounted || !node) return ABI_EINVAL;
+    if (node->is_dir) return ABI_EISDIR;
+    if (size == node->size) return 0;
+
+    if (size < node->size) {
+        uint32_t cluster_size = (uint32_t)fs.sectors_per_cluster * fs.bytes_per_sector;
+        uint32_t keep = (size + cluster_size - 1) / cluster_size;
+        uint32_t cluster = node->cluster;
+        uint32_t prev = 0;
+
+        for (uint32_t i = 0; i < keep && cluster; i++) {
+            uint16_t next;
+            if (!fat_entry(cluster, &next)) return ABI_EIO;
+            prev = cluster;
+            if (next >= FS_EOC_MIN) { cluster = 0; break; }
+            cluster = next;
+        }
+
+        if (cluster) {
+            if (!fat_free_chain(cluster)) return ABI_EIO;
+            if (prev) {
+                if (!fat_set(prev, FS_EOC_MIN)) return ABI_EIO;
+            } else {
+                node->cluster = 0;
+            }
+        }
+
+        node->size = size;
+        return fs_node_sync_entry(node);
+    }
+
+    uint8_t zeros[512];
+    for (size_t i = 0; i < sizeof zeros; i++) zeros[i] = 0;
+    uint32_t pos = node->size;
+    while (pos < size) {
+        uint32_t chunk = size - pos;
+        if (chunk > sizeof zeros) chunk = (uint32_t)sizeof zeros;
+        int r = fs_node_write_inner(node, pos, zeros, chunk);
+        if (r < 0) return r;
+        pos += chunk;
+    }
+    return 0;
+}
+
+static int fs_node_write_inner(fs_node_t *node, uint32_t offset, const void *buf,
+                               uint32_t len) {
+    if (!fs.mounted || !node || !buf) return ABI_EINVAL;
+    if (node->is_dir) return ABI_EISDIR;
+    if (len == 0) return 0;
+
+    if ((uint32_t)offset > node->size) {
+        uint32_t gap = (uint32_t)offset - node->size;
+        uint8_t zeros[512];
+        for (size_t i = 0; i < sizeof zeros; i++) zeros[i] = 0;
+        uint32_t pos = node->size;
+        while (gap) {
+            uint32_t chunk = gap > (uint32_t)sizeof zeros ? (uint32_t)sizeof zeros : gap;
+            int r = fs_node_write_inner(node, pos, zeros, chunk);
+            if (r < 0) return r;
+            pos += chunk;
+            gap -= chunk;
+        }
+    }
+
+    uint32_t cluster_size = (uint32_t)fs.sectors_per_cluster * fs.bytes_per_sector;
+
+    if (node->cluster == 0) {
+        uint32_t c;
+        if (!fat_alloc(&c)) return ABI_ENOSPC;
+        if (!fat_set(c, FS_EOC_MIN)) return ABI_EIO;
+        node->cluster = c;
+    }
+
+    uint32_t cl_index = offset / cluster_size;
+    uint32_t within = offset % cluster_size;
+    uint32_t cluster = node->cluster;
+
+    for (uint32_t i = 0; i < cl_index; i++) {
+        uint32_t next;
+        if (!fat_extend(cluster, &next)) return ABI_ENOSPC;
+        cluster = next;
+    }
+
+    const uint8_t *src = (const uint8_t *)buf;
+    uint32_t done = 0;
+
+    while (len) {
+        uint32_t lba = cluster_lba(cluster) + within / fs.bytes_per_sector;
+        uint32_t off = within % fs.bytes_per_sector;
+        uint32_t chunk = fs.bytes_per_sector - off;
+        if (chunk > len) chunk = len;
+
+        uint8_t sbuf[FS_SECTOR_SIZE];
+        if (off == 0 && chunk == fs.bytes_per_sector) {
+            for (uint32_t i = 0; i < chunk; i++) sbuf[i] = src[i];
+        } else {
+            if (!block_read(fs.dev, lba, 1, sbuf)) return ABI_EIO;
+            for (uint32_t i = 0; i < chunk; i++) sbuf[off + i] = src[i];
+        }
+        if (!sector_write(lba, sbuf)) return ABI_EIO;
+
+        src += chunk;
+        done += chunk;
+        len -= chunk;
+        within += chunk;
+
+        if (len && within == cluster_size) {
+            within = 0;
+            uint32_t next;
+            if (!fat_extend(cluster, &next)) return ABI_ENOSPC;
+            cluster = next;
+        }
+    }
+
+    uint32_t end = offset + done;
+    if (end > node->size) {
+        node->size = end;
+        int r = fs_node_sync_entry(node);
+        if (r) return r;
+    }
+    return (int)done;
+}
+
+static int fs_node_truncate_inner(fs_node_t *node) {
+    if (!fs.mounted || !node) return ABI_EINVAL;
+    if (node->is_dir) return ABI_EISDIR;
+
+    if (node->cluster) {
+        if (!fat_free_chain(node->cluster)) return ABI_EIO;
+    }
+    node->cluster = 0;
+    node->size = 0;
+    return fs_node_sync_entry(node);
+}
+
+static int fs_create_inner(const char *path, fs_node_t *out) {
+    fs_node_t parent;
+    char name[FS_MAX_NAME + 2];
+    int r = fs_resolve_parent(path, &parent, name, sizeof name);
+    if (r) return r;
+
+    char n83[11];
+    r = name_to_83(name, n83);
+    if (r) return r;
+
+    uint32_t index;
+    fs_node_t found;
+    if (dir_find(&parent, name, &index, &found)) return ABI_EEXIST;
+
+    uint32_t lba, off;
+    if (!dirent_find_free(&parent, &lba, &off, &index)) return ABI_ENOSPC;
+
+    uint8_t e[FS_DIRENT_SIZE];
+    dirent_build(e, n83, FS_ATTR_ARCHIVE, 0, 0);
+    if (!dirent_store(lba, off, e)) return ABI_EIO;
+
+    if (out) {
+        out->name[0] = 0;
+        for (int i = 0; i < 11; i++) {
+            if (n83[i] == ' ') break;
+            out->name[i] = (char)n83[i];
+        }
+        out->name[11] = 0;
+        out->attr = FS_ATTR_ARCHIVE;
+        out->cluster = 0;
+        out->size = 0;
+        out->is_dir = false;
+        out->is_root = false;
+        out->dir_cluster = parent.cluster;
+        out->dir_index = index;
+    }
+    return 0;
+}
+
+static int fs_mkdir_inner(const char *path, fs_node_t *out) {
+    fs_node_t parent;
+    char name[FS_MAX_NAME + 2];
+    int r = fs_resolve_parent(path, &parent, name, sizeof name);
+    if (r) return r;
+
+    char n83[11];
+    r = name_to_83(name, n83);
+    if (r) return r;
+
+    uint32_t index;
+    fs_node_t found;
+    if (dir_find(&parent, name, &index, &found)) return ABI_EEXIST;
+
+    uint32_t cluster;
+    if (!fat_alloc(&cluster)) return ABI_ENOSPC;
+    if (!fat_set(cluster, FS_EOC_MIN)) return ABI_EIO;
+
+    uint8_t zero[FS_SECTOR_SIZE];
+    for (size_t i = 0; i < sizeof zero; i++) zero[i] = 0;
+
+    uint32_t lba = cluster_lba(cluster);
+    for (uint32_t s = 0; s < fs.sectors_per_cluster; s++) {
+        if (!sector_write(lba + s, zero)) return ABI_EIO;
+    }
+
+    uint8_t e[FS_DIRENT_SIZE];
+    char dot[11] = { '.', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ' };
+    char dotdot[11] = { '.', '.', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ' };
+    dirent_build(e, dot, FS_ATTR_DIRECTORY, cluster, 0);
+    if (!dirent_store(lba, 0, e)) return ABI_EIO;
+    dirent_build(e, dotdot, FS_ATTR_DIRECTORY, parent.cluster, 0);
+    if (!dirent_store(lba, FS_DIRENT_SIZE, e)) return ABI_EIO;
+
+    uint32_t elba, eoff;
+    if (!dirent_find_free(&parent, &elba, &eoff, &index)) return ABI_ENOSPC;
+
+    dirent_build(e, n83, FS_ATTR_DIRECTORY, cluster, 0);
+    if (!dirent_store(elba, eoff, e)) return ABI_EIO;
+
+    if (out) {
+        out->name[0] = 0;
+        for (int i = 0; i < 11; i++) {
+            if (n83[i] == ' ') break;
+            out->name[i] = (char)n83[i];
+        }
+        out->name[11] = 0;
+        out->attr = FS_ATTR_DIRECTORY;
+        out->cluster = cluster;
+        out->size = 0;
+        out->is_dir = true;
+        out->is_root = false;
+        out->dir_cluster = parent.cluster;
+        out->dir_index = index;
+    }
+    return 0;
+}
+
+static int fs_unlink_inner(const char *path, bool want_dir) {
+    fs_node_t parent;
+    char name[FS_MAX_NAME + 2];
+    int r = fs_resolve_parent(path, &parent, name, sizeof name);
+    if (r) return r;
+
+    uint32_t index;
+    fs_node_t found;
+    if (!dir_find(&parent, name, &index, &found)) return ABI_ENOENT;
+
+    if (found.is_dir != want_dir) return want_dir ? ABI_ENOTDIR : ABI_EISDIR;
+
+    if (found.is_dir) {
+        for (uint32_t i = 0; i < FS_SCAN_MAX; i++) {
+            uint8_t de[FS_DIRENT_SIZE];
+            fs_node_t tmp;
+            if (!dirent_raw(&found, i, de)) break;
+            if (parse_dirent(de, &tmp)) return ABI_ENOTEMPTY;
+        }
+    }
+
+    if (!found.is_dir && found.cluster) {
+        if (!fat_free_chain(found.cluster)) return ABI_EIO;
+    }
+
+    uint32_t lba, off;
+    if (!dirent_locate(&parent, index, &lba, &off)) return ABI_EIO;
+
+    uint8_t buf[FS_SECTOR_SIZE];
+    if (!block_read(fs.dev, lba, 1, buf)) return ABI_EIO;
+    buf[off] = 0xE5;
+    if (!sector_write(lba, buf)) return ABI_EIO;
+    return 0;
+}
+
 bool fs_lookup_inner(const char *path, fs_node_t *out) {
     if (!fs.mounted || !path || !out) return false;
 
@@ -324,15 +934,10 @@ bool fs_lookup_inner(const char *path, fs_node_t *out) {
         if (comp[0] == '.' && comp[1] == '.' && comp[2] == 0) return false;
 
         fs_node_t found;
-        bool ok = false;
-        for (uint32_t i = 0; i < FS_SCAN_MAX; i++) {
-            if (!fs_iterate(&cur, i, &found)) break;
-            if (name_eq(found.name, comp)) {
-                ok = true;
-                break;
-            }
-        }
-        if (!ok) return false;
+        uint32_t raw = 0;
+        if (!dir_find(&cur, comp, &raw, &found)) return false;
+        found.dir_cluster = cur.cluster;
+        found.dir_index = raw;
 
         cur = found;
         if (end < n && !cur.is_dir) return false;
@@ -437,6 +1042,60 @@ uint32_t fs_node_read_all(const fs_node_t *node, void *buf, uint32_t max) {
     return r;
 }
 
+
+int fs_node_write(fs_node_t *node, uint32_t offset, const void *buf, uint32_t len) {
+    preempt_disable();
+    int r = fs_node_write_inner(node, offset, buf, len);
+    preempt_enable();
+    return r;
+}
+
+int fs_node_resize(fs_node_t *node, uint32_t size) {
+    preempt_disable();
+    int r = fs_node_resize_inner(node, size);
+    preempt_enable();
+    return r;
+}
+
+int fs_node_truncate(fs_node_t *node) {
+    preempt_disable();
+    int r = fs_node_truncate_inner(node);
+    preempt_enable();
+    return r;
+}
+
+int fs_create(const char *path, fs_node_t *out) {
+    preempt_disable();
+    int r = fs_create_inner(path, out);
+    preempt_enable();
+    return r;
+}
+
+int fs_mkdir(const char *path, fs_node_t *out) {
+    preempt_disable();
+    int r = fs_mkdir_inner(path, out);
+    preempt_enable();
+    return r;
+}
+
+int fs_unlink(const char *path) {
+    preempt_disable();
+    int r = fs_unlink_inner(path, false);
+    preempt_enable();
+    return r;
+}
+
+int fs_rmdir(const char *path) {
+    preempt_disable();
+    int r = fs_unlink_inner(path, true);
+    preempt_enable();
+    return r;
+}
+
+bool fs_sync(void) {
+    if (!fs.mounted) return false;
+    return block_flush(fs.dev);
+}
 
 bool fs_name_eq(const char *a, const char *b) {
     return name_eq(a, b);

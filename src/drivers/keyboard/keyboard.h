@@ -15,6 +15,7 @@ uint32_t keyboard_owner(void);
 bool keyboard_inject_char(char c);
 bool keyboard_line_ready(void);
 bool keyboard_has_input(void);
+bool keyboard_has_char(char c);
 void *keyboard_wait_chan(void);
 
 #endif

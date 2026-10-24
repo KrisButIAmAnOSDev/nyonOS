@@ -10,6 +10,7 @@
 #include "abi/abi.h"
 
 #define VM_LOAD_BASE   0x0000000040000000ULL
+#define VM_EXEC_MIN    0x0000000000010000ULL
 #define VM_LOAD_SPAN   0x0000000100000000ULL
 #define VM_LOAD_LIMIT  0x0000000100000000ULL
 #define VM_STACK_TOP   0x0000000040000000ULL
@@ -158,9 +159,21 @@ static int elf_load_core(const fs_node *file, struct elf_image *out, const char 
                          const char **argv, size_t argc, const char **envp,
                          size_t envc, const struct elf_shared *shared);
 
+static const char *default_env[] = {
+    "PATH=/BIN",
+    "HOME=/",
+    "PWD=/",
+    "SHELL=/BIN/BASH",
+    "TERM=xterm",
+    "USER=nyon",
+    "LOGNAME=nyon",
+    NULL
+};
+
 int elf_load_argv(const fs_node *file, struct elf_image *out, const char **err,
                   const char **argv, size_t argc) {
-    return elf_load_shared(file, out, err, argv, argc, NULL);
+    return elf_load_core(file, out, err, argv, argc, default_env,
+                         sizeof(default_env) / sizeof(default_env[0]) - 1, NULL);
 }
 
 int elf_load_env(const fs_node *file, struct elf_image *out, const char **err,
@@ -219,7 +232,7 @@ static int elf_load_core(const fs_node *file, struct elf_image *out, const char 
     } else {
         for (size_t i = 0; i < phnum; i++) {
             if (ph[i].type != ELF_PT_LOAD || ph[i].memsz == 0) continue;
-            if (ph[i].vaddr < VM_LOAD_BASE) { kfree((void *)ph); if (err) *err = elf_error_text(ELF_EADDR); return ELF_EADDR; }
+            if (ph[i].vaddr < VM_EXEC_MIN) { kfree((void *)ph); if (err) *err = elf_error_text(ELF_EADDR); return ELF_EADDR; }
             if (ph[i].vaddr + ph[i].memsz > VM_LOAD_LIMIT) { kfree((void *)ph); if (err) *err = elf_error_text(ELF_EADDR); return ELF_EADDR; }
         }
     }

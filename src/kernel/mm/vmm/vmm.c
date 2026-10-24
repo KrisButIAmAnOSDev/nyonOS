@@ -493,6 +493,42 @@ bool vmm_map_frames(struct page_table *root, vaddr_t vaddr, paddr_t paddr, size_
     return vmm_map_in(root, vaddr, paddr, pages, flags);
 }
 
+bool vmm_protect(struct page_table *root, vaddr_t addr, size_t pages, uint8_t prot) {
+    if (pages == 0) return false;
+    if (addr & (PAGE_SIZE - 1)) return false;
+    if (prot & ~(VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXEC)) return false;
+    if ((prot & VM_PROT_WRITE) && !(prot & VM_PROT_READ)) return false;
+    if ((prot & VM_PROT_WRITE) && (prot & VM_PROT_EXEC)) return false;
+
+    int levels = vmm_5level ? 5 : 4;
+
+    lock_acquire(LOCK_VMM, &vmm_lock);
+
+    for (size_t i = 0; i < pages; i++) {
+        uint64_t *entry = walk_page_table(root, addr + i * PAGE_SIZE, levels, false, 0);
+        if (!entry || !(*entry & PAGE_PRESENT)) {
+            lock_release(LOCK_VMM, &vmm_lock);
+            return false;
+        }
+
+        uint64_t f = *entry;
+        if (prot & VM_PROT_WRITE) f |= PAGE_WRITE;
+        else f &= ~PAGE_WRITE;
+        if (cpu_has_nx()) {
+            if (prot & VM_PROT_EXEC) f &= ~PAGE_NX;
+            else f |= PAGE_NX;
+        }
+        *entry = f;
+    }
+
+    lock_release(LOCK_VMM, &vmm_lock);
+
+    for (size_t i = 0; i < pages; i++)
+        invlpg(addr + i * PAGE_SIZE);
+
+    return true;
+}
+
 uint64_t vmm_query(vaddr_t vaddr) {
     uint64_t *entry = walk_page_table(kernel_pml4, vaddr, vmm_5level ? 5 : 4, false, 0);
     if (!entry) return 0;

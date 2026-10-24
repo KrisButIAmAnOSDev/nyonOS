@@ -4,7 +4,10 @@
 #include <dirent.h>
 #include <sched.h>
 #include <fcntl.h>
+#include <errno.h>
 #include <stdio.h>
+#include <string.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 static int fails;
@@ -43,6 +46,33 @@ int main(void) {
 	ck("readdir returned entries", n > 0, 1);
 	if (dir)
 		closedir(dir);
+
+	ck("mkdir through libc", mkdir("/SDTEST.DIR", 0755), 0);
+	ck("mkdir of the same dir fails", mkdir("/SDTEST.DIR", 0755) == -1 && errno == EEXIST, 1);
+	ck("rmdir through libc", rmdir("/SDTEST.DIR"), 0);
+	ck("rmdir of a missing dir fails", rmdir("/SDTEST.DIR") == -1 && errno == ENOENT, 1);
+
+	int wfd = open("/SDTEST.TXT", O_WRONLY | O_CREAT | O_TRUNC);
+	ck("create for writing through libc", wfd >= 0, 1);
+	ck("write through libc", write(wfd, "sdtest payload", 14), 14);
+	ck("fsync through libc", fsync(wfd), 0);
+	close(wfd);
+
+	int rfd = open("/SDTEST.TXT", O_RDONLY);
+	ck("reopen for reading through libc", rfd >= 0, 1);
+	char rb[32];
+	ck("read back through libc", read(rfd, rb, 14), 14);
+	rb[14] = 0;
+	ck("the payload matches", strcmp(rb, "sdtest payload") == 0, 1);
+	close(rfd);
+
+	ck("truncate through libc", truncate("/SDTEST.TXT", 4), 0);
+	rfd = open("/SDTEST.TXT", O_RDONLY);
+	ck("the truncated size", lseek(rfd, 0, SEEK_END), 4);
+	close(rfd);
+
+	ck("unlink through libc", unlink("/SDTEST.TXT"), 0);
+	ck("the file is gone", open("/SDTEST.TXT", O_RDONLY) < 0, 1);
 
 	printf(fails ? "SYSD: FAILED\n" : "SYSD: PASSED\n");
 	return 0;

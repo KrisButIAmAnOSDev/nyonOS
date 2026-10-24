@@ -9,6 +9,7 @@
 #include "kernel/multitask/task.h"
 #include "kernel/sync/preempt.h"
 #include "kernel/fd/fd.h"
+#include "kernel/pipe/pipe.h"
 #include "kernel/fs/fs.h"
 #include "kernel/mm/vmm/vmspace.h"
 #include "arch/x86_64/pit/pit.h"
@@ -237,6 +238,7 @@ static int64_t sys_execve(uintptr_t path, uintptr_t uargv, uintptr_t uenvp) {
     const char *err = NULL;
     if (elf_load_env(&node, &img, &err, (const char **)argv, argc,
                      (const char **)envp, envc)) {
+        kprintf(PRINT_SERIAL, "exec: %s refused: %s\n", kpath, err ? err : "?");
         exec_free_vec(argv);
         exec_free_vec(envp);
         return SYS_EINVAL;
@@ -267,6 +269,8 @@ static int64_t sys_execve(uintptr_t path, uintptr_t uargv, uintptr_t uenvp) {
     if (old_vs && old_vs != img.vs) vm_destroy(old_vs);
     if (old_pml4 && old_pml4 != img.vs->pml4) vmm_destroy_address_space(old_pml4);
 
+    fd_close_cloexec(t);
+
     frame->rip = img.entry;
     frame->cs = 0x23;
     frame->rflags = 0x202;
@@ -283,6 +287,128 @@ static int64_t sys_cow_ctl(int32_t on) {
     if (on && !vmm_set_cow(true)) return SYS_ENOSYS;
     if (!on) vmm_set_cow(false);
     return (int64_t)(prev ? 1 : 0);
+}
+
+static int64_t sys_pipe(uintptr_t fds_ptr) {
+    struct task *t = task_current();
+    if (!t || !in_user()) return SYS_EINVAL;
+
+    int fds[2];
+    if (pipe_create(t, fds) != 0) return SYS_EMFILE;
+
+    if (!copyout((void *)fds_ptr, fds, sizeof(fds))) {
+        fd_close(t, fds[0]);
+        fd_close(t, fds[1]);
+        return SYS_EFAULT;
+    }
+
+    return 0;
+}
+
+static int copy_path(const char *up, char *out, size_t out_max) {
+    if (!in_user()) {
+        size_t i = 0;
+        while (i < out_max && up[i]) i++;
+        if (i == out_max && up[i]) return ABI_ENAMETOOLONG;
+        size_t n = 0;
+        while (up[n]) { out[n] = up[n]; n++; }
+        out[n] = 0;
+        return n ? 0 : ABI_EFAULT;
+    }
+    if (!copyinstr(out, up, out_max)) return ABI_EFAULT;
+    size_t n = 0;
+    while (n < out_max && out[n]) n++;
+    if (n == out_max) return ABI_ENAMETOOLONG;
+    return out[0] ? 0 : ABI_EFAULT;
+}
+
+static int64_t sys_mkdir(uintptr_t path, unsigned mode) {
+    (void)mode;
+    char kpath[256];
+    int cp_err = copy_path((const char *)path, kpath, sizeof kpath);
+    if (cp_err < 0) return cp_err;
+    return (int64_t)fs_mkdir(kpath, NULL);
+}
+
+static int64_t sys_mkdirat(int dirfd, uintptr_t path, unsigned mode) {
+    (void)dirfd;
+    (void)mode;
+    char kpath[256];
+    int cp_err = copy_path((const char *)path, kpath, sizeof kpath);
+    if (cp_err < 0) return cp_err;
+    return (int64_t)fs_mkdir(kpath, NULL);
+}
+
+static int64_t sys_unlinkat(int dirfd, uintptr_t path, int flags) {
+    (void)dirfd;
+    char kpath[256];
+    int cp_err = copy_path((const char *)path, kpath, sizeof kpath);
+    if (cp_err < 0) return cp_err;
+    if (flags & 0x200) return (int64_t)fs_rmdir(kpath);
+    return (int64_t)fs_unlink(kpath);
+}
+
+static int64_t sys_rmdir(uintptr_t path) {
+    char kpath[256];
+    int cp_err = copy_path((const char *)path, kpath, sizeof kpath);
+    if (cp_err < 0) return cp_err;
+    return (int64_t)fs_rmdir(kpath);
+}
+
+static int64_t sys_truncate(uintptr_t path, int64_t length) {
+    char kpath[256];
+    int cp_err = copy_path((const char *)path, kpath, sizeof kpath);
+    if (cp_err < 0) return cp_err;
+    if (length < 0) return SYS_EINVAL;
+    fs_node_t node;
+    if (!fs_lookup(kpath, &node)) return SYS_ENOENT;
+    return (int64_t)fs_node_resize(&node, (uint32_t)length);
+}
+
+static int64_t sys_ftruncate(int fd, int64_t length) {
+    struct task *t = task_current();
+    if (!t) return SYS_ENOSYS;
+    if (length < 0) return SYS_EINVAL;
+    return (int64_t)fd_truncate(t, fd, (uint64_t)length);
+}
+
+static int64_t sys_fsync(int fd) {
+    struct task *t = task_current();
+    if (!t) return SYS_ENOSYS;
+    return (int64_t)fd_sync(t, fd);
+}
+
+static int64_t sys_fdatasync(int fd) {
+    struct task *t = task_current();
+    if (!t) return SYS_ENOSYS;
+    return (int64_t)fd_sync(t, fd);
+}
+
+static int64_t sys_sync(void) {
+    return fs_sync() ? 0 : SYS_EIO;
+}
+
+static int64_t sys_utimensat(int dirfd, uintptr_t path, uintptr_t times, int flags) {
+    (void)flags;
+    if (!times) return SYS_EINVAL;
+
+    struct sys_timespec2 tv;
+    if (in_user()) {
+        if (!copyin(&tv, (const void *)times, sizeof(tv))) return SYS_EFAULT;
+    } else {
+        tv = *(const struct sys_timespec2 *)times;
+    }
+
+    if (path) {
+        char kpath[256];
+        int cp_err = copy_path((const char *)path, kpath, sizeof kpath);
+    if (cp_err < 0) return cp_err;
+        return (int64_t)fs_utimens(kpath, tv.msec);
+    }
+
+    struct task *t = task_current();
+    if (!t) return SYS_ENOSYS;
+    return (int64_t)fd_utimens(t, dirfd, tv.msec);
 }
 
 static int64_t sys_poll(uintptr_t fds_ptr, uint32_t nfds, int32_t timeout,
@@ -311,7 +437,7 @@ static int64_t sys_poll(uintptr_t fds_ptr, uint32_t nfds, int32_t timeout,
         for (uint32_t i = 0; i < n; i++) {
             uint16_t rev = 0;
             if (fds[i].fd < 0) { fds[i].revents = ABI_POLLNVAL; ready++; continue; }
-            if (!tty_poll_ready(fds[i].fd, fds[i].events, &rev)) {
+            if (!fd_poll_ready(t, fds[i].fd, fds[i].events, &rev)) {
                 rev = 0;
             } else {
                 fds[i].revents = rev;
@@ -321,7 +447,7 @@ static int64_t sys_poll(uintptr_t fds_ptr, uint32_t nfds, int32_t timeout,
         if (ready > 0) break;
         if (timeout == 0) break;
         if (deadline && pit_get_ticks() >= deadline) break;
-        if (!tty_wait_input(deadline)) break;
+        task_wait(poll_chan(), deadline);
     }
 
     for (uint32_t i = 0; i < n; i++)
@@ -385,16 +511,6 @@ static int64_t sys_exit(int code) {
     __builtin_unreachable();
 }
 
-static int copy_path(const char *up, char *out, size_t out_max) {
-    if (!in_user()) {
-        size_t i = 0;
-        while (i < out_max - 1 && up[i]) { out[i] = up[i]; i++; }
-        out[i] = 0;
-        return i ? 0 : -1;
-    }
-    if (!copyinstr(out, up, out_max)) return -1;
-    return out[0] ? 0 : -1;
-}
 
 static int64_t sys_open(uintptr_t path, int flags) {
     struct task *t = task_current();
@@ -404,7 +520,8 @@ static int64_t sys_open(uintptr_t path, int flags) {
     if (!path) return SYS_EFAULT;
 
     char kpath[256];
-    if (copy_path((const char *)path, kpath, sizeof(kpath)) != 0) return SYS_EFAULT;
+    int cp_err = copy_path((const char *)path, kpath, sizeof(kpath));
+    if (cp_err < 0) return cp_err;
 
     int fd = fd_open(t, kpath, flags);
     return (uint64_t)(int64_t)fd;
@@ -423,7 +540,8 @@ static int64_t sys_read(int fd, uintptr_t buf, unsigned len) {
 
     if (len > SYS_MAX_IO) len = SYS_MAX_IO;
 
-    if (!in_user()) return (int64_t)fd_read(t, fd, (void *)buf, len);
+    if (!in_user() || fd_uses_user_bufs(t, fd))
+        return (int64_t)fd_read(t, fd, (void *)buf, len);
     if (!copyin(iobuf, (const void *)buf, len)) return SYS_EFAULT;
     int64_t r = fd_read(t, fd, iobuf, len);
     if (r > 0 && !copyout((void *)buf, iobuf, (size_t)r)) return SYS_EFAULT;
@@ -437,7 +555,8 @@ static int64_t sys_write(int fd, uintptr_t buf, unsigned len) {
 
     if (len > SYS_MAX_IO) len = SYS_MAX_IO;
 
-    if (!in_user()) return (int64_t)fd_write(t, fd, (const void *)buf, len);
+    if (!in_user() || fd_uses_user_bufs(t, fd))
+        return (int64_t)fd_write(t, fd, (const void *)buf, len);
     if (!copyin(iobuf, (const void *)buf, len)) return SYS_EFAULT;
     return (int64_t)fd_write(t, fd, iobuf, len);
 }
@@ -449,12 +568,11 @@ static int64_t sys_lseek(int fd, int64_t off, int whence) {
 }
 
 static int64_t sys_dup(int fd, int cloexec, unsigned rights) {
-    (void)cloexec;
     struct task *t = task_current();
     if (!t) return SYS_ENOSYS;
 
     unsigned r = rights ? rights : FD_RIGHTS_ALL;
-    return (int64_t)fd_dup(t, fd, r);
+    return (int64_t)fd_dup(t, fd, r, cloexec ? FD_FLAG_CLOEXEC : 0);
 }
 
 static int64_t sys_pread(int fd, uintptr_t buf, unsigned len, int64_t off) {
@@ -493,7 +611,7 @@ static int64_t sys_fstat(int fd, uintptr_t st) {
     struct sys_stat kst;
     struct sys_stat *out = in_user() ? &kst : (struct sys_stat *)st;
 
-    struct kobject *o = fd_get_checked(t, fd, KOBJ_TYPE_ANY, FD_RIGHT_READ);
+    struct kobject *o = fd_get_checked(t, fd, KOBJ_TYPE_ANY, 0);
     if (!o) return SYS_EBADF;
     if (o->type != KOBJ_FILE) { kobject_put(o); return SYS_EBADF; }
 
@@ -513,7 +631,8 @@ static int64_t sys_stat(uintptr_t path, uintptr_t st) {
     struct sys_stat *out = in_user() ? &kst : (struct sys_stat *)st;
 
     char kpath[256];
-    if (copy_path((const char *)path, kpath, sizeof(kpath)) != 0) return SYS_EFAULT;
+    int cp_err = copy_path((const char *)path, kpath, sizeof(kpath));
+    if (cp_err < 0) return cp_err;
 
     fs_node_t n;
     if (!fs_lookup(kpath, &n)) return SYS_ENOENT;
@@ -571,6 +690,24 @@ static int64_t sys_isatty(int fd) {
 #define SYS_MMAP_HI   0x00007FFFFFFFF000ULL
 #define SYS_FUTEX_WAIT 0
 #define SYS_FUTEX_WAKE 1
+
+static int64_t sys_mprotect(uint64_t addr, uint64_t len, unsigned prot) {
+    struct task *t = task_current();
+    if (!t || !in_user()) return SYS_EINVAL;
+    if (len == 0) return SYS_EINVAL;
+    if (addr & (PAGE_SIZE - 1)) return SYS_EINVAL;
+    if (prot & ~(ABI_MMAP_PROT_READ | ABI_MMAP_PROT_WRITE | ABI_MMAP_PROT_EXEC)) return SYS_EINVAL;
+
+    uint8_t vprot = 0;
+    if (prot & ABI_MMAP_PROT_READ) vprot |= VM_PROT_READ;
+    if (prot & ABI_MMAP_PROT_WRITE) vprot |= VM_PROT_WRITE;
+    if (prot & ABI_MMAP_PROT_EXEC) vprot |= VM_PROT_EXEC;
+
+    size_t pages = (size_t)((len + PAGE_SIZE - 1) / PAGE_SIZE);
+
+    if (!vm_protect(t->vs, addr, pages, vprot)) return SYS_ENOMEM;
+    return 0;
+}
 
 static int64_t sys_mmap(uint64_t len, unsigned prot, unsigned flags) {
     struct task *t = task_current();
@@ -783,7 +920,12 @@ static int64_t sys_debug_print(uintptr_t msg, unsigned len) {
 static int64_t sys_dup2(int oldfd, int newfd, unsigned flags) {
     struct task *t = task_current();
     if (!t) return SYS_ENOSYS;
-    int r = fd_dup2(t, (int)oldfd, (int)newfd, (uint32_t)flags);
+
+    uint32_t fflags = 0;
+    if (flags & ABI_O_CLOEXEC) fflags |= FD_FLAG_CLOEXEC;
+    if (flags & ABI_O_NONBLOCK) fflags |= FD_FLAG_NONBLOCK;
+
+    int r = fd_dup2(t, (int)oldfd, (int)newfd, fflags);
     if (r < 0) return (uint64_t)(int64_t)r;
     return (uint64_t)r;
 }
@@ -837,11 +979,13 @@ static int64_t sys_ioctl(int fd, unsigned req, int64_t arg) {
             uint32_t pid = 0;
             int r = fd_tty_get_fg(fd, t, &pid);
             if (r) return (uint64_t)(int64_t)r;
-            return pid;
+            if (!copyout((void *)a, &pid, sizeof(pid))) return SYS_EFAULT;
+            return 0;
         }
         case 0x5410: {
-            if (a > 0xFFFFFFFFULL) return SYS_EINVAL;
-            int r = fd_tty_set_fg(fd, t, (uint32_t)a);
+            uint32_t pid = 0;
+            if (!copyin(&pid, (const void *)a, sizeof(pid))) return SYS_EFAULT;
+            int r = fd_tty_set_fg(fd, t, pid);
             if (r) return (uint64_t)(int64_t)r;
             return 0;
         }

@@ -16,6 +16,8 @@ fi
 echo "Creating bootable disk image..."
 dd if=/dev/zero bs=1M count=64 of=nyonOS.img
 
+rm -f fat16.img
+
 if [ ! -f fat16.img ]; then
     dd if=/dev/zero bs=1M count=128 of=fat16.img
     printf 'label: dos\nunit: sectors\n\nstart=2048, type=0e, bootable\n' | sfdisk --no-reread --no-tell-kernel fat16.img >/dev/null
@@ -33,7 +35,7 @@ if [ ! -f fat16.img ]; then
     exit 1
 fi
 
-PROGRAMS="hello fdtest mmtest forktest"
+PROGRAMS="hello fdtest mmtest forktest pipetest fstest fd2test"
 if [ -f src/user/bin/mhello ]; then
     PROGRAMS="$PROGRAMS mhello"
 fi
@@ -45,6 +47,10 @@ if [ -f src/user/bin/thrtest ]; then
 fi
 if [ -f src/user/bin/exectest ]; then
     PROGRAMS="$PROGRAMS exectest"
+fi
+
+if [ -f src/user/bin/fdprobe ]; then
+    PROGRAMS="$PROGRAMS fdprobe"
 fi
 
 if [ -f src/user/bin/mandel ]; then
@@ -75,6 +81,15 @@ mmd -i fat16.img@@1M ::/BIN
 for prog in $PROGRAMS; do
     mcopy -i fat16.img@@1M "src/user/bin/$prog" "::/BIN/$prog"
 done
+
+tools/build-busybox.sh || true
+BB=${BUSYBOX_SRC:-../busybox}/busybox
+if [ -f "$BB" ]; then
+    mcopy -i fat16.img@@1M "$BB" ::/BIN/busybox
+    for applet in touch mkdir rm ls cat cp mv grep; do
+        mcopy -i fat16.img@@1M "$BB" "::/BIN/$applet"
+    done
+fi
 
 if [ -f ../bash/bash ]; then
     mcopy -i fat16.img@@1M ../bash/bash ::/BIN/BASH

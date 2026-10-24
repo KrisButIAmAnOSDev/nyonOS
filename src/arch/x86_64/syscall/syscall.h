@@ -34,6 +34,7 @@ extern uint64_t syscall_kstack_top;
 #define SYS_ENOMEM   ABI_ENOMEM
 #define SYS_ECHILD   ABI_ECHILD
 #define SYS_ENOSYS   ABI_ENOSYS
+#define SYS_ENAMETOOLONG ABI_ENAMETOOLONG
 
 #define FD_RES_SLOTS 144
 #define FD_RES_DONE 64
@@ -49,7 +50,7 @@ extern uint64_t syscall_kstack_top;
 #define C_MAX_CHECKS  (C_RES_GOT_BASE - C_RES_CHECK_BASE)
 #define C_RES_STDIN_REQ 448
 #define C_RES_STDIN_ACK 456
-#define C_CHECKS       108
+#define C_CHECKS       119
 
 void syscall_init(void);
 void syscall_dispatch(struct isr_frame *frame);

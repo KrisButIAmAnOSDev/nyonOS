@@ -320,6 +320,9 @@ void kmain(void) {
         {
             fd_test();
             mm_test();
+            pipe_test();
+            fswrite_test();
+            fd2_test();
             futex_pair_test();
             exectest_run();
             mandel_run();

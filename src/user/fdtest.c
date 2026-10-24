@@ -10,6 +10,7 @@ static void ok(void) {
 }
 
 static void bad(slong got, slong want) {
+    res[RES_CHECK_BASE + idx] = 0;
     res[RES_FAIL_BASE + idx] = (ulong)got;
     res[RES_GOT_BASE + idx] = (ulong)want;
     idx++;
@@ -19,6 +20,15 @@ static void bad(slong got, slong want) {
 static void ck(slong got, slong want) {
     if (got == want) ok();
     else bad(got, want);
+}
+
+static void itoa(char *out, int v) {
+    char tmp[12];
+    int n = 0;
+    if (v == 0) { out[0] = '0'; out[1] = 0; return; }
+    while (v > 0) { tmp[n++] = (char)('0' + v % 10); v /= 10; }
+    for (int i = 0; i < n; i++) out[i] = tmp[n - 1 - i];
+    out[n] = 0;
 }
 
 static ulong abi_want[8];
@@ -151,6 +161,8 @@ int main(void) {
     ck(sys_isatty(5), 1);
     ck(sys_dup2(99, 6, 0), EBADF);
     ck(sys_dup2(1, 1, 0), 1);
+    ck(sys_fcntl(5, F_GETFD, 0), 0);
+    sys_fcntl(5, F_SETFD, 1);
     ck(sys_fcntl(5, F_GETFD, 0), 1);
     sys_fcntl(5, F_SETFD, 0);
     ck(sys_fcntl(5, F_GETFD, 0), 0);
@@ -177,7 +189,7 @@ int main(void) {
 
     ck(sys_lseek(fd, 0, SEEK_SET), 0);
     ck(sys_read(fd, buf, 4), 4);
-    ck(sys_lseek(fd, 999999, SEEK_SET), 3000);
+    ck(sys_lseek(fd, 999999, SEEK_SET), 999999);
     ck(sys_read(fd, buf, 4), 0);
 
     slong nr = sys_dup(fd, 0, FD_RIGHT_READ);
@@ -233,7 +245,10 @@ int main(void) {
     ck(sys_fcntl(0, F_GETFL, 0) & O_NONBLOCK, 0);
 
     ask_stdin(1);
-    ck(sys_ioctl(0, KTTY_GETFG, 0), sys_getpid());
+    {
+        int fg = 0;
+        ck(sys_ioctl(0, KTTY_GETFG, (long)&fg) == 0 && fg == sys_getpid(), 1);
+    }
     ck(sys_read(0, buf, 64), 16);
     buf[16] = 0;
     ck(streq(buf, "nyon from stdin\n"), 1);
@@ -295,6 +310,45 @@ int main(void) {
     ck(sys_write(0, "x", 1), EBADF);
     ck(sys_read(0, (void *)0, 4), EFAULT);
     ck(sys_write(2, (void *)0xffffffff80000000UL, 4), EFAULT);
+
+    slong cf = sys_open("/TEST.TXT", O_RDONLY | O_CLOEXEC);
+    ck(cf >= 0, 1);
+    ck(sys_fcntl((int)cf, F_GETFD, 0), 1);
+    slong cd = sys_dup((int)cf, 1, 0);
+    ck(cd >= 0, 1);
+    ck(sys_fcntl((int)cd, F_GETFD, 0), 1);
+    slong cn = sys_dup((int)cf, 0, 0);
+    ck(cn >= 0, 1);
+    ck(sys_fcntl((int)cn, F_GETFD, 0), 0);
+    ck(sys_close((int)cd), 0);
+
+    sys_close((int)cn);
+    sys_close((int)cf);
+
+    uint32_t cpid = 0;
+    slong pid = sys_fork((uint32_t *)&cpid);
+    if (pid == 0) {
+        int cfd = (int)sys_open("/TEST.TXT", O_RDONLY | O_CLOEXEC);
+        int ifd = (int)sys_open("/TEST.TXT", O_RDONLY);
+        char n1[8], n2[8];
+        itoa(n1, cfd);
+        itoa(n2, ifd);
+        char *av[6];
+        char *env[1];
+        av[0] = (char *)"fdprobe";
+        av[1] = n1;
+        av[2] = (char *)"closed";
+        av[3] = n2;
+        av[4] = (char *)"open";
+        av[5] = NULL;
+        env[0] = NULL;
+        sys_execve((uintptr_t)"/BIN/fdprobe", (uintptr_t)av, (uintptr_t)env);
+        sys_exit(3);
+    }
+    ck(pid > 0, 1);
+    uintptr_t cst = 0;
+    ck(sys_waitpid((int32_t)cpid, (uintptr_t)&cst, 0), (slong)cpid);
+    ck(cst, 0);
 
 done:
     res[RES_DONE] = failed ? RES_FAILED : RES_ALLPASS;

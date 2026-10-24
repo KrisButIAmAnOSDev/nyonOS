@@ -281,7 +281,8 @@ static const char *const c_fd_labels[C_CHECKS] = {
     "isatty on the dup2 fd",
     "dup2 from a bad fd refused",
     "dup2 onto itself",
-    "F_GETFD on the dup2 fd",
+    "F_GETFD on the dup2 fd is clear",
+    "F_GETFD reports the set flag",
     "F_SETFD clears close-on-exec",
     "ioctl reads the stream destination",
     "ioctl changes the destination",
@@ -299,7 +300,7 @@ static const char *const c_fd_labels[C_CHECKS] = {
     "close the grown-table dup2",
     "lseek SET 0 resets position",
     "re-read after lseek returns 4",
-    "lseek past end clamps to file size",
+    "lseek past end is allowed, not clamped",
     "read at EOF returns 0",
     "dup with narrowed rights",
     "write through a read-only fd refused",
@@ -365,7 +366,17 @@ static const char *const c_fd_labels[C_CHECKS] = {
     "setting the destination on stdin refused",
     "write on stdin refused",
     "null buffer on stdin is EFAULT",
-    "kernel pointer to stderr is EFAULT"
+    "kernel pointer to stderr is EFAULT",
+    "open with O_CLOEXEC succeeds",
+    "the O_CLOEXEC fd reports close-on-exec",
+    "dup with the cloexec flag succeeds",
+    "the cloexec dup reports close-on-exec",
+    "dup without the cloexec flag succeeds",
+    "the plain dup does not report close-on-exec",
+    "cloexec fds close cleanly",
+    "fork before the exec cloexec check",
+    "the exec child is reaped",
+    "exec keeps inheritable fds and drops cloexec ones"
 };
 
 void fd_test(void) {
@@ -505,6 +516,192 @@ void mm_test(void) {
     kprintf(PRINT_SERIAL, "MM ring3: %d of %d checks passed: ", checks_run - bad, checks_run);
     kprintchar(bad == 0 ? 'Y' : 'N', PRINT_SERIAL);
     kprintchar('\n', PRINT_SERIAL);
+
+    pmm_free(phys, 1);
+}
+
+void pipe_test(void) {
+    fs_node_t node;
+    if (!fs_lookup("/BIN/PIPETEST", &node) && !fs_lookup("/BIN/pipetest", &node)) {
+        kprintf(PRINT_SERIAL, "PIPE ring3: /BIN/pipetest not found\n");
+        return;
+    }
+
+    paddr_t phys;
+    if (!pmm_alloc(&phys, 1)) { kprintf(PRINT_SERIAL, "PIPE ring3: alloc failed\n"); return; }
+
+    volatile uint64_t *res = (volatile uint64_t *)(vmm_hhdm_offset + phys);
+    for (int i = 0; i < C_RES_SLOTS; i++) res[i] = 0xdeadbeefdeadbeefULL;
+
+    struct elf_shared shared = { .phys = phys, .virt = C_RES_VIRT, .pages = 1, .owned_by_loader = false };
+
+    struct elf_image img;
+    const char *err = NULL;
+    int r = elf_load_shared(&node, &img, &err, NULL, 0, &shared);
+    if (r) {
+        pmm_free(phys, 1);
+        kprintf(PRINT_SERIAL, "PIPE ring3: load refused: %s\n", err ? err : "?");
+        return;
+    }
+
+    struct task *t = task_spawn_vmspace("ring3pipe", img.vs, img.entry, img.stack_top);
+    elf_destroy(&img);
+    if (!t) {
+        pmm_free(phys, 1);
+        kprintf(PRINT_SERIAL, "PIPE ring3: spawn failed\n");
+        return;
+    }
+
+    uint32_t pid = t->pid;
+    for (int i = 0; i < 600 && res[C_RES_DONE] == 0xdeadbeefdeadbeefULL && task_find_pid(pid); i++) pit_sleep(5);
+
+    bool ran = res[C_RES_DONE] != 0xdeadbeefdeadbeefULL;
+    for (int i = 0; i < 400 && task_find_pid(pid); i++) pit_sleep(5);
+    task_reap_now();
+
+    if (!ran) {
+        kprintf(PRINT_SERIAL, "PIPE ring3: the test never reported\n");
+        pmm_free(phys, 1);
+        return;
+    }
+
+    int checks_run = 0, bad = 0;
+    for (int i = 0; i < C_MAX_CHECKS; i++) {
+        if (res[C_RES_CHECK_BASE + i] == 0xdeadbeefdeadbeefULL) break;
+        checks_run++;
+        if (res[C_RES_CHECK_BASE + i] == 1) continue;
+        bad++;
+        kprintf(PRINT_SERIAL, "    FAIL pipe check %d: got %lld, wanted %lld\n", i,
+                (long long)res[C_RES_FAIL_BASE + i], (long long)res[C_RES_GOT_BASE + i]);
+    }
+
+    kprintf(PRINT_SERIAL, "PIPE ring3: %d of %d checks passed: ", checks_run - bad, checks_run);
+    kprintchar(bad == 0 ? 'Y' : 'N', PRINT_SERIAL);
+    kprintf(PRINT_SERIAL, "\n");
+
+    pmm_free(phys, 1);
+}
+
+void fswrite_test(void) {
+    fs_node_t node;
+    if (!fs_lookup("/BIN/FSTEST", &node) && !fs_lookup("/BIN/fstest", &node)) {
+        kprintf(PRINT_SERIAL, "FSW ring3: /BIN/fstest not found\n");
+        return;
+    }
+
+    paddr_t phys;
+    if (!pmm_alloc(&phys, 1)) { kprintf(PRINT_SERIAL, "FSW ring3: alloc failed\n"); return; }
+
+    volatile uint64_t *res = (volatile uint64_t *)(vmm_hhdm_offset + phys);
+    for (int i = 0; i < C_RES_SLOTS; i++) res[i] = 0xdeadbeefdeadbeefULL;
+
+    struct elf_shared shared = { .phys = phys, .virt = C_RES_VIRT, .pages = 1, .owned_by_loader = false };
+
+    struct elf_image img;
+    const char *err = NULL;
+    int r = elf_load_shared(&node, &img, &err, NULL, 0, &shared);
+    if (r) {
+        pmm_free(phys, 1);
+        kprintf(PRINT_SERIAL, "FSW ring3: load refused: %s\n", err ? err : "?");
+        return;
+    }
+
+    struct task *t = task_spawn_vmspace("ring3fs", img.vs, img.entry, img.stack_top);
+    elf_destroy(&img);
+    if (!t) {
+        pmm_free(phys, 1);
+        kprintf(PRINT_SERIAL, "FSW ring3: spawn failed\n");
+        return;
+    }
+
+    uint32_t pid = t->pid;
+    for (int i = 0; i < 600 && res[C_RES_DONE] == 0xdeadbeefdeadbeefULL && task_find_pid(pid); i++) pit_sleep(5);
+
+    bool ran = res[C_RES_DONE] != 0xdeadbeefdeadbeefULL;
+    for (int i = 0; i < 400 && task_find_pid(pid); i++) pit_sleep(5);
+    task_reap_now();
+
+    if (!ran) {
+        kprintf(PRINT_SERIAL, "FSW ring3: the test never reported\n");
+        pmm_free(phys, 1);
+        return;
+    }
+
+    int checks_run = 0, bad = 0;
+    for (int i = 0; i < C_MAX_CHECKS; i++) {
+        if (res[C_RES_CHECK_BASE + i] == 0xdeadbeefdeadbeefULL) break;
+        checks_run++;
+        if (res[C_RES_CHECK_BASE + i] == 1) continue;
+        bad++;
+        kprintf(PRINT_SERIAL, "    FAIL fs check %d: got %lld, wanted %lld\n", i,
+                (long long)res[C_RES_FAIL_BASE + i], (long long)res[C_RES_GOT_BASE + i]);
+    }
+
+    kprintf(PRINT_SERIAL, "FSW ring3: %d of %d checks passed: ", checks_run - bad, checks_run);
+    kprintchar(bad == 0 ? 'Y' : 'N', PRINT_SERIAL);
+    kprintf(PRINT_SERIAL, "\n");
+
+    pmm_free(phys, 1);
+}
+
+void fd2_test(void) {
+    fs_node_t node;
+    if (!fs_lookup("/BIN/FD2TEST", &node) && !fs_lookup("/BIN/fd2test", &node)) {
+        kprintf(PRINT_SERIAL, "FD2 ring3: /BIN/fd2test not found\n");
+        return;
+    }
+
+    paddr_t phys;
+    if (!pmm_alloc(&phys, 1)) { kprintf(PRINT_SERIAL, "FD2 ring3: alloc failed\n"); return; }
+
+    volatile uint64_t *res = (volatile uint64_t *)(vmm_hhdm_offset + phys);
+    for (int i = 0; i < C_RES_SLOTS; i++) res[i] = 0xdeadbeefdeadbeefULL;
+
+    struct elf_shared shared = { .phys = phys, .virt = C_RES_VIRT, .pages = 1, .owned_by_loader = false };
+
+    struct elf_image img;
+    const char *err = NULL;
+    int r = elf_load_shared(&node, &img, &err, NULL, 0, &shared);
+    if (r) {
+        pmm_free(phys, 1);
+        kprintf(PRINT_SERIAL, "FD2 ring3: load refused: %s\n", err ? err : "?");
+        return;
+    }
+
+    struct task *t = task_spawn_vmspace("ring3fd2", img.vs, img.entry, img.stack_top);
+    elf_destroy(&img);
+    if (!t) {
+        pmm_free(phys, 1);
+        kprintf(PRINT_SERIAL, "FD2 ring3: spawn failed\n");
+        return;
+    }
+
+    uint32_t pid = t->pid;
+    for (int i = 0; i < 600 && res[C_RES_DONE] == 0xdeadbeefdeadbeefULL && task_find_pid(pid); i++) pit_sleep(5);
+
+    bool ran = res[C_RES_DONE] != 0xdeadbeefdeadbeefULL;
+    for (int i = 0; i < 400 && task_find_pid(pid); i++) pit_sleep(5);
+    task_reap_now();
+
+    if (!ran) {
+        kprintf(PRINT_SERIAL, "FD2 ring3: the test never reported\n");
+        pmm_free(phys, 1);
+        return;
+    }
+
+    int checks_run = 0, bad = 0;
+    for (int i = 0; i < C_MAX_CHECKS; i++) {
+        if (res[C_RES_CHECK_BASE + i] == 0xdeadbeefdeadbeefULL) break;
+        checks_run++;
+        if (res[C_RES_CHECK_BASE + i] == 1) continue;
+        bad++;
+        kprintf(PRINT_SERIAL, "    FAIL fd2 check %d: got %lld, wanted %lld\n", i,
+                (long long)res[C_RES_FAIL_BASE + i], (long long)res[C_RES_GOT_BASE + i]);
+    }
+
+    kprintf(PRINT_SERIAL, "FD2 ring3: %d of %d checks passed: ", checks_run - bad, checks_run);
+    kprintchar(bad == 0 ? 'Y' : 'N', PRINT_SERIAL);
+    kprintf(PRINT_SERIAL, "\n");
 
     pmm_free(phys, 1);
 }

@@ -14,17 +14,21 @@
 #define ABI_EAGAIN  (-11)
 #define ABI_EACCES  (-13)
 #define ABI_EFAULT  (-14)
+#define ABI_EEXIST   (-17)
 #define ABI_ENOTDIR (-20)
 #define ABI_EISDIR  (-21)
 #define ABI_EINVAL  (-22)
 #define ABI_ESPIPE  (-29)
+#define ABI_EPIPE   (-32)
 #define ABI_ETIMEDOUT (-110)
 #define ABI_EMFILE  (-24)
 #define ABI_ENOSPC  (-28)
 #define ABI_ENOMEM  (-12)
 #define ABI_ECHILD  (-10)
 #define ABI_WNOHANG 1
+#define ABI_ENAMETOOLONG (-36)
 #define ABI_ENOSYS  (-38)
+#define ABI_ENOTEMPTY (-39)
 #define ABI_EBADTYPE (-91)
 
 #define ABI_O_ACCMODE   0x3
@@ -35,6 +39,8 @@
 #define ABI_O_TRUNC     0x200
 #define ABI_O_DIRECTORY 0x10000
 #define ABI_O_NONBLOCK  0x800
+#define ABI_O_APPEND    0x400
+#define ABI_O_CLOEXEC   0x80000
 
 #define ABI_SEEK_SET 0
 #define ABI_SEEK_CUR 1
@@ -72,6 +78,13 @@ struct sys_dirent {
 struct sys_timespec {
     int64_t sec;
     int64_t nsec;
+};
+
+struct sys_timespec2 {
+    int64_t asec;
+    int64_t ansec;
+    int64_t msec;
+    int64_t mnsec;
 };
 
 struct sys_pollfd {
@@ -130,6 +143,9 @@ struct sys_winsize {
 #define ABI_CLONE_CHILD_CLEARTID  0x00200000ULL
 #define ABI_CLONE_SYSVSEM   0x00040000ULL
 #define ABI_CLONE_SETTLS    0x00080000ULL
+
+#define ABI_PIPE_CAPACITY 65536
+#define ABI_PIPE_BUF 4096
 
 #define ABI_AT_NULL    0
 #define ABI_AT_PHDR    3

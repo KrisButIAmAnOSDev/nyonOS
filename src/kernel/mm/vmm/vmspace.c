@@ -5,6 +5,11 @@
 #include "kernel/uaccess/uaccess.h"
 #include "kernel/mm/heap/heap.h"
 
+bool vm_protect(struct vmspace *vs, vaddr_t addr, size_t pages, uint8_t prot) {
+    if (!vs) return false;
+    return vmm_protect(vs->pml4, addr, pages, prot);
+}
+
 uint64_t vm_flags_for(uint8_t prot) {
     uint64_t f = VMM_USER_EXEC_FLAGS;
     if (!(prot & VM_PROT_WRITE)) f &= ~PAGE_WRITE;

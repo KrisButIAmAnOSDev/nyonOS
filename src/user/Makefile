@@ -8,10 +8,10 @@ USER_CFLAGS = -Wall -Wextra -std=gnu11 -ffreestanding -fno-stack-protector -fno-
               -fomit-frame-pointer -fno-asynchronous-unwind-tables -fno-unwind-tables -I. -I$(CURDIR)/../abi
 USER_LDFLAGS = -nostdlib -static-pie -pie -z noexecstack -T user.ld
 
-BINS = bin/hello bin/fdtest bin/mmtest bin/forktest
+BINS = bin/hello bin/fdtest bin/mmtest bin/forktest bin/pipetest bin/fstest bin/fd2test
 
 ifneq ($(NYONOS_MLIBC_CC),)
-BINS += bin/mhello bin/sdtest bin/thrtest bin/clktest bin/proctest bin/featest bin/mandel bin/exectest
+BINS += bin/mhello bin/sdtest bin/thrtest bin/clktest bin/proctest bin/featest bin/mandel bin/exectest bin/fdprobe
 endif
 
 -include $(BINS:=.o)
@@ -23,6 +23,10 @@ bin/%: %.o crt0.o user.ld
 	$(USER_CC) $(USER_LDFLAGS) $(filter %.o $%,$^) -o $@
 
 bin/mhello: mlibc_hello.c $(MLIBC_LD)
+	mkdir -p "$(dir $@)"
+	$(MLIBC_CC) -static -T$(MLIBC_LD) -z max-page-size=0x1000 -s $< -o $@
+
+bin/fdprobe: fdprobe.c $(MLIBC_LD) $(MLIBC_LIBC)
 	mkdir -p "$(dir $@)"
 	$(MLIBC_CC) -static -T$(MLIBC_LD) -z max-page-size=0x1000 -s $< -o $@
 

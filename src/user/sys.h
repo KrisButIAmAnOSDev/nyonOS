@@ -17,6 +17,11 @@ typedef unsigned char uchar;
 #define O_TRUNC      ABI_O_TRUNC
 #define O_DIRECTORY  ABI_O_DIRECTORY
 #define O_NONBLOCK   ABI_O_NONBLOCK
+#define O_CLOEXEC    ABI_O_CLOEXEC
+#define O_APPEND     ABI_O_APPEND
+
+#define AT_FDCWD      (-100)
+#define AT_REMOVEDIR  0x200
 
 #define SEEK_SET ABI_SEEK_SET
 #define SEEK_CUR ABI_SEEK_CUR
@@ -41,11 +46,16 @@ typedef unsigned char uchar;
 #define EIO     ABI_EIO
 #define EBADF   ABI_EBADF
 #define EAGAIN  ABI_EAGAIN
+#define EPIPE   ABI_EPIPE
 #define EACCES  ABI_EACCES
 #define EFAULT  ABI_EFAULT
 #define ENOTDIR ABI_ENOTDIR
+#define EEXIST   ABI_EEXIST
+#define ENAMETOOLONG ABI_ENAMETOOLONG
+#define ENOTEMPTY ABI_ENOTEMPTY
 #define EISDIR  ABI_EISDIR
 #define EINVAL  ABI_EINVAL
+#define ENOMEM  ABI_ENOMEM
 #define EMFILE  ABI_EMFILE
 #define ENOSPC  ABI_ENOSPC
 #define ENOSYS  ABI_ENOSYS

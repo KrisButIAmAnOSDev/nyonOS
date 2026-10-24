@@ -11,6 +11,7 @@ static void ok(void) {
 
 static void bad(slong got, slong want) {
     res[RES_CHECK_BASE + idx] = 0;
+    res[RES_CHECK_BASE + idx] = 0;
     res[RES_FAIL_BASE + idx] = (ulong)got;
     res[RES_GOT_BASE + idx] = (ulong)want;
     idx++;
@@ -146,6 +147,40 @@ int main(int argc, char **argv) {
     ck(saw_phent, 1);
     ck(saw_random, 1);
     ck(saw_phdr, 1);
+
+    slong m4 = sys_mmap(PAGE, ABI_MMAP_PROT_READ | ABI_MMAP_PROT_WRITE, ABI_MMAP_ANON);
+    ck_ge(m4, 0x100000000L);
+    volatile uint64_t *q = (volatile uint64_t *)(ulong)m4;
+    q[0] = 0xdeadbeefcafebabeUL;
+
+    ck(sys_mprotect((ulong)m4, PAGE, ABI_MMAP_PROT_READ), 0);
+    ck((slong)q[0], (slong)0xdeadbeefcafebabeUL);
+    ck(sys_mprotect((ulong)m4, PAGE, ABI_MMAP_PROT_READ | ABI_MMAP_PROT_WRITE), 0);
+    q[0] = 0x1111111111111111UL;
+    ck((slong)q[0], (slong)0x1111111111111111UL);
+    ck(sys_mprotect((ulong)m4, PAGE, 0x80), EINVAL);
+    ck(sys_mprotect((ulong)m4 + 1, PAGE, ABI_MMAP_PROT_READ), EINVAL);
+    ck(sys_mprotect((ulong)m4, 0, ABI_MMAP_PROT_READ), EINVAL);
+    ck(sys_mprotect(0x1000, PAGE, ABI_MMAP_PROT_READ), ENOMEM);
+    ck(sys_mprotect((ulong)m4, PAGE, 0), 0);
+    ck(sys_munmap((ulong)m4, PAGE), 0);
+
+    {
+        uint32_t tid = 0;
+        int pid = sys_fork(&tid);
+        if (pid > 0) {
+            ck(pid > 0, 1);
+            uintptr_t status = 0;
+            sys_waitpid(pid, (ulong)&status, 0);
+            ck((slong)status != 0, 1);
+        } else {
+            slong m5 = sys_mmap(PAGE, ABI_MMAP_PROT_READ | ABI_MMAP_PROT_WRITE, ABI_MMAP_ANON);
+            sys_mprotect((ulong)m5, PAGE, 0);
+            volatile uint64_t *r = (volatile uint64_t *)(ulong)m5;
+            r[0] = 1;
+            sys_exit(0);
+        }
+    }
 
     res[RES_DONE] = failed ? RES_FAILED : RES_ALLPASS;
     sys_exit(failed ? 1 : 0);

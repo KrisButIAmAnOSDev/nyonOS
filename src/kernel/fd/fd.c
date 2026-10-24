@@ -18,6 +18,7 @@ void kobject_init(struct kobject *o, uint32_t type, uint32_t max_rights,
     o->type = type;
     o->refcount = 1;
     o->max_rights = max_rights;
+    o->user_bufs = false;
     o->ops = ops;
 }
 
@@ -82,12 +83,11 @@ void fd_table_clone(struct task *dst, struct task *src) {
 
     for (uint32_t i = 0; i < cap; i++) {
         struct fd_entry *se = (i < FD_INLINE) ? &s->inl[i] : &s->heap[i - FD_INLINE];
-        struct fd_entry tmp = { .obj = NULL, .rights = 0, .flags = FD_FLAG_CLOEXEC, .generation = 0 };
+        struct fd_entry tmp = { .obj = NULL, .rights = 0, .flags = 0 };
         if (se->obj) {
             tmp.obj = se->obj;
             tmp.rights = se->rights;
             tmp.flags = se->flags;
-            tmp.generation = se->generation;
             kobject_get(se->obj);
         }
         if (i < FD_INLINE) {
@@ -116,8 +116,7 @@ void fd_table_init(struct task *t) {
     for (uint32_t i = 0; i < FD_INLINE; i++) {
         ft->inl[i].obj = NULL;
         ft->inl[i].rights = 0;
-        ft->inl[i].flags = FD_FLAG_CLOEXEC;
-        ft->inl[i].generation = 0;
+        ft->inl[i].flags = 0;
     }
     for (uint32_t w = 0; w < 4; w++) ft->freebits[w] = 0;
     ft->freebits[0] = (1ULL << FD_INLINE) - 1;
@@ -141,7 +140,7 @@ void fd_table_clear(struct task *t) {
             if (!o) continue;
             e->obj = NULL;
             e->rights = 0;
-            e->flags = FD_FLAG_CLOEXEC;
+            e->flags = 0;
             mark_free(ft, fd);
             batch[n++] = o;
         }
@@ -170,8 +169,7 @@ static bool fd_grow(struct fd_table *ft) {
     for (uint32_t i = 0; i < n; i++) {
         big[i].obj = NULL;
         big[i].rights = 0;
-        big[i].flags = FD_FLAG_CLOEXEC;
-        big[i].generation = 0;
+        big[i].flags = 0;
     }
 
     ft->heap = big;
@@ -213,9 +211,9 @@ int fd_alloc(struct task *t, struct kobject *obj, uint32_t rights, uint32_t flag
         struct fd_entry *e = slot(ft, idx);
         e->obj = obj;
         e->rights = (uint16_t)eff;
-        e->flags = (uint16_t)(flags | FD_FLAG_CLOEXEC);
+        e->flags = (uint16_t)flags;
         kobject_get(obj);
-        ret = (int)(idx | ((uint32_t)e->generation << FD_GEN_SHIFT));
+        ret = (int)idx;
         break;
     }
 
@@ -236,18 +234,16 @@ int fd_close(struct task *t, int fd) {
 
     struct fd_table *ft = &t->fds;
     uint32_t idx = (uint32_t)fd & FD_INDEX_MASK;
-    uint8_t gen = (uint8_t)(((uint32_t)fd >> FD_GEN_SHIFT) & FD_GEN_MASK);
 
     struct kobject *o = NULL;
 
     if (fd >= 0 && idx < ft->capacity) {
         struct fd_entry *e = slot(ft, idx);
-        if (e->obj && e->generation == gen) {
+        if (e->obj) {
             o = e->obj;
             e->obj = NULL;
             e->rights = 0;
-            e->flags = FD_FLAG_CLOEXEC;
-            e->generation = (uint8_t)((e->generation + 1) & FD_GEN_MASK);
+            e->flags = 0;
             mark_free(ft, idx);
         }
     }
@@ -259,12 +255,11 @@ int fd_close(struct task *t, int fd) {
     return 0;
 }
 
-int fd_dup(struct task *t, int fd, uint32_t rights) {
+int fd_dup(struct task *t, int fd, uint32_t rights, uint16_t flags) {
     preempt_disable();
 
     struct fd_table *ft = &t->fds;
     uint32_t idx = (uint32_t)fd & FD_INDEX_MASK;
-    uint8_t gen = (uint8_t)(((uint32_t)fd >> FD_GEN_SHIFT) & FD_GEN_MASK);
 
     struct kobject *o = NULL;
     uint16_t keep = 0;
@@ -273,7 +268,7 @@ int fd_dup(struct task *t, int fd, uint32_t rights) {
 
     if (fd >= 0 && idx < ft->capacity) {
         struct fd_entry *e = slot(ft, idx);
-        if (e->obj && e->generation == gen) {
+        if (e->obj) {
             if (!(e->rights & FD_RIGHT_DUP)) {
                 no_dup = true;
             } else {
@@ -288,18 +283,50 @@ int fd_dup(struct task *t, int fd, uint32_t rights) {
 
     if (no_dup) return FD_EACCES;
     if (!o) return FD_EBADF;
-    return fd_alloc(t, o, keep, fl);
+    return fd_alloc(t, o, keep, (uint16_t)((fl & ~(uint16_t)FD_FLAG_CLOEXEC) | flags));
+}
+
+void fd_close_cloexec(struct task *t) {
+    struct fd_table *ft = &t->fds;
+    for (uint32_t i = 0; i < ft->capacity; i++) {
+        struct fd_entry *e = slot(ft, i);
+        if (e->obj && (e->flags & FD_FLAG_CLOEXEC)) fd_close(t, (int)i);
+    }
+}
+
+int fd_truncate(struct task *t, int fd, uint64_t len) {
+    struct kobject *o = fd_get_checked(t, fd, KOBJ_FILE, FD_RIGHT_WRITE);
+    if (!o) return FD_EBADF;
+    struct file *f = (struct file *)o;
+    int r = fs_node_resize(&f->node, (uint32_t)len);
+    kobject_put(o);
+    return r;
+}
+
+int fd_sync(struct task *t, int fd) {
+    struct kobject *o = fd_get_checked(t, fd, KOBJ_FILE, 0);
+    if (!o) return FD_EBADF;
+    kobject_put(o);
+    return fs_sync() ? 0 : ABI_EIO;
+}
+
+int fd_utimens(struct task *t, int fd, int64_t mtime) {
+    struct kobject *o = fd_get_checked(t, fd, KOBJ_FILE, 0);
+    if (!o) return FD_EBADF;
+    struct file *f = (struct file *)o;
+    int r = fs_node_utimens(&f->node, mtime);
+    kobject_put(o);
+    return r;
 }
 
 int fd_get_rights(struct task *t, int fd, uint16_t *rights) {
     preempt_disable();
     struct fd_table *ft = &t->fds;
     uint32_t idx = (uint32_t)fd & FD_INDEX_MASK;
-    uint8_t gen = (uint8_t)(((uint32_t)fd >> FD_GEN_SHIFT) & FD_GEN_MASK);
     int r = FD_EBADF;
     if (fd >= 0 && idx < ft->capacity) {
         struct fd_entry *e = slot(ft, idx);
-        if (e->obj && e->generation == gen) { *rights = e->rights; r = 0; }
+        if (e->obj) { *rights = e->rights; r = 0; }
     }
     preempt_enable();
     return r;
@@ -309,11 +336,10 @@ int fd_set_cloexec(struct task *t, int fd, bool on) {
     preempt_disable();
     struct fd_table *ft = &t->fds;
     uint32_t idx = (uint32_t)fd & FD_INDEX_MASK;
-    uint8_t gen = (uint8_t)(((uint32_t)fd >> FD_GEN_SHIFT) & FD_GEN_MASK);
     int r = FD_EBADF;
     if (fd >= 0 && idx < ft->capacity) {
         struct fd_entry *e = slot(ft, idx);
-        if (e->obj && e->generation == gen) {
+        if (e->obj) {
             e->flags = on ? (e->flags | FD_FLAG_CLOEXEC) : (e->flags & ~FD_FLAG_CLOEXEC);
             r = 0;
         }
@@ -333,11 +359,10 @@ int fd_get_status(struct task *t, int fd, uint16_t *flags) {
     preempt_disable();
     struct fd_table *ft = &t->fds;
     uint32_t idx = (uint32_t)fd & FD_INDEX_MASK;
-    uint8_t gen = (uint8_t)(((uint32_t)fd >> FD_GEN_SHIFT) & FD_GEN_MASK);
     int r = FD_EBADF;
     if (fd >= 0 && idx < ft->capacity) {
         struct fd_entry *e = slot(ft, idx);
-        if (e->obj && e->generation == gen) { *flags = e->flags; r = 0; }
+        if (e->obj) { *flags = e->flags; r = 0; }
     }
     preempt_enable();
     return r;
@@ -347,11 +372,10 @@ int fd_set_status(struct task *t, int fd, uint16_t flags) {
     preempt_disable();
     struct fd_table *ft = &t->fds;
     uint32_t idx = (uint32_t)fd & FD_INDEX_MASK;
-    uint8_t gen = (uint8_t)(((uint32_t)fd >> FD_GEN_SHIFT) & FD_GEN_MASK);
     int r = FD_EBADF;
     if (fd >= 0 && idx < ft->capacity) {
         struct fd_entry *e = slot(ft, idx);
-        if (e->obj && e->generation == gen) {
+        if (e->obj) {
             e->flags = (uint16_t)((e->flags & ~FD_FLAG_NONBLOCK) | (flags & FD_FLAG_NONBLOCK));
             r = 0;
         }
@@ -371,9 +395,7 @@ int fd_dup2(struct task *t, int oldfd, int newfd, uint32_t flags) {
 
     struct fd_table *ft = &t->fds;
     uint32_t oidx = (uint32_t)oldfd & FD_INDEX_MASK;
-    uint8_t ogen = (uint8_t)(((uint32_t)oldfd >> FD_GEN_SHIFT) & FD_GEN_MASK);
     uint32_t nidx = (uint32_t)newfd & FD_INDEX_MASK;
-    uint8_t ngen = (uint8_t)(((uint32_t)newfd >> FD_GEN_SHIFT) & FD_GEN_MASK);
 
     struct kobject *o = NULL;
     uint16_t old_rights = 0;
@@ -381,7 +403,7 @@ int fd_dup2(struct task *t, int oldfd, int newfd, uint32_t flags) {
 
     if (oldfd >= 0 && oidx < ft->capacity) {
         struct fd_entry *e = slot(ft, oidx);
-        if (e->obj && e->generation == ogen) {
+        if (e->obj) {
             o = e->obj;
             old_rights = e->rights;
             found = true;
@@ -393,7 +415,7 @@ int fd_dup2(struct task *t, int oldfd, int newfd, uint32_t flags) {
         return FD_EBADF;
     }
 
-    if (oidx == nidx && ogen == ngen) {
+    if (oldfd == newfd) {
         preempt_enable();
         return newfd;
     }
@@ -408,8 +430,7 @@ int fd_dup2(struct task *t, int oldfd, int newfd, uint32_t flags) {
         struct kobject *old = target->obj;
         target->obj = NULL;
         target->rights = 0;
-        target->flags = FD_FLAG_CLOEXEC;
-        target->generation++;
+        target->flags = 0;
         mark_free(ft, nidx);
         kobject_put(old);
     }
@@ -418,12 +439,10 @@ int fd_dup2(struct task *t, int oldfd, int newfd, uint32_t flags) {
     kobject_get(o);
     target->obj = o;
     target->rights = old_rights;
-    target->flags = (uint16_t)(flags | FD_FLAG_CLOEXEC);
-
-    uint32_t ret = nidx | ((uint32_t)target->generation << FD_GEN_SHIFT);
+    target->flags = (uint16_t)flags;
 
     preempt_enable();
-    return (int)ret;
+    return (int)nidx;
 }
 
 int fd_dup_min(struct task *t, int oldfd, uint32_t min) {
@@ -443,13 +462,12 @@ struct kobject *fd_get_checked(struct task *t, int fd, uint32_t type, uint32_t n
 
     struct fd_table *ft = &t->fds;
     uint32_t idx = (uint32_t)fd & FD_INDEX_MASK;
-    uint8_t gen = (uint8_t)(((uint32_t)fd >> FD_GEN_SHIFT) & FD_GEN_MASK);
 
     struct kobject *o = NULL;
 
     if (fd >= 0 && idx < ft->capacity) {
         struct fd_entry *e = slot(ft, idx);
-        if (e->obj && e->generation == gen &&
+        if (e->obj &&
             kobject_valid(e->obj) &&
             (type == KOBJ_TYPE_ANY || e->obj->type == type) &&
             (e->rights & needed) == needed) {
@@ -498,8 +516,64 @@ int64_t fd_write(struct task *t, int fd, const void *ubuf, uint32_t len) {
     if (!o) return FD_EBADF;
     if (!o->ops || !o->ops->write_at) { kobject_put(o); return FD_EBADF; }
 
-    int64_t r = o->ops->write_at(o, ubuf, len, 0);
+    uint16_t fl = 0;
+    fd_get_status(t, fd, &fl);
 
+    struct file *f = NULL;
+    uint64_t pos = 0;
+    if (o->type == KOBJ_FILE) {
+        f = (struct file *)o;
+        if (f->append) f->pos = f->node.size;
+        pos = f->pos;
+    }
+
+    int64_t total = 0;
+    for (;;) {
+        int64_t r = o->ops->write_at(o, (const char *)ubuf + total,
+                                     len - (uint32_t)total, pos + total);
+        if (r < 0) {
+            if (r == FD_EAGAIN && !(fl & FD_FLAG_NONBLOCK) && o->ops->wait_writable) {
+                int w = o->ops->wait_writable(o);
+                if (w < 0) { if (!total) total = w; break; }
+                continue;
+            }
+            if (!total) total = r;
+            break;
+        }
+        total += r;
+        if (!r) break;
+    }
+
+    if (f) __atomic_fetch_add(&f->pos, (uint64_t)total, __ATOMIC_RELAXED);
+
+    kobject_put(o);
+    return total;
+}
+
+static char poll_wait_chan;
+
+void poll_notify(void) {
+    task_wake_chan(&poll_wait_chan);
+}
+
+void *poll_chan(void) {
+    return &poll_wait_chan;
+}
+
+bool fd_uses_user_bufs(struct task *t, int fd) {
+    struct kobject *o = fd_get_checked(t, fd, KOBJ_TYPE_ANY, 0);
+    if (!o) return false;
+    bool r = o->user_bufs;
+    kobject_put(o);
+    return r;
+}
+
+bool fd_poll_ready(struct task *t, int fd, uint16_t events, uint16_t *revents) {
+    *revents = 0;
+    struct kobject *o = fd_get_checked(t, fd, KOBJ_TYPE_ANY, 0);
+    if (!o) return false;
+    bool r = false;
+    if (o->ops && o->ops->poll_ready) r = o->ops->poll_ready(o, events, revents);
     kobject_put(o);
     return r;
 }
@@ -535,8 +609,11 @@ static int64_t file_read_at(struct kobject *o, void *ubuf, uint32_t len, uint64_
 }
 
 static int64_t file_write_at(struct kobject *o, const void *ubuf, uint32_t len, uint64_t off) {
-    (void)o; (void)ubuf; (void)len; (void)off;
-    return FD_EACCES;
+    struct file *f = (struct file *)o;
+    if (!f->writable) return FD_EACCES;
+    int r = fs_node_write(&f->node, (uint32_t)off, ubuf, len);
+    if (r < 0) return r;
+    return r;
 }
 
 static int64_t file_lseek(struct kobject *o, int64_t off, int whence) {
@@ -550,7 +627,6 @@ static int64_t file_lseek(struct kobject *o, int64_t off, int whence) {
 
     int64_t np = base + off;
     if (np < 0) return FD_EINVAL;
-    if (np > (int64_t)f->node.size) np = (int64_t)f->node.size;
     return np;
 }
 
@@ -562,11 +638,19 @@ static int64_t console_write_at(struct kobject *o, const void *ubuf, uint32_t le
     return (int64_t)len;
 }
 
+static bool file_poll_ready(struct kobject *o, uint16_t events, uint16_t *revents) {
+    (void)o;
+    if (events & ABI_POLLIN) *revents |= ABI_POLLIN;
+    if (events & ABI_POLLOUT) *revents |= ABI_POLLOUT;
+    return *revents != 0;
+}
+
 static const struct kobject_ops file_ops = {
     .read_at = file_read_at,
     .write_at = file_write_at,
     .lseek = file_lseek,
     .close = NULL,
+    .poll_ready = file_poll_ready,
 };
 
 int fd_console_dest(int fd, struct task *t, uint32_t *dest) {
@@ -648,12 +732,21 @@ static int64_t console_read_at(struct kobject *o, void *ubuf, uint32_t len, uint
         return (int64_t)i;
     }
 
-    if (!keyboard_line_ready()) return FD_EAGAIN;
+    if (!tty_input_ready()) return FD_EAGAIN;
+
+    char eof = tty_eof_char();
 
     preempt_disable();
     while (i < len) {
         char c;
         if (!keyboard_try_pop(&c)) break;
+        if (eof && c == eof) {
+            if (i == 0) {
+                preempt_enable();
+                return 0;
+            }
+            break;
+        }
         s[i++] = c;
         if (c == '\n') break;
     }
@@ -674,13 +767,25 @@ static int console_wait_readable(struct kobject *o) {
     int r;
     for (;;) {
         if (keyboard_owner() != me) { r = FD_EIO; break; }
-        bool ready = tty_canonical() ? keyboard_line_ready() : keyboard_has_input();
-        if (ready) { r = 0; break; }
+        if (tty_input_ready()) { r = 0; break; }
         task_wait(keyboard_wait_chan(), 0);
     }
 
     if (rflags & 0x200) __asm__ volatile("sti" ::: "memory");
     return r;
+}
+
+static bool console_poll_read(struct kobject *o, uint16_t events, uint16_t *revents) {
+    (void)o;
+    if ((events & ABI_POLLIN) && tty_input_ready()) *revents |= ABI_POLLIN;
+    if (events & ABI_POLLOUT) *revents |= ABI_POLLOUT;
+    return *revents != 0;
+}
+
+static bool console_poll_write(struct kobject *o, uint16_t events, uint16_t *revents) {
+    (void)o;
+    if (events & ABI_POLLOUT) *revents |= ABI_POLLOUT;
+    return *revents != 0;
 }
 
 static const struct kobject_ops tty_in_ops = {
@@ -689,6 +794,7 @@ static const struct kobject_ops tty_in_ops = {
     .write_at = NULL,
     .lseek = NULL,
     .close = NULL,
+    .poll_ready = console_poll_read,
 };
 
 static const struct kobject_ops tty_out_ops = {
@@ -696,6 +802,7 @@ static const struct kobject_ops tty_out_ops = {
     .write_at = console_write_at,
     .lseek = NULL,
     .close = NULL,
+    .poll_ready = console_poll_write,
 };
 
 static const struct kobject_ops tty_err_ops = {
@@ -703,6 +810,7 @@ static const struct kobject_ops tty_err_ops = {
     .write_at = console_write_at,
     .lseek = NULL,
     .close = NULL,
+    .poll_ready = console_poll_write,
 };
 
 int fd_install_stdio(struct task *t) {
@@ -721,9 +829,9 @@ int fd_install_stdio(struct task *t) {
         console_ready = true;
     }
 
-    int in = fd_alloc(t, &the_ttyin.obj, FD_RIGHT_READ, FD_FLAG_CLOEXEC);
-    int out = fd_alloc(t, &the_ttyout.obj, FD_RIGHT_WRITE, FD_FLAG_CLOEXEC);
-    int err = fd_alloc(t, &the_ttyerr.obj, FD_RIGHT_WRITE, FD_FLAG_CLOEXEC);
+    int in = fd_alloc(t, &the_ttyin.obj, FD_RIGHT_READ, 0);
+    int out = fd_alloc(t, &the_ttyout.obj, FD_RIGHT_WRITE, 0);
+    int err = fd_alloc(t, &the_ttyerr.obj, FD_RIGHT_WRITE, 0);
 
     if (in < 0 || out < 0 || err < 0) {
         if (in >= 0) fd_close(t, in);
@@ -736,9 +844,22 @@ int fd_install_stdio(struct task *t) {
 }
 
 int fd_open(struct task *t, const char *path, uint32_t oflags) {
+    uint32_t pl = 0;
+    while (path[pl]) pl++;
+    if (pl > FD_PATH_MAX) return FD_ENAMETOOLONG;
+
     fs_node_t node;
-    if (!fs_lookup(path, &node)) return FD_ENOENT;
+    if (!fs_lookup(path, &node)) {
+        if (!(oflags & FD_OPEN_CREATE)) return FD_ENOENT;
+        int r = fs_create(path, &node);
+        if (r) return r;
+    } else if (oflags & FD_OPEN_CREATE) {
+        int r = fs_create(path, &node);
+        if (r != ABI_EEXIST) return r;
+        if (!fs_lookup(path, &node)) return FD_ENOENT;
+    }
     if (node.is_dir && !(oflags & FD_OPEN_DIR)) return FD_EISDIR;
+    if (node.is_dir && (oflags & FD_OPEN_MODE) != FD_OPEN_READ) return FD_EISDIR;
 
     uint32_t rights = 0;
     uint32_t omode = oflags & FD_OPEN_MODE;
@@ -753,12 +874,25 @@ int fd_open(struct task *t, const char *path, uint32_t oflags) {
     struct file *f = kmalloc(sizeof(struct file));
     if (!f) return FD_ENOSPC;
 
+    if (oflags & FD_OPEN_TRUNC) {
+        if (!node.is_dir) {
+            int r = fs_node_truncate(&node);
+            if (r) { kfree(f); return r; }
+        }
+    }
+
     kobject_init(&f->obj, KOBJ_FILE, FD_RIGHTS_ALL, &file_ops);
     f->node = node;
     f->pos = 0;
     f->writable = (oflags & FD_OPEN_MODE) != FD_OPEN_READ;
+    f->append = (oflags & FD_OPEN_APPEND) != 0;
+    if (f->append) f->pos = f->node.size;
 
-    int fd = fd_alloc(t, &f->obj, rights, 0);
+    uint16_t fflags = 0;
+    if (oflags & FD_OPEN_CLOEXEC) fflags |= FD_FLAG_CLOEXEC;
+    if (oflags & FD_OPEN_NONBLOCK) fflags |= FD_FLAG_NONBLOCK;
+
+    int fd = fd_alloc(t, &f->obj, rights, fflags);
 
     kobject_put(&f->obj);
 

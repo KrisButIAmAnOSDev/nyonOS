@@ -48,6 +48,7 @@ bool vm_find_free(struct vmspace *vs, vaddr_t lo, vaddr_t hi, size_t bytes, vadd
 
 bool vm_map_anon(struct vmspace *vs, vaddr_t vaddr, size_t pages, uint8_t prot);
 bool vm_map_anon_zeroed(struct vmspace *vs, vaddr_t vaddr, size_t pages, uint8_t prot, bool zero);
+bool vm_protect(struct vmspace *vs, vaddr_t addr, size_t pages, uint8_t prot);
 bool vm_commit(struct vmspace *vs, vaddr_t vaddr, paddr_t phys, size_t pages, uint8_t prot, bool owned);
 
 bool vm_setup_stack(struct vmspace *vs);

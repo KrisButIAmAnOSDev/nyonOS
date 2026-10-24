@@ -18,6 +18,7 @@ static void ok(void) {
 
 static void bad(slong got, slong want) {
     res[RES_CHECK_BASE + idx] = 0;
+    res[RES_CHECK_BASE + idx] = 0;
     res[RES_FAIL_BASE + idx] = (ulong)got;
     res[RES_GOT_BASE + idx] = (ulong)want;
     idx++;

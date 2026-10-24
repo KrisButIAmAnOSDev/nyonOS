@@ -9,9 +9,8 @@
 
 #define FD_INLINE      16
 #define FD_MAX_TOTAL   256
-#define FD_GEN_SHIFT   24
-#define FD_INDEX_MASK  ((1 << FD_GEN_SHIFT) - 1)
-#define FD_GEN_MASK    0x7F
+#define FD_INDEX_MASK  0xFF
+#define FD_PATH_MAX    256
 
 #define FD_RIGHT_READ     (1u << 0)
 #define FD_RIGHT_WRITE    (1u << 1)
@@ -29,6 +28,8 @@
 #define FD_OPEN_CREATE   ABI_O_CREAT
 #define FD_OPEN_TRUNC    ABI_O_TRUNC
 #define FD_OPEN_NONBLOCK ABI_O_NONBLOCK
+#define FD_OPEN_CLOEXEC  ABI_O_CLOEXEC
+#define FD_OPEN_APPEND   ABI_O_APPEND
 #define FD_OPEN_DIR      ABI_O_DIRECTORY
 
 #define FD_SEEK_SET ABI_SEEK_SET
@@ -55,10 +56,13 @@
 #define FD_EAGAIN   ABI_EAGAIN
 #define FD_EPERM    ABI_EPERM
 #define FD_ESRCH    ABI_ESRCH
+#define FD_EPIPE    ABI_EPIPE
+#define FD_ENAMETOOLONG ABI_ENAMETOOLONG
 
 #define KOBJ_TYPE_ANY 0
 #define KOBJ_FILE    1
 #define KOBJ_CONSOLE 2
+#define KOBJ_PIPE    3
 
 struct kobject;
 
@@ -68,6 +72,8 @@ struct kobject_ops {
     int64_t (*lseek)(struct kobject *o, int64_t off, int whence);
     int (*close)(struct kobject *o);
     int (*wait_readable)(struct kobject *o);
+    int (*wait_writable)(struct kobject *o);
+    bool (*poll_ready)(struct kobject *o, uint16_t events, uint16_t *revents);
 };
 
 struct kobject {
@@ -75,6 +81,7 @@ struct kobject {
     uint32_t type;
     uint32_t refcount;
     uint32_t max_rights;
+    bool user_bufs;
     const struct kobject_ops *ops;
 };
 
@@ -83,6 +90,7 @@ struct file {
     fs_node_t node;
     uint64_t pos;
     bool writable;
+    bool append;
 };
 
 struct console {
@@ -94,7 +102,6 @@ struct fd_entry {
     struct kobject *obj;
     uint16_t rights;
     uint16_t flags;
-    uint8_t generation;
 };
 
 struct fd_table {
@@ -120,7 +127,11 @@ void fd_table_clear(struct task *t);
 int fd_alloc(struct task *t, struct kobject *obj, uint32_t rights, uint32_t flags);
 int fd_install_stdio(struct task *t);
 int fd_close(struct task *t, int fd);
-int fd_dup(struct task *t, int fd, uint32_t rights);
+int fd_dup(struct task *t, int fd, uint32_t rights, uint16_t flags);
+int fd_truncate(struct task *t, int fd, uint64_t len);
+int fd_sync(struct task *t, int fd);
+int fd_utimens(struct task *t, int fd, int64_t mtime);
+void fd_close_cloexec(struct task *t);
 int fd_dup2(struct task *t, int oldfd, int newfd, uint32_t flags);
 int fd_dup_min(struct task *t, int oldfd, uint32_t min);
 int fd_slot_in_use(struct task *t, int idx);
@@ -137,6 +148,11 @@ void fd_tty_task_gone(uint32_t pid);
 
 struct kobject *fd_get_checked(struct task *t, int fd, uint32_t type, uint32_t needed);
 void fd_put(struct kobject *o);
+
+bool fd_poll_ready(struct task *t, int fd, uint16_t events, uint16_t *revents);
+bool fd_uses_user_bufs(struct task *t, int fd);
+void poll_notify(void);
+void *poll_chan(void);
 
 int64_t fd_read(struct task *t, int fd, void *ubuf, uint32_t len);
 int64_t fd_write(struct task *t, int fd, const void *ubuf, uint32_t len);
