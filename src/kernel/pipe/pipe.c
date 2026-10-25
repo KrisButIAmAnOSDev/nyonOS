@@ -2,8 +2,11 @@
 #include "kernel/fd/fd.h"
 #include "kernel/mm/heap/heap.h"
 #include "kernel/sync/preempt.h"
+#include "kernel/sync/sync.h"
 #include "kernel/multitask/task.h"
 #include "kernel/uaccess/uaccess.h"
+
+static spinlock_t pipe_lock = SPINLOCK_INIT;
 
 struct pipe_pair {
     uint8_t *ring;
@@ -32,11 +35,11 @@ static int64_t pipe_read_at(struct kobject *o, void *ubuf, uint32_t len, uint64_
     uint32_t n, head, first;
     char *dst = (char *)ubuf;
 
-    preempt_disable();
+    lock_acquire(LOCK_PIPE, &pipe_lock);
 
     if (p->count == 0) {
         bool eof = (p->write_ends == 0);
-        preempt_enable();
+        lock_release(LOCK_PIPE, &pipe_lock);
         return eof ? 0 : FD_EAGAIN;
     }
 
@@ -46,12 +49,12 @@ static int64_t pipe_read_at(struct kobject *o, void *ubuf, uint32_t len, uint64_
     if (first > n) first = n;
 
     if (!copyout(dst, p->ring + head, first)) {
-        preempt_enable();
+        lock_release(LOCK_PIPE, &pipe_lock);
         return FD_EFAULT;
     }
     if (n > first) {
         if (!copyout(dst + first, p->ring, n - first)) {
-            preempt_enable();
+            lock_release(LOCK_PIPE, &pipe_lock);
             return FD_EFAULT;
         }
     }
@@ -59,7 +62,7 @@ static int64_t pipe_read_at(struct kobject *o, void *ubuf, uint32_t len, uint64_
     p->head = (head + n) % p->cap;
     p->count -= n;
 
-    preempt_enable();
+    lock_release(LOCK_PIPE, &pipe_lock);
 
     task_wake_chan(&p->chan);
     poll_notify();
@@ -77,21 +80,21 @@ static int64_t pipe_write_at(struct kobject *o, const void *ubuf, uint32_t len, 
     uint32_t n, tail, first;
     const char *src = (const char *)ubuf;
 
-    preempt_disable();
+    lock_acquire(LOCK_PIPE, &pipe_lock);
 
     if (p->read_ends == 0) {
-        preempt_enable();
+        lock_release(LOCK_PIPE, &pipe_lock);
         return FD_EPIPE;
     }
 
     uint32_t space = p->cap - p->count;
     if (space == 0) {
-        preempt_enable();
+        lock_release(LOCK_PIPE, &pipe_lock);
         return FD_EAGAIN;
     }
 
     if (len <= ABI_PIPE_BUF && space < len) {
-        preempt_enable();
+        lock_release(LOCK_PIPE, &pipe_lock);
         return FD_EAGAIN;
     }
 
@@ -101,19 +104,19 @@ static int64_t pipe_write_at(struct kobject *o, const void *ubuf, uint32_t len, 
     if (first > n) first = n;
 
     if (!copyin((void *)(p->ring + tail), src, first)) {
-        preempt_enable();
+        lock_release(LOCK_PIPE, &pipe_lock);
         return FD_EFAULT;
     }
     if (n > first) {
         if (!copyin((void *)p->ring, src + first, n - first)) {
-            preempt_enable();
+            lock_release(LOCK_PIPE, &pipe_lock);
             return FD_EFAULT;
         }
     }
 
     p->count += n;
 
-    preempt_enable();
+    lock_release(LOCK_PIPE, &pipe_lock);
 
     task_wake_chan(&p->chan);
     poll_notify();
@@ -129,9 +132,9 @@ static int pipe_wait_readable(struct kobject *o) {
     __asm__ volatile("pushfq; pop %0; cli" : "=r"(rflags) :: "memory");
 
     for (;;) {
-        preempt_disable();
+        lock_acquire(LOCK_PIPE, &pipe_lock);
         bool ready = p->count > 0 || p->write_ends == 0;
-        preempt_enable();
+        lock_release(LOCK_PIPE, &pipe_lock);
         if (ready) break;
         task_wait(&p->chan, 0);
     }
@@ -148,9 +151,9 @@ static int pipe_wait_writable(struct kobject *o) {
     __asm__ volatile("pushfq; pop %0; cli" : "=r"(rflags) :: "memory");
 
     for (;;) {
-        preempt_disable();
+        lock_acquire(LOCK_PIPE, &pipe_lock);
         bool ready = (p->cap - p->count) > 0 || p->read_ends == 0;
-        preempt_enable();
+        lock_release(LOCK_PIPE, &pipe_lock);
         if (ready) break;
         task_wait(&p->chan, 0);
     }
@@ -163,9 +166,9 @@ static bool pipe_poll_read(struct kobject *o, uint16_t events, uint16_t *revents
     struct pipe_end *pe = (struct pipe_end *)o;
     struct pipe_pair *p = pe->pair;
 
-    preempt_disable();
+    lock_acquire(LOCK_PIPE, &pipe_lock);
     bool can_read = p->count > 0 || p->write_ends == 0;
-    preempt_enable();
+    lock_release(LOCK_PIPE, &pipe_lock);
 
     if ((events & ABI_POLLIN) && can_read) *revents |= ABI_POLLIN;
     return *revents != 0;
@@ -175,10 +178,10 @@ static bool pipe_poll_write(struct kobject *o, uint16_t events, uint16_t *revent
     struct pipe_end *pe = (struct pipe_end *)o;
     struct pipe_pair *p = pe->pair;
 
-    preempt_disable();
+    lock_acquire(LOCK_PIPE, &pipe_lock);
     bool can_write = (p->cap - p->count) > 0;
     bool broken = p->read_ends == 0;
-    preempt_enable();
+    lock_release(LOCK_PIPE, &pipe_lock);
 
     if ((events & ABI_POLLOUT) && can_write) *revents |= ABI_POLLOUT;
     if (broken) *revents |= ABI_POLLERR;
@@ -189,11 +192,11 @@ static int pipe_close(struct kobject *o) {
     struct pipe_end *pe = (struct pipe_end *)o;
     struct pipe_pair *p = pe->pair;
 
-    preempt_disable();
+    lock_acquire(LOCK_PIPE, &pipe_lock);
     if (pe->is_read) p->read_ends--;
     else p->write_ends--;
     uint32_t refs = --p->refs;
-    preempt_enable();
+    lock_release(LOCK_PIPE, &pipe_lock);
 
     if (refs == 0) {
         kfree(p->ring);

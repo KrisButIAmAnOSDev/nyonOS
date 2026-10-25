@@ -38,6 +38,9 @@ _Static_assert(sizeof(struct isr_frame) == 176, "frame layout");
 static struct task tasks[TASK_MAX];
 static uint32_t next_pid = 1;
 static spinlock_t sched_lock = SPINLOCK_INIT;
+static uint32_t idle_slot[MAX_CPUS];
+
+static void task_wake_broadcast(void);
 
 static inline size_t current_slot(void) { return cpu_self()->current_slot; }
 static inline void set_current_slot(size_t v) { cpu_self()->current_slot = v; }
@@ -48,8 +51,30 @@ static inline bool sched_enabled(void) { return cpu_self()->sched_enabled; }
 static inline void set_sched_enabled(bool v) { cpu_self()->sched_enabled = v; }
 static inline uint64_t switch_count(void) { return cpu_self()->switch_count; }
 static inline void bump_switch_count(void) { cpu_self()->switch_count++; }
-static inline uint64_t earliest_wake(void) { return cpu_self()->earliest_wake; }
-static inline void set_earliest_wake(uint64_t v) { cpu_self()->earliest_wake = v; }
+static volatile uint64_t earliest_wake_v = UINT64_MAX;
+
+static inline uint64_t earliest_wake(void) {
+    return __atomic_load_n(&earliest_wake_v, __ATOMIC_ACQUIRE);
+}
+static inline void set_earliest_wake(uint64_t v) {
+    __atomic_store_n(&earliest_wake_v, v, __ATOMIC_RELEASE);
+}
+
+static void task_wake_broadcast(void) {
+    if (cpu_count() > 1) lapic_ipi_broadcast(cpu_self()->lapic_base, LAPIC_RESCHED_VECTOR);
+}
+
+void task_register_idle(uint32_t cpu, struct task *t) {
+    if (!t || cpu >= MAX_CPUS) return;
+    t->cpu = cpu;
+    idle_slot[cpu] = (uint32_t)(t - tasks);
+}
+
+void task_adopt_idle(uint32_t cpu) {
+    if (cpu >= MAX_CPUS || idle_slot[cpu] >= TASK_MAX) return;
+    set_current_slot(idle_slot[cpu]);
+    tasks[idle_slot[cpu]].running = true;
+}
 
 static void task_kstack_update(void) {
     size_t cs = current_slot();
@@ -66,6 +91,8 @@ void task_aspace_update(void) {
 static void task_release(struct task *t) {
     fd_tty_task_gone(t->pid);
     fd_table_clear(t);
+    t->cpu = TASK_CPU_ANY;
+    t->running = false;
 
     if (t->vs && t->vs->refcount > 1 && t->user_stack_phys &&
         t->user_stack_top > t->user_stack_base) {
@@ -152,6 +179,7 @@ void task_init(void) {
     set_current_slot(0);
     set_in_scheduler(false);
     cpu_self()->switch_count = 0;
+    for (uint32_t i = 0; i < MAX_CPUS; i++) idle_slot[i] = TASK_MAX;
 
     for (size_t i = 0; i < TASK_MAX; i++) {
         tasks[i].frame = NULL;
@@ -173,6 +201,8 @@ void task_init(void) {
         tasks[i].wake_tick = 0;
         tasks[i].wake_gen = 0;
         tasks[i].name = NULL;
+        tasks[i].cpu = TASK_CPU_ANY;
+        tasks[i].running = false;
         tasks[i].cwd[0] = '/';
         tasks[i].cwd[1] = 0;
         fd_table_init(&tasks[i]);
@@ -186,6 +216,7 @@ void task_init(void) {
     tasks[0].name = "kmain";
     tasks[0].pid = 0;
     tasks[0].debug_log = true;
+    tasks[0].running = true;
     fd_install_stdio(&tasks[0]);
     task_kstack_update();
     set_sched_enabled(true);
@@ -246,6 +277,8 @@ struct task *task_spawn(const char *name, void (*entry)(void)) {
     t->wake_tick = 0;
     t->wake_gen = 0;
     t->debug_log = false;
+    t->running = false;
+    t->cpu = TASK_CPU_ANY;
     t->pid = __atomic_add_fetch(&next_pid, 1, __ATOMIC_RELAXED);
     t->name = name;
 
@@ -355,6 +388,8 @@ static struct task *spawn_ring3(const char *name, paddr_t code_phys, size_t code
     t->frame = f;
     t->in_use = true;
     t->debug_log = false;
+    t->running = false;
+    t->cpu = TASK_CPU_ANY;
     t->pid = __atomic_add_fetch(&next_pid, 1, __ATOMIC_RELAXED);
     t->name = name;
     fd_table_init(t);
@@ -427,6 +462,8 @@ struct task *task_spawn_thread(struct task *parent, const char *name,
     t->frame = f;
     t->in_use = true;
     t->debug_log = false;
+    t->running = false;
+    t->cpu = TASK_CPU_ANY;
     t->pid = __atomic_add_fetch(&next_pid, 1, __ATOMIC_RELAXED);
     t->name = name;
 
@@ -599,6 +636,8 @@ struct task *task_spawn_fork(struct task *parent, const char *name,
     t->frame = f;
     t->in_use = true;
     t->debug_log = false;
+    t->running = false;
+    t->cpu = TASK_CPU_ANY;
     t->pid = __atomic_add_fetch(&next_pid, 1, __ATOMIC_RELAXED);
     t->name = name;
 
@@ -737,6 +776,8 @@ struct task *task_spawn_vmspace(const char *name, struct vmspace *vs, vaddr_t en
     t->frame = f;
     t->in_use = true;
     t->debug_log = false;
+    t->running = false;
+    t->cpu = TASK_CPU_ANY;
     t->pid = __atomic_add_fetch(&next_pid, 1, __ATOMIC_RELAXED);
     t->name = name;
 
@@ -754,16 +795,21 @@ struct task *task_spawn_ring3_lent(const char *name, paddr_t code_phys, size_t c
 }
 
 static void task_release_wait(struct task *t, size_t idx) {
+    bool was_blocked = t->blocked;
     (void)idx;
     __atomic_add_fetch(&t->wake_gen, 1, __ATOMIC_RELEASE);
     __atomic_store_n(&t->blocked, false, __ATOMIC_RELEASE);
+    if (was_blocked && !t->running) task_wake_broadcast();
 }
 
-static struct task *pick_next(void) {
+static struct task *pick_next(uint32_t me) {
     for (size_t i = 1; i <= TASK_MAX; i++) {
         size_t idx = (current_slot() + i) % TASK_MAX;
         struct task *t = &tasks[idx];
-        if (t->in_use && !t->blocked) return t;
+        if (!t->in_use || t->blocked) continue;
+        if (t->running) continue;
+        if (t->cpu != TASK_CPU_ANY && t->cpu != me) continue;
+        return t;
     }
     return NULL;
 }
@@ -784,28 +830,25 @@ static void task_switch_to(struct isr_frame *frame, bool force_away) {
 
     task_fpu_save();
 
-    if (cpu_id() != 0) {
-        lock_release(LOCK_SCHED, &sched_lock);
-        set_in_scheduler(false);
-        __asm__ volatile("sti" ::: "memory");
-        return;
-    }
-
     tasks[current_slot()].frame = frame;
 
     task_reap_zombies();
 
-    struct task *next = pick_next();
+    struct task *next = pick_next(cpu_id());
     if (next && force_away && next == &tasks[current_slot()]) {
         for (size_t i = 1; i <= TASK_MAX; i++) {
             size_t idx = (current_slot() + i) % TASK_MAX;
-            if (tasks[idx].in_use && !tasks[idx].blocked) {
-                next = &tasks[idx];
+            struct task *t = &tasks[idx];
+            if (t->in_use && !t->blocked && !t->running) {
+                if (t->cpu != TASK_CPU_ANY && t->cpu != cpu_id()) continue;
+                next = t;
                 break;
             }
         }
     }
     if (next && next != &tasks[current_slot()]) {
+        tasks[current_slot()].running = false;
+        next->running = true;
         bump_switch_count();
         set_current_slot((size_t)(next - tasks));
     }
@@ -834,13 +877,27 @@ void task_init_cpu(void) {
     self->earliest_wake = UINT64_MAX;
 }
 
+bool task_is_idle_current(uint32_t cpu) {
+    if (cpu >= MAX_CPUS) return false;
+    return current_slot() == idle_slot[cpu];
+}
+
 void smp_resched_handler(struct isr_frame *frame) {
     cpu_self()->resched_count++;
-    lapic_eoi(cpu_self()->lapic_base);
-    lapic_timer_set(cpu_self()->lapic_base, LAPIC_TIMER_PERIOD, LAPIC_TIMER_DIV);
+    if (cpu_self()->lapic_base) lapic_eoi(cpu_self()->lapic_base);
 
-    if (preempt_count() != 0) return;
+    if (preempt_count() != 0) {
+        if (cpu_self()->lapic_base)
+            lapic_timer_set(cpu_self()->lapic_base, LAPIC_TIMER_PERIOD, LAPIC_TIMER_DIV);
+        return;
+    }
+
     task_schedule(frame);
+
+    if (cpu_self()->lapic_base)
+        lapic_timer_set(cpu_self()->lapic_base,
+                        task_is_idle_current(cpu_id()) ? LAPIC_IDLE_PERIOD : LAPIC_TIMER_PERIOD,
+                        LAPIC_TIMER_DIV);
 }
 
 void task_schedule(struct isr_frame *frame) {
@@ -897,8 +954,12 @@ void task_exit_code(uint64_t code) {
     self->zombie = true;
     self->frame = NULL;
 
-    struct task *next = pick_next();
+    struct task *next = pick_next(cpu_id());
+    if (!next && idle_slot[cpu_id()] < TASK_MAX &&
+        tasks[idle_slot[cpu_id()]].in_use && !tasks[idle_slot[cpu_id()]].running)
+        next = &tasks[idle_slot[cpu_id()]];
     if (next) {
+        next->running = true;
         set_current_slot((size_t)(next - tasks));
         bump_switch_count();
     }
@@ -1075,6 +1136,10 @@ int task_futex_wait(void *chan, uintptr_t uaddr, uint32_t expected, uint64_t dea
 
 void task_tick(uint64_t now) {
     if (now < earliest_wake()) return;
+    if (preempt_count() != 0) return;
+    if (atomic_flag_test_and_set_explicit(&sched_lock.f, memory_order_acquire)) return;
+    preempt_disable();
+
     uint64_t next = UINT64_MAX;
     for (size_t i = 0; i < TASK_MAX; i++) {
         struct task *t = &tasks[i];
@@ -1082,6 +1147,9 @@ void task_tick(uint64_t now) {
         if (now >= t->wake_tick) task_release_wait(t, i);
         else if (t->wake_tick < next) next = t->wake_tick;
     }
+    atomic_flag_clear_explicit(&sched_lock.f, memory_order_release);
+    preempt_enable();
+
     set_earliest_wake(next);
 }
 

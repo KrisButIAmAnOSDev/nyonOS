@@ -28,6 +28,7 @@
 
 #define LAPIC_RESCHED_VECTOR 0xFD
 #define LAPIC_TIMER_PERIOD 200000u
+#define LAPIC_IDLE_PERIOD  20000000u
 #define LAPIC_TIMER_DIV    0x0B
 
 #define LAPIC_ICR_DELIVS     (1u << 12)
@@ -43,5 +44,6 @@ uint64_t lapic_id_read(uint64_t base);
 void lapic_eoi(uint64_t base);
 void lapic_ipi_wait_clear(uint64_t base);
 uint32_t lapic_ipi_send(uint64_t base, uint32_t vector, uint32_t target_lapic_id, bool init);
+void lapic_ipi_broadcast(uint64_t base, uint32_t vector);
 
 #endif

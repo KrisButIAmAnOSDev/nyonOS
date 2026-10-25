@@ -310,6 +310,7 @@ uint64_t cpu_switch_count(uint32_t id) {
 }
 
 void *percpu_self_addr(void) { return cpu_self()->self; }
+struct isr_frame **percpu_syscall_frame(void) { return &cpu_self()->syscall_frame; }
 uint64_t *percpu_syscall_kstack_top(void) { return &cpu_self()->syscall_kstack_top; }
 uint64_t *percpu_copy_abort(void) { return &cpu_self()->copy_abort; }
 bool *percpu_copy_active(void) { return &cpu_self()->copy_active; }
@@ -342,6 +343,10 @@ void cpu_bootstrap(void) {
 
     kprintf(PRINT_SERIAL, "CPU: percpu at %p, gs slot %d, max %u\n",
             (void *)percpu_table, -8, (unsigned)MAX_CPUS);
+}
+
+void cpu_set_lapic_base(uint64_t virt) {
+    cpu_self()->lapic_base = virt;
 }
 
 void cpu_bootstrap_ap(uint32_t processor_id, uint32_t lapic_id, uint64_t hhdm_offset) {

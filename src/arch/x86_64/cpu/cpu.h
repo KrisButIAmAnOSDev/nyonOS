@@ -30,9 +30,12 @@ struct cpu_features {
     bool invpcid;
 };
 
+struct isr_frame;
+
 struct percpu {
     char pad0[CPU_CACHELINE];
     struct cpu_features feat;
+    struct isr_frame *syscall_frame;
     bool detected;
     bool pcid_enabled;
     bool smap_on;
@@ -92,6 +95,7 @@ bool cpu_smap_enabled(void);
 void cpu_flush_pcid(void);
 
 void cpu_bootstrap(void);
+void cpu_set_lapic_base(uint64_t virt);
 void cpu_bootstrap_ap(uint32_t processor_id, uint32_t lapic_id, uint64_t hhdm_offset);
 void cpu_set_detected(uint32_t n);
 struct percpu *cpu_self(void);
@@ -101,6 +105,7 @@ bool cpu_online_by_id(uint32_t id);
 uint64_t cpu_switch_count(uint32_t id);
 void *percpu_self_addr(void);
 uint64_t *percpu_syscall_kstack_top(void);
+struct isr_frame **percpu_syscall_frame(void);
 uint64_t *percpu_copy_abort(void);
 bool *percpu_copy_active(void);
 void percpu_copy_begin(void);

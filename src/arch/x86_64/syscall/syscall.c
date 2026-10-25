@@ -1,4 +1,5 @@
 #include "kernel/mm/heap/heap.h"
+#include "arch/x86_64/cpu/cpu.h"
 #include "kernel/mm/vmm/vmm.h"
 #include "kernel/tty/tty.h"
 #include "kernel/exec/elf.h"
@@ -21,7 +22,7 @@ extern void isr_stub_syscall(void);
 
 typedef uint64_t (*syscall_handler_t)(struct isr_frame *f);
 
-static struct isr_frame *current_frame;
+#define current_frame (*percpu_syscall_frame())
 
 static bool in_user(void) {
     struct task *t = task_current();
@@ -72,20 +73,22 @@ static int64_t sys_console_write(unsigned dest, unsigned attr, uintptr_t buf, un
     if (!buf || len == 0) return SYS_EINVAL;
     if (len > SYS_MAX_IO) len = SYS_MAX_IO;
 
-    static uint8_t iobuf[SYS_MAX_IO];
+    uint8_t *iobuf = (uint8_t *)kmalloc(SYS_MAX_IO);
+    if (!iobuf) return SYS_ENOMEM;
     const uint8_t *src = (const uint8_t *)buf;
 
     if (in_user()) {
-        if (!copyin(iobuf, (const void *)buf, len)) return SYS_EFAULT;
+        if (!copyin(iobuf, (const void *)buf, len)) { kfree(iobuf); return SYS_EFAULT; }
         src = iobuf;
     }
 
-    preempt_disable();
+    kprintf_output_lock();
     for (uint64_t i = 0; i < len; i++) {
         kprintchar(src[i], dest);
     }
-    preempt_enable();
+    kprintf_output_unlock();
 
+    kfree(iobuf);
     return len;
 }
 
@@ -611,29 +614,34 @@ static int64_t sys_close(int fd) {
 static int64_t sys_read(int fd, uintptr_t buf, unsigned len) {
     struct task *t = task_current();
     if (!t) return SYS_ENOSYS;
-    static uint8_t iobuf[SYS_MAX_IO];
 
     if (len > SYS_MAX_IO) len = SYS_MAX_IO;
 
     if (!in_user() || fd_uses_user_bufs(t, fd))
         return (int64_t)fd_read(t, fd, (void *)buf, len);
-    if (!copyin(iobuf, (const void *)buf, len)) return SYS_EFAULT;
+    uint8_t *iobuf = (uint8_t *)kmalloc(len ? len : 1);
+    if (!iobuf) return SYS_ENOMEM;
+    if (!copyin(iobuf, (const void *)buf, len)) { kfree(iobuf); return SYS_EFAULT; }
     int64_t r = fd_read(t, fd, iobuf, len);
-    if (r > 0 && !copyout((void *)buf, iobuf, (size_t)r)) return SYS_EFAULT;
+    if (r > 0 && !copyout((void *)buf, iobuf, (size_t)r)) { kfree(iobuf); return SYS_EFAULT; }
+    kfree(iobuf);
     return r;
 }
 
 static int64_t sys_write(int fd, uintptr_t buf, unsigned len) {
     struct task *t = task_current();
     if (!t) return SYS_ENOSYS;
-    static uint8_t iobuf[SYS_MAX_IO];
 
     if (len > SYS_MAX_IO) len = SYS_MAX_IO;
 
     if (!in_user() || fd_uses_user_bufs(t, fd))
         return (int64_t)fd_write(t, fd, (const void *)buf, len);
-    if (!copyin(iobuf, (const void *)buf, len)) return SYS_EFAULT;
-    return (int64_t)fd_write(t, fd, iobuf, len);
+    uint8_t *iobuf = (uint8_t *)kmalloc(len ? len : 1);
+    if (!iobuf) return SYS_ENOMEM;
+    if (!copyin(iobuf, (const void *)buf, len)) { kfree(iobuf); return SYS_EFAULT; }
+    int64_t r = fd_write(t, fd, iobuf, len);
+    kfree(iobuf);
+    return r;
 }
 
 static int64_t sys_lseek(int fd, int64_t off, int whence) {
@@ -653,21 +661,23 @@ static int64_t sys_dup(int fd, int cloexec, unsigned rights) {
 static int64_t sys_pread(int fd, uintptr_t buf, unsigned len, int64_t off) {
     struct task *t = task_current();
     if (!t) return SYS_ENOSYS;
-    static uint8_t iobuf[SYS_MAX_IO];
 
     if (len > SYS_MAX_IO) len = SYS_MAX_IO;
     if (off < 0) return SYS_EINVAL;
 
     bool usr = in_user();
+    uint8_t *iobuf = (uint8_t *)kmalloc(len ? len : 1);
+    if (!iobuf) return SYS_ENOMEM;
     void *dst = usr ? (void *)iobuf : (void *)buf;
 
     struct kobject *o = fd_get_checked(t, fd, KOBJ_TYPE_ANY, FD_RIGHT_READ);
-    if (!o) return SYS_EBADF;
-    if (!o->ops || !o->ops->read_at) { kobject_put(o); return SYS_EBADF; }
+    if (!o) { kfree(iobuf); return SYS_EBADF; }
+    if (!o->ops || !o->ops->read_at) { kobject_put(o); kfree(iobuf); return SYS_EBADF; }
 
     int64_t r = o->ops->read_at(o, dst, len, (uint64_t)off);
     kobject_put(o);
-    if (usr && r > 0 && !copyout((void *)buf, iobuf, (size_t)r)) return SYS_EFAULT;
+    if (usr && r > 0 && !copyout((void *)buf, iobuf, (size_t)r)) { kfree(iobuf); return SYS_EFAULT; }
+    kfree(iobuf);
     return r;
 }
 

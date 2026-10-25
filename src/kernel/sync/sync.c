@@ -5,8 +5,8 @@
 #include "arch/x86_64/cpu/cpu.h"
 
 static const char *lock_names[LOCK_COUNT] = {
-    "none", "ata_lock", "sched_lock", "fd_lock", "heap_lock",
-    "vmm_lock", "pmm_lock", "fs_lock", "crypto_lock"
+    "none", "fs_lock", "ata_lock", "sched_lock", "fd_lock", "pipe_lock",
+    "heap_lock", "vmm_lock", "pmm_lock", "crypto_lock"
 };
 
 const char *lock_name(lock_id_t id) {

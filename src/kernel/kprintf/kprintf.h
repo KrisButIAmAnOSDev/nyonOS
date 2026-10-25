@@ -16,6 +16,9 @@
 
 void kprintchar(char c, uint32_t attr);
 bool kprintf_busy(void);
+bool kprintf_output_trylock(void);
+void kprintf_output_lock(void);
+void kprintf_output_unlock(void);
 void kprintf(uint32_t attr, const char *fmt, ...);
 void kvprintf(uint32_t attr, const char *fmt, va_list args);
 

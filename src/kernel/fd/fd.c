@@ -637,7 +637,9 @@ static int64_t console_write_at(struct kobject *o, const void *ubuf, uint32_t le
     const struct console *c = (const struct console *)o;
     if (c->dest == PRINT_NONE) return (int64_t)len;
     const char *s = (const char *)ubuf;
+    kprintf_output_lock();
     for (uint32_t i = 0; i < len; i++) kprintchar(s[i], c->dest);
+    kprintf_output_unlock();
     return (int64_t)len;
 }
 

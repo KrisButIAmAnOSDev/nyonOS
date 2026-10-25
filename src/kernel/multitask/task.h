@@ -20,6 +20,7 @@
 #define TASK_USER_CODE_VIRT  0x0000000000400000ULL
 
 #define TASK_FXSAVE_BYTES 512
+#define TASK_CPU_ANY 0xFFFFFFFFu
 
 struct task {
     struct isr_frame *frame;
@@ -53,10 +54,15 @@ struct task {
     const char *name;
     struct fd_table fds;
     char cwd[FD_PATH_MAX];
+    uint32_t cpu;
+    volatile bool running;
 };
 
 void task_resume_asm(struct isr_frame *frame);
 void task_init(void);
+void task_register_idle(uint32_t cpu, struct task *t);
+void task_adopt_idle(uint32_t cpu);
+bool task_is_idle_current(uint32_t cpu);
 void task_init_cpu(void);
 struct task *task_spawn(const char *name, void (*entry)(void));
 struct task *task_spawn_ring3(const char *name, paddr_t code_phys, size_t code_pages, vaddr_t code_virt, vaddr_t entry_rip, paddr_t shared_phys, vaddr_t shared_virt);

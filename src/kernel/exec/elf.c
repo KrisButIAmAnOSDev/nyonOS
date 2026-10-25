@@ -167,7 +167,7 @@ static const char *default_env[] = {
     "TERM=xterm",
     "USER=nyon",
     "LOGNAME=nyon",
-
+    "PS1=\\[\\e[1;36m\\]nyon\\[\\e[0m\\] \\e[35m\\w\\e[0m # ",
     NULL
 };
 

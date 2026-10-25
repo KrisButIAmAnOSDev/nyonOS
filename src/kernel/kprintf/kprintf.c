@@ -375,26 +375,43 @@ void kvprintf(uint32_t attr, const char *fmt, va_list args) {
     }
 }
 
-static volatile bool printing;
+static volatile uint32_t printing;
 
 bool kprintf_busy(void) {
-    return printing;
+    return __atomic_load_n(&printing, __ATOMIC_ACQUIRE) != 0;
+}
+
+bool kprintf_output_trylock(void) {
+    preempt_disable();
+    if (__atomic_test_and_set(&printing, __ATOMIC_ACQ_REL)) {
+        preempt_enable();
+        return false;
+    }
+    return true;
+}
+
+void kprintf_output_lock(void) {
+    for (;;) {
+        preempt_disable();
+        if (!__atomic_test_and_set(&printing, __ATOMIC_ACQ_REL)) return;
+        preempt_enable();
+        __builtin_ia32_pause();
+    }
+}
+
+void kprintf_output_unlock(void) {
+    __atomic_clear(&printing, __ATOMIC_RELEASE);
+    preempt_enable();
 }
 
 void kprintf(uint32_t attr, const char *fmt, ...) {
     va_list args;
 
-    preempt_disable();
-    if (printing) {
-        preempt_enable();
-        return;
-    }
-    printing = true;
+    if (!kprintf_output_trylock()) return;
 
     va_start(args, fmt);
     kvprintf(attr, fmt, args);
     va_end(args);
 
-    printing = false;
-    preempt_enable();
+    kprintf_output_unlock();
 }

@@ -1,6 +1,7 @@
 #include "fs.h"
 #include "kernel/block/block.h"
 #include "kernel/sync/preempt.h"
+#include "kernel/sync/sync.h"
 #include "kernel/kprintf/kprintf.h"
 #include "arch/x86_64/rtc/rtc.h"
 #include "arch/x86_64/cpu/cpu.h"
@@ -8,6 +9,8 @@
 static void fat_stamp(int64_t unix_sec, uint16_t *out_time, uint16_t *out_date);
 
 #define FS_PATH_MAX 128
+
+static spinlock_t fs_lock = SPINLOCK_INIT;
 #define FS_SCAN_MAX 4096
 
 static fs_volume_t fs;
@@ -121,9 +124,9 @@ bool fs_mount_inner(block_device_t *dev) {
 }
 
 bool fs_mount(block_device_t *dev) {
-    preempt_disable();
+    lock_acquire(LOCK_FS, &fs_lock);
     bool r = fs_mount_inner(dev);
-    preempt_enable();
+    lock_release(LOCK_FS, &fs_lock);
     return r;
 }
 
@@ -346,9 +349,9 @@ bool fs_iterate_inner(const fs_node_t *dir, uint32_t index, fs_node_t *out) {
 }
 
 bool fs_iterate(const fs_node_t *dir, uint32_t index, fs_node_t *out) {
-    preempt_disable();
+    lock_acquire(LOCK_FS, &fs_lock);
     bool r = fs_iterate_inner(dir, index, out);
-    preempt_enable();
+    lock_release(LOCK_FS, &fs_lock);
     return r;
 }
 
@@ -627,9 +630,9 @@ static int fs_node_utimens_inner(fs_node_t *node, int64_t mtime) {
 }
 
 int fs_node_utimens(fs_node_t *node, int64_t mtime) {
-    preempt_disable();
+    lock_acquire(LOCK_FS, &fs_lock);
     int r = fs_node_utimens_inner(node, mtime);
-    preempt_enable();
+    lock_release(LOCK_FS, &fs_lock);
     return r;
 }
 
@@ -959,9 +962,9 @@ bool fs_lookup_inner(const char *path, fs_node_t *out) {
 }
 
 bool fs_lookup(const char *path, fs_node_t *out) {
-    preempt_disable();
+    lock_acquire(LOCK_FS, &fs_lock);
     bool r = fs_lookup_inner(path, out);
-    preempt_enable();
+    lock_release(LOCK_FS, &fs_lock);
     return r;
 }
 
@@ -1030,9 +1033,9 @@ bool fs_node_read_inner(const fs_node_t *node, uint32_t offset, void *buf, uint3
 }
 
 bool fs_node_read(const fs_node_t *node, uint32_t offset, void *buf, uint32_t len) {
-    preempt_disable();
+    lock_acquire(LOCK_FS, &fs_lock);
     bool r = fs_node_read_inner(node, offset, buf, len);
-    preempt_enable();
+    lock_release(LOCK_FS, &fs_lock);
     return r;
 }
 
@@ -1041,64 +1044,64 @@ uint32_t fs_node_read_all_inner(const fs_node_t *node, void *buf, uint32_t max) 
     uint32_t want = node->size;
     if (want > max) want = max;
     if (want == 0) return 0;
-    if (!fs_node_read(node, 0, buf, want)) return 0;
+    if (!fs_node_read_inner(node, 0, buf, want)) return 0;
     return want;
 }
 
 uint32_t fs_node_read_all(const fs_node_t *node, void *buf, uint32_t max) {
-    preempt_disable();
+    lock_acquire(LOCK_FS, &fs_lock);
     uint32_t r = fs_node_read_all_inner(node, buf, max);
-    preempt_enable();
+    lock_release(LOCK_FS, &fs_lock);
     return r;
 }
 
 
 int fs_node_write(fs_node_t *node, uint32_t offset, const void *buf, uint32_t len) {
-    preempt_disable();
+    lock_acquire(LOCK_FS, &fs_lock);
     int r = fs_node_write_inner(node, offset, buf, len);
-    preempt_enable();
+    lock_release(LOCK_FS, &fs_lock);
     return r;
 }
 
 int fs_node_resize(fs_node_t *node, uint32_t size) {
-    preempt_disable();
+    lock_acquire(LOCK_FS, &fs_lock);
     int r = fs_node_resize_inner(node, size);
-    preempt_enable();
+    lock_release(LOCK_FS, &fs_lock);
     return r;
 }
 
 int fs_node_truncate(fs_node_t *node) {
-    preempt_disable();
+    lock_acquire(LOCK_FS, &fs_lock);
     int r = fs_node_truncate_inner(node);
-    preempt_enable();
+    lock_release(LOCK_FS, &fs_lock);
     return r;
 }
 
 int fs_create(const char *path, fs_node_t *out) {
-    preempt_disable();
+    lock_acquire(LOCK_FS, &fs_lock);
     int r = fs_create_inner(path, out);
-    preempt_enable();
+    lock_release(LOCK_FS, &fs_lock);
     return r;
 }
 
 int fs_mkdir(const char *path, fs_node_t *out) {
-    preempt_disable();
+    lock_acquire(LOCK_FS, &fs_lock);
     int r = fs_mkdir_inner(path, out);
-    preempt_enable();
+    lock_release(LOCK_FS, &fs_lock);
     return r;
 }
 
 int fs_unlink(const char *path) {
-    preempt_disable();
+    lock_acquire(LOCK_FS, &fs_lock);
     int r = fs_unlink_inner(path, false);
-    preempt_enable();
+    lock_release(LOCK_FS, &fs_lock);
     return r;
 }
 
 int fs_rmdir(const char *path) {
-    preempt_disable();
+    lock_acquire(LOCK_FS, &fs_lock);
     int r = fs_unlink_inner(path, true);
-    preempt_enable();
+    lock_release(LOCK_FS, &fs_lock);
     return r;
 }
 

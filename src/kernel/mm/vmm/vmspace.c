@@ -179,6 +179,7 @@ bool vm_grow_stack(struct vmspace *vs, vaddr_t addr) {
     if (addr >= vs->stack_base || addr < vs->stack_bottom) return false;
 
     vaddr_t need = addr & ~(vaddr_t)(PAGE_SIZE - 1);
+    if (need > vs->stack_bottom) need -= PAGE_SIZE;
     size_t pages = (size_t)((vs->stack_base - need) / PAGE_SIZE);
     if (pages == 0) return false;
 

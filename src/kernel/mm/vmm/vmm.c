@@ -363,16 +363,19 @@ bool vmm_cow_resolve(struct page_table *root, vaddr_t vaddr) {
     if (!root) return false;
 
     int levels = vmm_5level ? 5 : 4;
-    uint64_t *entry = walk_page_table(root, vaddr, levels, false, 0);
-    if (!entry || !(*entry & PAGE_PRESENT)) return false;
-    if (!(*entry & PAGE_COW)) return false;
-    if (*entry & PAGE_PINNED) return false;
-    if (*entry & PAGE_WRITE) return false;
+    uint64_t *entry;
+
+    lock_acquire(LOCK_VMM, &vmm_lock);
+    entry = walk_page_table(root, vaddr, levels, false, 0);
+    if (!entry || !(*entry & PAGE_PRESENT)) { lock_release(LOCK_VMM, &vmm_lock); return false; }
+    if (!(*entry & PAGE_COW)) { lock_release(LOCK_VMM, &vmm_lock); return false; }
+    if (*entry & PAGE_PINNED) { lock_release(LOCK_VMM, &vmm_lock); return false; }
+    if (*entry & PAGE_WRITE) { lock_release(LOCK_VMM, &vmm_lock); return false; }
 
     paddr_t old = *entry & VMM_PT_ADDR_MASK;
     paddr_t np;
 
-    if (!pmm_alloc(&np, 1)) return false;
+    if (!pmm_alloc(&np, 1)) { lock_release(LOCK_VMM, &vmm_lock); return false; }
 
     const uint8_t *src = (const uint8_t *)(vmm_hhdm_offset + old);
     uint8_t *dst = (uint8_t *)(vmm_hhdm_offset + np);
@@ -389,6 +392,7 @@ bool vmm_cow_resolve(struct page_table *root, vaddr_t vaddr) {
     nf |= PAGE_OWNED;
     *entry = nf | np;
     invlpg(vaddr);
+    lock_release(LOCK_VMM, &vmm_lock);
     return true;
 }
 

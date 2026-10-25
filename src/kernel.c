@@ -140,6 +140,7 @@ static void busy_wait_ms(uint64_t ms) {
 }
 
 static uint64_t smp_hhdm_offset;
+static volatile int smp_noaptimer;
 static volatile uint32_t smp_go[MAX_CPUS];
 
 static void cpu_idle(void) {
@@ -173,7 +174,8 @@ static void ap_entry(struct limine_mp_info *info) {
     }
 
     task_init_cpu();
-    lapic_timer_set(cpu_self()->lapic_base, LAPIC_TIMER_PERIOD, LAPIC_TIMER_DIV);
+    task_adopt_idle(id);
+    if (!smp_noaptimer) lapic_timer_set(cpu_self()->lapic_base, LAPIC_TIMER_PERIOD, LAPIC_TIMER_DIV);
 
     __asm__ volatile("sti" ::: "memory");
 
@@ -284,6 +286,7 @@ void kmain(void) {
        kprintf(PRINT_SERIAL, "nyonOS: Failed to map LAPIC!\n");
        for (;;) __asm__ volatile("hlt");
     }
+    cpu_set_lapic_base(lapic_virt);
 
     pic_remap(0x20, 0x28);
     pic_clear_mask(2);
@@ -308,6 +311,10 @@ void kmain(void) {
     kprintf(PRINT_SERIAL, "CPU: limine says %s paging, vmm says %s, agree: %c\n",
             cpu_paging_mode_name(), vmm_5level ? "5-level" : "4-level",
             cpu_paging_mode_matches() ? 'Y' : 'N');
+
+    sync_init();
+    task_init();
+
     {
         uint32_t ncpu = 1;
         struct limine_mp_response *mp = (struct limine_mp_response *)limine_mp_request.response;
@@ -320,6 +327,11 @@ void kmain(void) {
                 mi->goto_address = (i == 0) ? bsp_mp_done : ap_entry;
             }
             cpu_set_detected(ncpu);
+        }
+
+        for (uint32_t i = 0; i < ncpu; i++) {
+            struct task *idle = task_spawn(i == 0 ? "idle0" : "idle", cpu_idle);
+            if (idle) task_register_idle(i, idle);
         }
 
         for (uint32_t i = 1; i < ncpu; i++) {
@@ -353,7 +365,6 @@ void kmain(void) {
 
     kprintf(PRINT_SERIAL, "nyonOS: init done\n");
 
-    sync_init();
     heap_init();
 
     if (!ata_init()) kprintf(PRINT_SERIAL, "ATA: no drive found\n");
@@ -365,7 +376,6 @@ void kmain(void) {
         pci_program_bars(dev);
     }
 
-    task_init();
     lock_invariant_test();
     task_spawn("aqua", task_aqua);
     task_spawn("seth", task_seth);

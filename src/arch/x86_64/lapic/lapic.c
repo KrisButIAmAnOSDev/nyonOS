@@ -50,6 +50,13 @@ void lapic_ipi_wait_clear(uint64_t base) {
     }
 }
 
+void lapic_ipi_broadcast(uint64_t base, uint32_t vector) {
+    if (lapic_read32(base, LAPIC_REG_ICR_LOW) & LAPIC_ICR_DELIVS) return;
+    lapic_write32(base, LAPIC_REG_ERR, 0);
+    lapic_write32(base, LAPIC_REG_ICR_HIGH, 0);
+    lapic_write32(base, LAPIC_REG_ICR_LOW, 0x00044000u | (vector & 0xFFu));
+}
+
 uint32_t lapic_ipi_send(uint64_t base, uint32_t vector, uint32_t target_lapic_id, bool init) {
     lapic_write32(base, LAPIC_REG_ERR, 0);
     lapic_write32(base, LAPIC_REG_ICR_HIGH, target_lapic_id << 24);
