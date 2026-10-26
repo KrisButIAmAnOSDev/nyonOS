@@ -490,8 +490,6 @@ void kmain(void) {
         elf_run_test();
     }
 
-    shell_run();
-
     {
         uint32_t n = cpu_count();
         uint64_t total = 0;
@@ -504,6 +502,8 @@ void kmain(void) {
                     (unsigned long long)cpu_switch_count(i));
         }
     }
+
+    shell_run();
 
     for (;;) {
         uint64_t seq = task_wake_seq();

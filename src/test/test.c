@@ -869,11 +869,18 @@ void shell_run(void) {
     kprintf(PRINT_SERIAL, "SHELL: bash started as pid %u, type to run it\n", t->pid);
 
     uint32_t pid = t->pid;
+    uint32_t smp_ticks = 0;
     for (;;) {
         if (!task_find_pid(pid)) {
             keyboard_set_owner(0);
             kprintf(PRINT_SERIAL, "SHELL: bash exited\n");
             return;
+        }
+        if (++smp_ticks % 250 == 0) {
+            for (uint32_t i = 0; i < cpu_count(); i++)
+                kprintf(PRINT_SERIAL, "SMP: cpu%u resched %llu switches %llu\n", i,
+                        (unsigned long long)cpu_resched_count(i),
+                        (unsigned long long)cpu_switch_count(i));
         }
         pit_sleep(20);
     }

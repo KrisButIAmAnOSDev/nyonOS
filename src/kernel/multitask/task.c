@@ -795,11 +795,10 @@ struct task *task_spawn_ring3_lent(const char *name, paddr_t code_phys, size_t c
 }
 
 static void task_release_wait(struct task *t, size_t idx) {
-    bool was_blocked = t->blocked;
     (void)idx;
     __atomic_add_fetch(&t->wake_gen, 1, __ATOMIC_RELEASE);
     __atomic_store_n(&t->blocked, false, __ATOMIC_RELEASE);
-    if (was_blocked && !t->running) task_wake_broadcast();
+    task_wake_broadcast();
 }
 
 static struct task *pick_next(uint32_t me) {
@@ -809,6 +808,7 @@ static struct task *pick_next(uint32_t me) {
         if (!t->in_use || t->blocked) continue;
         if (t->running) continue;
         if (t->cpu != TASK_CPU_ANY && t->cpu != me) continue;
+        if (idle_slot[me] < TASK_MAX && idx == idle_slot[me]) continue;
         return t;
     }
     return NULL;
@@ -845,6 +845,12 @@ static void task_switch_to(struct isr_frame *frame, bool force_away) {
                 break;
             }
         }
+    }
+    if (!next) {
+        uint32_t me = cpu_id();
+        if (idle_slot[me] < TASK_MAX && tasks[idle_slot[me]].in_use &&
+            !tasks[idle_slot[me]].running && idle_slot[me] != current_slot())
+            next = &tasks[idle_slot[me]];
     }
     if (next && next != &tasks[current_slot()]) {
         tasks[current_slot()].running = false;

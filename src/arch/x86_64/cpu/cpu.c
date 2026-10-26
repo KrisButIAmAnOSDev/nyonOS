@@ -363,6 +363,7 @@ void cpu_bootstrap_ap(uint32_t processor_id, uint32_t lapic_id, uint64_t hhdm_of
     cpu_enable_nx();
     cpu_enable_smep_smap();
     cpu_enable_pcid();
+    cpu_enable_sse_user();
 
     idt_reload();
     syscall_msr_init();
