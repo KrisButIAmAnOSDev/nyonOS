@@ -35,7 +35,7 @@ if [ ! -f fat16.img ]; then
     exit 1
 fi
 
-PROGRAMS="hello fdtest mmtest forktest pipetest fstest fd2test"
+PROGRAMS="hello fdtest mmtest forktest pipetest fstest fd2test evtest fbtest"
 if [ -f src/user/bin/mhello ]; then
     PROGRAMS="$PROGRAMS mhello"
 fi
@@ -69,6 +69,10 @@ if [ -f src/user/bin/clktest ]; then
     PROGRAMS="$PROGRAMS clktest"
 fi
 
+if [ -f src/user/bin/sigtest ]; then
+    PROGRAMS="$PROGRAMS sigtest"
+fi
+
 for prog in $PROGRAMS; do
     if [ ! -f "src/user/bin/$prog" ]; then
         echo "src/user/bin/$prog missing, cannot stage user programs" >&2
@@ -93,6 +97,13 @@ fi
 
 if [ -f ../bash/bash ]; then
     mcopy -i fat16.img@@1M ../bash/bash ::/BIN/BASH
+fi
+
+if [ -f ../doomgeneric/doomgeneric/doom ]; then
+    mcopy -i fat16.img@@1M ../doomgeneric/doomgeneric/doom ::/BIN/DOOM
+fi
+if [ -f ../doomgeneric/doom1.wad ]; then
+    mcopy -i fat16.img@@1M ../doomgeneric/doom1.wad ::/DOOM1.WAD
 fi
 
 PATH=$PATH:/usr/sbin:/sbin sgdisk nyonOS.img -n 1:2048 -t 1:ef00 -m 1

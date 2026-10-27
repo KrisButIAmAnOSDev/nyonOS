@@ -59,6 +59,7 @@ bool vmm_range_present_in(struct page_table *root, vaddr_t addr, size_t len);
 bool vmm_clone_user_space(struct page_table *src, struct page_table *dst, size_t *copied);
 bool vmm_share_user_space(struct page_table *src, struct page_table *dst, size_t *shared);
 bool vmm_cow_resolve(struct page_table *root, vaddr_t vaddr);
+bool vmm_user_page_exec(struct page_table *root, vaddr_t vaddr);
 bool vmm_cow_privatise(struct page_table *root);
 bool vmm_pin(struct page_table *root, vaddr_t vaddr);
 bool vmm_cow_enabled(void);

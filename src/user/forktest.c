@@ -53,6 +53,49 @@ static void run_cow_case(int enable) {
 	ck(st, 77 << 8);
 	ck((slong)marker, 0x5A5A);
 	(void)prev;
+	(void)tag;
+}
+
+static void run_cow_two_way(int enable) {
+	sys_cow_ctl(enable);
+
+	uint32_t cp = 0;
+	marker = 0x5A5A;
+
+	if (sys_fork((uint32_t *)&cp) == 0) {
+		int saw_old = (marker == 0x5A5A);
+		sys_exit(saw_old ? 77 : 99);
+	}
+
+	marker = 0x1111;
+
+	int st = 0;
+	ck(sys_waitpid((int32_t)cp, (uintptr_t)&st, 0), (slong)cp);
+	ck(st, 77 << 8);
+	ck((slong)marker, 0x1111);
+}
+
+static unsigned char cowbuf[8192] __attribute__((aligned(4096)));
+
+static void run_cow_pages(int enable) {
+	sys_cow_ctl(enable);
+
+	for (int i = 0; i < 8192; i++) cowbuf[i] = (unsigned char)(i & 0xff);
+
+	uint32_t cp = 0;
+	if (sys_fork((uint32_t *)&cp) == 0) {
+		for (int i = 0; i < 8192; i++) cowbuf[i] = 0xAB;
+		sys_exit(77);
+	}
+
+	int st = 0;
+	ck(sys_waitpid((int32_t)cp, (uintptr_t)&st, 0), (slong)cp);
+	ck(st, 77 << 8);
+
+	int bad = 0;
+	for (int i = 0; i < 8192; i++)
+		if (cowbuf[i] != (unsigned char)(i & 0xff)) bad++;
+	ck(bad, 0);
 }
 
 static void child_touch_and_exit(int code) {
@@ -142,6 +185,11 @@ int main(int argc, char **argv) {
     ck(status, 33 << 8);
 
     run_cow_case(0);
+    run_cow_case(1);
+    run_cow_two_way(0);
+    run_cow_two_way(1);
+    run_cow_pages(0);
+    run_cow_pages(1);
 
     ck(sys_waitpid(-1, 0, WNOHANG), SYS_ECHILD);
     ck(sys_waitpid(123456, 0, WNOHANG), SYS_ECHILD);

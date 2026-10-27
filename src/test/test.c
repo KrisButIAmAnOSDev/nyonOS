@@ -9,6 +9,7 @@
 #include "kernel/exec/elf.h"
 #include "kernel/block/block.h"
 #include "kernel/uaccess/uaccess.h"
+#include "graphics/video/video.h"
 #include "arch/x86_64/pit/pit.h"
 #include "arch/x86_64/syscall/syscall.h"
 #include "arch/x86_64/cpu/cpu.h"
@@ -868,6 +869,56 @@ void shell_run(void) {
     keyboard_set_owner(t->pid);
     kprintf(PRINT_SERIAL, "SHELL: bash started as pid %u, type to run it\n", t->pid);
 
+    {
+        fs_node_t dnode;
+        if (fs_lookup("/BIN/DOOM", &dnode)) {
+            static const char *dargs[] = { "doom", "-iwad", "/DOOM1.WAD", NULL };
+            struct elf_image dimg;
+            const char *derr = NULL;
+            if (!elf_load_argv(&dnode, &dimg, &derr, dargs, 3)) {
+                struct task *dt = task_spawn_vmspace("doom", dimg.vs, dimg.entry, dimg.stack_top);
+                elf_destroy(&dimg);
+                if (dt) kprintf(PRINT_SERIAL, "DOOM: started as pid %u\n", dt->pid);
+                else kprintf(PRINT_SERIAL, "DOOM: spawn failed\n");
+                if (dt) {
+                    kprintf(PRINT_SERIAL, "DOOM: pixel check begin\n");
+                    pit_sleep(5000);
+                    kprintf(PRINT_SERIAL, "DOOM: pixel check woke\n");
+                    struct sys_fb fbinfo;
+                    if (video_query(&fbinfo)) {
+                        volatile uint32_t *fbp = (volatile uint32_t *)(vmm_hhdm_offset + (fbinfo.phys & ~(uint64_t)(PAGE_SIZE - 1)));
+                        uint32_t stride = fbinfo.pitch / 4;
+                        uint32_t nonblack = 0;
+                        uint32_t varied = 0;
+                        uint32_t first = 0;
+                        for (uint32_t i = 0; i < 3000; i++) {
+                            uint32_t x = (i * 37) % fbinfo.width;
+                            uint32_t y = 300 + ((i * 53) % (fbinfo.height - 300));
+                            uint32_t p = fbp[(uint64_t)y * stride + x];
+                            if ((p & 0x00FFFFFFu) != 0) {
+                                nonblack++;
+                                if (!first) first = p;
+                                if (p != first) varied = 1;
+                            }
+                        }
+                        kprintf(PRINT_SERIAL, "DOOM: nonblack %u/3000 varied %u first %08x alive %d\n",
+                                nonblack, varied, first, task_find_pid(dt->pid) != NULL);
+                        kprintf(PRINT_SERIAL, "DOOM: px(640,400)=%08x px(300,300)=%08x px(1000,600)=%08x\n",
+                                fbp[400 * stride + 640], fbp[300 * stride + 300],
+                                fbp[600 * stride + 1000]);
+                        pit_sleep(1000);
+                        kprintf(PRINT_SERIAL, "DOOM: after1s px(640,400)=%08x px(300,300)=%08x\n",
+                                fbp[400 * stride + 640], fbp[300 * stride + 300]);
+                    } else {
+                        kprintf(PRINT_SERIAL, "DOOM: video_query failed\n");
+                    }
+                }
+            } else {
+                kprintf(PRINT_SERIAL, "DOOM: load refused: %s\n", derr ? derr : "?");
+            }
+        }
+    }
+
     uint32_t pid = t->pid;
     uint32_t smp_ticks = 0;
     for (;;) {
@@ -1180,6 +1231,238 @@ void thread_test(void) {
     kprintf(PRINT_SERIAL, "THREADS: program exited: ");
     kprintchar(!alive ? 'Y' : 'N', PRINT_SERIAL);
     kprintchar('\n', PRINT_SERIAL);
+}
+
+void sigtest_run(void) {
+    fs_node_t node;
+    if (!fs_lookup("/BIN/SIGTEST", &node) && !fs_lookup("/BIN/sigtest", &node)) {
+        kprintf(PRINT_SERIAL, "SIG ring3: /BIN/sigtest not found\n");
+        return;
+    }
+
+    paddr_t phys;
+    if (!pmm_alloc(&phys, 1)) {
+        kprintf(PRINT_SERIAL, "SIG ring3: alloc failed\n");
+        return;
+    }
+
+    volatile uint64_t *res = (volatile uint64_t *)(vmm_hhdm_offset + phys);
+    for (int i = 0; i < C_RES_SLOTS; i++) res[i] = 0xdeadbeefdeadbeefULL;
+
+    struct elf_shared shared = { .phys = phys, .virt = C_RES_VIRT, .pages = 1, .owned_by_loader = false };
+
+    struct elf_image img;
+    const char *err = NULL;
+    if (elf_load_shared(&node, &img, &err, NULL, 0, &shared)) {
+        pmm_free(phys, 1);
+        kprintf(PRINT_SERIAL, "SIG ring3: load refused: %s\n", err ? err : "?");
+        return;
+    }
+
+    struct task *t = task_spawn_vmspace("sig", img.vs, img.entry, img.stack_top);
+    elf_destroy(&img);
+    if (!t) {
+        pmm_free(phys, 1);
+        kprintf(PRINT_SERIAL, "SIG ring3: spawn failed\n");
+        return;
+    }
+
+    uint32_t pid = t->pid;
+    bool ran = false;
+    for (int i = 0; i < 2000 && task_find_pid(pid); i++) {
+        if (res[C_RES_DONE] != 0xdeadbeefdeadbeefULL) { ran = true; break; }
+        pit_sleep(5);
+    }
+    if (res[C_RES_DONE] != 0xdeadbeefdeadbeefULL) ran = true;
+    task_reap_now();
+
+    if (!ran) {
+        kprintf(PRINT_SERIAL, "SIG ring3: the test never reported\n");
+        pmm_free(phys, 1);
+        return;
+    }
+
+    static const char *labels[C_MAX_CHECKS] = {
+        "sigaction install returns 0", "old handler is DFL or IGN",
+        "sigaction query returns installed", "old handler is on_hup",
+        "kill(self,SIGHUP) ok", "handler ran (got_hup)",
+        "sigaction TERM ok", "sigprocmask BLOCK ok",
+        "kill(self,SIGTERM) ok while blocked", "handler did not run while blocked",
+        "unblock delivers pending", "handler ran after unblock",
+        "kill(child,SIGKILL) ok", "waitpid returns child",
+        "child died by signal", "signal is SIGKILL",
+        "kill(pid,999) is -1", "errno is EINVAL",
+        "kill(nonexistent,0) is -1", "errno is ESRCH",
+    };
+
+    int checks = 0, bad = 0;
+    for (int i = 0; i < C_MAX_CHECKS; i++) {
+        if (res[C_RES_CHECK_BASE + i] == 0xdeadbeefdeadbeefULL) break;
+        if (res[C_RES_CHECK_BASE + i] == 1) { checks++; continue; }
+        bad++;
+        kprintf(PRINT_SERIAL, "    FAIL %d %s: got %lld, wanted %lld\n",
+                i, labels[i] ? labels[i] : "?",
+                (long long)res[C_RES_FAIL_BASE + i],
+                (long long)res[C_RES_GOT_BASE + i]);
+    }
+
+    kprintf(PRINT_SERIAL, "SIG ring3: %d of %d checks passed: ", checks, checks + bad);
+    kprintchar(bad == 0 && checks > 0 ? 'Y' : 'N', PRINT_SERIAL);
+    kprintchar('\n', PRINT_SERIAL);
+
+    pmm_free(phys, 1);
+}
+
+void ev_test(void) {
+    fs_node_t node;
+    if (!fs_lookup("/BIN/EVTEST", &node) && !fs_lookup("/BIN/evtest", &node)) {
+        kprintf(PRINT_SERIAL, "EV ring3: /BIN/evtest not found\n");
+        return;
+    }
+
+    paddr_t phys;
+    if (!pmm_alloc(&phys, 1)) {
+        kprintf(PRINT_SERIAL, "EV ring3: alloc failed\n");
+        return;
+    }
+
+    volatile uint64_t *res = (volatile uint64_t *)(vmm_hhdm_offset + phys);
+    for (int i = 0; i < C_RES_SLOTS; i++) res[i] = 0xdeadbeefdeadbeefULL;
+
+    struct elf_shared shared = { .phys = phys, .virt = C_RES_VIRT, .pages = 1, .owned_by_loader = false };
+
+    struct elf_image img;
+    const char *err = NULL;
+    if (elf_load_shared(&node, &img, &err, NULL, 0, &shared)) {
+        pmm_free(phys, 1);
+        kprintf(PRINT_SERIAL, "EV ring3: load refused: %s\n", err ? err : "?");
+        return;
+    }
+
+    struct task *t = task_spawn_vmspace("ev", img.vs, img.entry, img.stack_top);
+    elf_destroy(&img);
+    if (!t) {
+        pmm_free(phys, 1);
+        kprintf(PRINT_SERIAL, "EV ring3: spawn failed\n");
+        return;
+    }
+
+    pit_sleep(100);
+    keyboard_event_push(30, 1);
+    keyboard_event_push(30, 0);
+    keyboard_event_push(103, 1);
+
+    uint32_t pid = t->pid;
+    bool ran = false;
+    for (int i = 0; i < 2000 && task_find_pid(pid); i++) {
+        if (res[C_RES_DONE] != 0xdeadbeefdeadbeefULL) { ran = true; break; }
+        pit_sleep(5);
+    }
+    if (res[C_RES_DONE] != 0xdeadbeefdeadbeefULL) ran = true;
+    task_reap_now();
+
+    if (!ran) {
+        kprintf(PRINT_SERIAL, "EV ring3: the test never reported\n");
+        pmm_free(phys, 1);
+        return;
+    }
+
+    static const char *labels[C_MAX_CHECKS] = {
+        "open /dev/input/event0",
+        "saw A press", "saw A release", "saw UP press", "advanced",
+        "drained to EAGAIN",
+        "close returns 0",
+    };
+
+    int checks = 0, bad = 0;
+    for (int i = 0; i < C_MAX_CHECKS; i++) {
+        if (res[C_RES_CHECK_BASE + i] == 0xdeadbeefdeadbeefULL) break;
+        if (res[C_RES_CHECK_BASE + i] == 1) { checks++; continue; }
+        bad++;
+        kprintf(PRINT_SERIAL, "    FAIL %d %s: got %lld, wanted %lld\n",
+                i, labels[i] ? labels[i] : "?",
+                (long long)res[C_RES_FAIL_BASE + i],
+                (long long)res[C_RES_GOT_BASE + i]);
+    }
+
+    kprintf(PRINT_SERIAL, "EV ring3: %d of %d checks passed: ", checks, checks + bad);
+    kprintchar(bad == 0 && checks > 0 ? 'Y' : 'N', PRINT_SERIAL);
+    kprintchar('\n', PRINT_SERIAL);
+
+    pmm_free(phys, 1);
+}
+
+void fb_test(void) {
+    fs_node_t node;
+    if (!fs_lookup("/BIN/FBTEST", &node) && !fs_lookup("/BIN/fbtest", &node)) {
+        kprintf(PRINT_SERIAL, "FB ring3: /BIN/fbtest not found\n");
+        return;
+    }
+
+    paddr_t phys;
+    if (!pmm_alloc(&phys, 1)) {
+        kprintf(PRINT_SERIAL, "FB ring3: alloc failed\n");
+        return;
+    }
+
+    volatile uint64_t *res = (volatile uint64_t *)(vmm_hhdm_offset + phys);
+    for (int i = 0; i < C_RES_SLOTS; i++) res[i] = 0xdeadbeefdeadbeefULL;
+
+    struct elf_shared shared = { .phys = phys, .virt = C_RES_VIRT, .pages = 1, .owned_by_loader = false };
+
+    struct elf_image img;
+    const char *err = NULL;
+    if (elf_load_shared(&node, &img, &err, NULL, 0, &shared)) {
+        pmm_free(phys, 1);
+        kprintf(PRINT_SERIAL, "FB ring3: load refused: %s\n", err ? err : "?");
+        return;
+    }
+
+    struct task *t = task_spawn_vmspace("fb", img.vs, img.entry, img.stack_top);
+    elf_destroy(&img);
+    if (!t) {
+        pmm_free(phys, 1);
+        kprintf(PRINT_SERIAL, "FB ring3: spawn failed\n");
+        return;
+    }
+
+    uint32_t pid = t->pid;
+    bool ran = false;
+    for (int i = 0; i < 2000 && task_find_pid(pid); i++) {
+        if (res[C_RES_DONE] != 0xdeadbeefdeadbeefULL) { ran = true; break; }
+        pit_sleep(5);
+    }
+    if (res[C_RES_DONE] != 0xdeadbeefdeadbeefULL) ran = true;
+    task_reap_now();
+
+    if (!ran) {
+        kprintf(PRINT_SERIAL, "FB ring3: the test never reported\n");
+        pmm_free(phys, 1);
+        return;
+    }
+
+    static const char *labels[C_MAX_CHECKS] = {
+        "fb_map returns 0", "width > 0", "height > 0",
+        "pitch >= width*4", "vaddr nonzero",
+        "write+readback pixel 1", "write+readback pixel 2",
+    };
+
+    int checks = 0, bad = 0;
+    for (int i = 0; i < C_MAX_CHECKS; i++) {
+        if (res[C_RES_CHECK_BASE + i] == 0xdeadbeefdeadbeefULL) break;
+        if (res[C_RES_CHECK_BASE + i] == 1) { checks++; continue; }
+        bad++;
+        kprintf(PRINT_SERIAL, "    FAIL %d %s: got %lld, wanted %lld\n",
+                i, labels[i] ? labels[i] : "?",
+                (long long)res[C_RES_FAIL_BASE + i],
+                (long long)res[C_RES_GOT_BASE + i]);
+    }
+
+    kprintf(PRINT_SERIAL, "FB ring3: %d of %d checks passed: ", checks, checks + bad);
+    kprintchar(bad == 0 && checks > 0 ? 'Y' : 'N', PRINT_SERIAL);
+    kprintchar('\n', PRINT_SERIAL);
+
+    pmm_free(phys, 1);
 }
 
 static bool tty_reap(uint32_t pid) {

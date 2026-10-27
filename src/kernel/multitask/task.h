@@ -56,6 +56,15 @@ struct task {
     char cwd[FD_PATH_MAX];
     uint32_t cpu;
     volatile bool running;
+    uint64_t sig_pending;
+    uint64_t sig_blocked;
+    uint64_t sig_saved_blocked;
+    uint64_t sig_act_handler[65];
+    uint64_t sig_act_mask[65];
+    uint64_t sig_act_flags[65];
+    vaddr_t sig_frame_user;
+    bool sig_in_handler;
+    bool sig_terminate;
 };
 
 void task_resume_asm(struct isr_frame *frame);
@@ -73,6 +82,7 @@ struct task *task_spawn_vmspace(const char *name, struct vmspace *vs, vaddr_t en
 struct task *task_spawn_ring3_lent(const char *name, paddr_t code_phys, size_t code_pages, vaddr_t code_virt, vaddr_t entry_rip, paddr_t shared_phys, vaddr_t shared_virt);
 void task_schedule(struct isr_frame *frame);
 void task_yield(struct isr_frame *frame);
+void task_sig_check(struct task *t, struct isr_frame *frame);
 void smp_resched_handler(struct isr_frame *frame);
 void task_exit(void);
 void task_exit_code(uint64_t code);

@@ -153,6 +153,12 @@ bool vm_map_anon(struct vmspace *vs, vaddr_t vaddr, size_t pages, uint8_t prot) 
     return vm_map_anon_zeroed(vs, vaddr, pages, prot, false);
 }
 
+bool vm_map_phys(struct vmspace *vs, vaddr_t vaddr, paddr_t phys, size_t pages, uint8_t prot) {
+    if (!vs || !vs->pml4 || pages == 0) return false;
+    if (vaddr & (PAGE_SIZE - 1) || phys & (PAGE_SIZE - 1)) return false;
+    return vm_commit(vs, vaddr, phys, pages, prot, false);
+}
+
 bool vm_map_anon_zeroed(struct vmspace *vs, vaddr_t vaddr, size_t pages, uint8_t prot, bool zero) {
     if (!vs || !vs->pml4 || pages == 0) return false;
 

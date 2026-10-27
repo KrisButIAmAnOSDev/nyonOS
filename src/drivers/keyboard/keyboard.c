@@ -1,9 +1,11 @@
 #include "keyboard.h"
 #include "kernel/kprintf/kprintf.h"
 #include "arch/x86_64/pic/pic.h"
+#include "arch/x86_64/pit/pit.h"
 #include "kernel/multitask/task.h"
 #include "kernel/tty/tty.h"
 #include "kernel/fd/fd.h"
+#include "abi/abi.h"
 #include <stdbool.h>
 #include "kernel/sync/preempt.h"
 
@@ -14,6 +16,65 @@ static bool shift_pressed = false;
 static bool caps_lock = false;
 static bool ctrl_pressed = false;
 static bool alt_pressed = false;
+
+#define INPUT_EVENT_RING 256
+static struct sys_input_event input_ring[INPUT_EVENT_RING];
+static uint32_t input_ring_head;
+static uint32_t input_ring_tail;
+static char input_wait_chan;
+static bool input_e0;
+
+void keyboard_event_push(uint16_t code, int32_t value) {
+    uint64_t t = pit_get_ticks();
+    struct sys_input_event ev;
+    ev.sec = t / 1000;
+    ev.nsec = (t % 1000) * 1000000ULL;
+    ev.type = SYS_EV_KEY;
+    ev.code = code;
+    ev.value = value;
+    preempt_disable();
+    input_ring[input_ring_tail] = ev;
+    input_ring_tail = (input_ring_tail + 1) % INPUT_EVENT_RING;
+    if (input_ring_head == input_ring_tail)
+        input_ring_head = (input_ring_head + 1) % INPUT_EVENT_RING;
+    preempt_enable();
+    task_wake_chan(&input_wait_chan);
+    poll_notify();
+}
+
+uint32_t keyboard_event_seq(void) {
+    return (input_ring_tail + INPUT_EVENT_RING - 1) % INPUT_EVENT_RING;
+}
+
+bool keyboard_event_available_at(uint32_t seq) {
+    bool avail = false;
+    preempt_disable();
+    uint32_t cur = input_ring_tail;
+    uint32_t skip = (seq + 1) % INPUT_EVENT_RING;
+    uint32_t n = (cur + INPUT_EVENT_RING - skip) % INPUT_EVENT_RING;
+    if (n < INPUT_EVENT_RING) avail = n != 0;
+    preempt_enable();
+    return avail;
+}
+
+bool keyboard_event_pop_at(struct sys_input_event *out, uint32_t *seq) {
+    bool got = false;
+    preempt_disable();
+    uint32_t skip = (*seq + 1) % INPUT_EVENT_RING;
+    uint32_t cur = input_ring_tail;
+    uint32_t n = (cur + INPUT_EVENT_RING - skip) % INPUT_EVENT_RING;
+    if (n) {
+        *out = input_ring[skip];
+        *seq = skip;
+        got = true;
+    }
+    preempt_enable();
+    return got;
+}
+
+void *keyboard_input_wait_chan(void) {
+    return &input_wait_chan;
+}
 
 static inline void outb(uint16_t port, uint8_t val) {
     __asm__ volatile("outb %0, %1" : : "a"(val), "Nd"(port));
@@ -148,6 +209,30 @@ void keyboard_handler(struct isr_frame *frame) {
     (void)frame;
     if (!(inb(0x64) & 0x01)) return;
     uint8_t sc = inb(0x60);
+
+    if (sc == 0xE0) {
+        input_e0 = true;
+        return;
+    }
+    {
+        bool down = !(sc & 0x80);
+        uint8_t base = sc & 0x7F;
+        uint16_t code = 0;
+        if (input_e0) {
+            input_e0 = false;
+            switch (base) {
+                case 0x48: code = 103; break;
+                case 0x50: code = 108; break;
+                case 0x4B: code = 105; break;
+                case 0x4D: code = 106; break;
+                default: break;
+            }
+        } else {
+            code = base;
+        }
+        if (code) keyboard_event_push(code, down ? 1 : 0);
+    }
+
     char c = (char)scancode_to_ascii(sc);
     if (!c) return;
 

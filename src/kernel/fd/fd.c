@@ -5,6 +5,7 @@
 #include "kernel/sync/sync.h"
 #include "kernel/sync/preempt.h"
 #include "kernel/multitask/task.h"
+#include "kernel/uaccess/uaccess.h"
 #include "drivers/keyboard/keyboard.h"
 #include "kernel/tty/tty.h"
 
@@ -818,6 +819,73 @@ static const struct kobject_ops tty_err_ops = {
     .poll_ready = console_poll_write,
 };
 
+static int64_t input_read_at(struct kobject *o, void *ubuf, uint32_t len, uint64_t off) {
+    (void)off;
+    if (!ubuf || len < sizeof(struct sys_input_event)) return 0;
+    struct input_file *in = (struct input_file *)o;
+    struct sys_input_event ev;
+    for (;;) {
+        if (!keyboard_event_pop_at(&ev, &in->seq)) return ABI_EAGAIN;
+        if (ev.sec == 0) continue;
+        break;
+    }
+    if (!copyout(ubuf, &ev, sizeof ev)) return -ABI_EFAULT;
+    return (int64_t)sizeof ev;
+}
+
+static int input_wait_readable(struct kobject *o) {
+    struct input_file *in = (struct input_file *)o;
+    if (keyboard_event_available_at(in->seq)) return 0;
+    task_wait(keyboard_input_wait_chan(), 0);
+    return 0;
+}
+
+static bool input_poll_read(struct kobject *o, uint16_t events, uint16_t *revents) {
+    struct input_file *in = (struct input_file *)o;
+    if ((events & ABI_POLLIN) && keyboard_event_available_at(in->seq)) *revents |= ABI_POLLIN;
+    if (events & ABI_POLLOUT) *revents |= ABI_POLLOUT;
+    return *revents != 0;
+}
+
+static int input_close(struct kobject *o) {
+    kfree((struct input_file *)o);
+    return 0;
+}
+
+static const struct kobject_ops input_ops = {
+    .wait_readable = input_wait_readable,
+    .read_at = input_read_at,
+    .write_at = NULL,
+    .lseek = NULL,
+    .close = input_close,
+    .poll_ready = input_poll_read,
+};
+
+int fd_open_input(struct task *t, uint32_t oflags) {
+    if ((oflags & FD_OPEN_MODE) != FD_OPEN_READ) return FD_EINVAL;
+    struct input_file *in = (struct input_file *)kmalloc(sizeof(struct input_file));
+    if (!in) return FD_ENOSPC;
+    kobject_init(&in->obj, KOBJ_INPUT, FD_RIGHT_READ | FD_RIGHT_DUP, &input_ops);
+    in->seq = keyboard_event_seq();
+    uint16_t fflags = 0;
+    if (oflags & FD_OPEN_NONBLOCK) fflags |= FD_FLAG_NONBLOCK;
+    int fd = fd_alloc(t, &in->obj, FD_RIGHT_READ, fflags);
+    kobject_put(&in->obj);
+    if (fd < 0) kfree(in);
+    return fd;
+}
+
+bool fd_path_is_input(const char *path) {
+    const char *a = "/DEV/INPUT/EVENT0";
+    const char *b = "/DEV/INPUT0";
+    size_t i = 0;
+    while (path[i] && a[i] && (path[i] | 0x20) == (a[i] | 0x20)) i++;
+    if (!path[i] && !a[i]) return true;
+    i = 0;
+    while (path[i] && b[i] && (path[i] | 0x20) == (b[i] | 0x20)) i++;
+    return !path[i] && !b[i];
+}
+
 int fd_install_stdio(struct task *t) {
     static bool console_ready = false;
 
@@ -852,6 +920,8 @@ int fd_open(struct task *t, const char *path, uint32_t oflags) {
     uint32_t pl = 0;
     while (path[pl]) pl++;
     if (pl > FD_PATH_MAX) return FD_ENAMETOOLONG;
+
+    if (fd_path_is_input(path)) return fd_open_input(t, oflags);
 
     fs_node_t node;
     if (!fs_lookup(path, &node)) {

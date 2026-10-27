@@ -3,6 +3,7 @@
 #include <stdbool.h>
 #include "boot/limine/limine.h"
 #include "graphics/font/font.h"
+#include "graphics/video/video.h"
 #include "drivers/serial/serial.h"
 #include "kernel/kprintf/kprintf.h"
 #include "arch/x86_64/idt/idt.h"
@@ -273,6 +274,9 @@ void kmain(void) {
 
     uint64_t hhdm_offset = hhdm_request.response->offset;
 
+    video_setup((uint64_t)fb->address - hhdm_offset, (uint32_t)fb->width,
+                (uint32_t)fb->height, (uint32_t)fb->pitch);
+
     pmm_init(memmap_request.response, hhdm_offset);
     vmm_init(hhdm_offset);
 
@@ -474,6 +478,9 @@ void kmain(void) {
             proctest_run();
             clktest_run();
             forktest_run();
+            sigtest_run();
+            ev_test();
+            fb_test();
             sysdep_test();
             thread_test();
             mlibc_hello_test();

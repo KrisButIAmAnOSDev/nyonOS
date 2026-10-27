@@ -13,6 +13,7 @@
 #include "kernel/pipe/pipe.h"
 #include "kernel/fs/fs.h"
 #include "kernel/mm/vmm/vmspace.h"
+#include "graphics/video/video.h"
 #include "arch/x86_64/pit/pit.h"
 #include "arch/x86_64/rtc/rtc.h"
 #include "arch/x86_64/syscall/syscall_msr.h"
@@ -838,13 +839,56 @@ static int64_t sys_munmap(uint64_t addr, uint64_t len) {
     if (end <= addr) return SYS_EINVAL;
 
     struct vm_region *r = vm_region_find(t->vs, addr);
-    if (!r || r->backing != VM_BACKING_ANON) return SYS_EINVAL;
+    if (!r || (r->backing != VM_BACKING_ANON && r->backing != VM_BACKING_PHYS)) return SYS_EINVAL;
     if (r->start != addr || r->end != end) return SYS_EINVAL;
 
     preempt_disable();
     vm_free_range(t->vs, addr, end);
     vm_region_remove(t->vs, addr, end);
     preempt_enable();
+    return 0;
+}
+
+static int64_t sys_fb_map(uintptr_t out_ptr) {
+    struct task *t = task_current();
+    if (!t || !in_user()) return SYS_EINVAL;
+
+    struct sys_fb info;
+    if (!video_query(&info)) return SYS_ENODEV;
+
+    uint64_t phys = info.phys;
+    uint64_t off = phys & (PAGE_SIZE - 1);
+    uint64_t phys_aligned = phys & ~(uint64_t)(PAGE_SIZE - 1);
+    uint64_t bytes = (uint64_t)info.pitch * info.height + off;
+    size_t pages = (size_t)((bytes + PAGE_SIZE - 1) / PAGE_SIZE);
+    size_t map_bytes = pages * PAGE_SIZE;
+
+    preempt_disable();
+    vaddr_t base = 0;
+    if (!vm_find_free(t->vs, SYS_MMAP_LO, SYS_MMAP_HI, map_bytes, &base)) {
+        preempt_enable();
+        return SYS_ENOMEM;
+    }
+    if (vm_region_add(t->vs, base, base + map_bytes, VM_PROT_READ | VM_PROT_WRITE,
+                      VM_BACKING_PHYS) != 0) {
+        preempt_enable();
+        return SYS_ENOMEM;
+    }
+    if (!vm_map_phys(t->vs, base, phys_aligned, pages, VM_PROT_READ | VM_PROT_WRITE)) {
+        vm_region_remove(t->vs, base, base + map_bytes);
+        preempt_enable();
+        return SYS_ENOMEM;
+    }
+    preempt_enable();
+
+    info.phys = base + off;
+    if (!copyout((void *)out_ptr, &info, sizeof info)) {
+        preempt_disable();
+        vm_free_range(t->vs, base, base + map_bytes);
+        vm_region_remove(t->vs, base, base + map_bytes);
+        preempt_enable();
+        return SYS_EFAULT;
+    }
     return 0;
 }
 
@@ -1078,6 +1122,165 @@ static int64_t sys_ioctl(int fd, unsigned req, int64_t arg) {
     }
 }
 
+static int64_t sys_kill(int32_t pid, int sig) {
+    if (sig < 0 || sig >= 65) return SYS_EINVAL;
+    struct task *t = task_find_pid((uint32_t)pid);
+    if (!t) return SYS_ESRCH;
+    if (sig == 0) return 0;
+    __atomic_or_fetch(&t->sig_pending, 1ULL << (sig - 1), __ATOMIC_RELAXED);
+    return 0;
+}
+
+static int64_t sys_sigaction(int sig, uintptr_t act_ptr, uintptr_t old_ptr) {
+    if (sig <= 0 || sig >= 65) return SYS_EINVAL;
+    struct task *t = task_current();
+    if (!t) return SYS_ENOSYS;
+
+    if (old_ptr) {
+        struct sys_sigaction old;
+        old.handler = t->sig_act_handler[sig];
+        old.mask = t->sig_act_mask[sig];
+        old.flags = t->sig_act_flags[sig];
+        old.restorer = 0;
+        old.pad = 0;
+        if (!copyout((void *)old_ptr, &old, sizeof old)) return SYS_EFAULT;
+    }
+
+    if (act_ptr) {
+        struct sys_sigaction act;
+        if (!copyin(&act, (const void *)act_ptr, sizeof act)) return SYS_EFAULT;
+        t->sig_act_handler[sig] = act.handler;
+        t->sig_act_mask[sig] = act.mask;
+        t->sig_act_flags[sig] = act.flags;
+    }
+
+    return 0;
+}
+
+static int64_t sys_sigprocmask(int how, uintptr_t set_ptr, uintptr_t old_ptr) {
+    struct task *t = task_current();
+    if (!t) return SYS_ENOSYS;
+
+    uint64_t set = 0;
+    if (set_ptr) {
+        if (!copyin(&set, (const void *)set_ptr, sizeof set)) return SYS_EFAULT;
+    }
+
+    uint64_t old = t->sig_blocked;
+    if (old_ptr) {
+        if (!copyout((void *)old_ptr, &old, sizeof old)) return SYS_EFAULT;
+    }
+
+    switch (how) {
+        case ABI_SIG_BLOCK: t->sig_blocked |= set; break;
+        case ABI_SIG_UNBLOCK: t->sig_blocked &= ~set; break;
+        case ABI_SIG_SETMASK: t->sig_blocked = set; break;
+        default: return SYS_EINVAL;
+    }
+
+    return 0;
+}
+
+static void sig_return(struct isr_frame *frame) {
+    struct task *t = task_current();
+    if (!t || !t->sig_in_handler || !t->sig_frame_user) {
+        frame->rax = SYS_EINVAL;
+        return;
+    }
+
+    struct isr_frame saved;
+    if (!copyin(&saved, (const void *)t->sig_frame_user, sizeof saved)) {
+        frame->rax = SYS_EFAULT;
+        return;
+    }
+
+    t->sig_blocked = t->sig_saved_blocked;
+    t->sig_in_handler = false;
+    t->sig_frame_user = 0;
+    *frame = saved;
+}
+
+static void deliver_signals(struct task *t, struct isr_frame *frame, bool allow_term);
+
+void task_sig_check(struct task *t, struct isr_frame *frame) {
+    if (!t || !frame || t->sig_in_handler) return;
+    uint64_t pending = t->sig_pending & ~t->sig_blocked;
+    if (!pending) return;
+    int s = __builtin_ctzll(pending) + 1;
+    uint64_t h = t->sig_act_handler[s];
+    if (h == ABI_SIG_IGN) {
+        t->sig_pending &= ~(1ULL << (s - 1));
+        return;
+    }
+    if (h == ABI_SIG_DFL) {
+        t->sig_pending &= ~(1ULL << (s - 1));
+        t->exit_code = 128 + s;
+        t->sig_terminate = true;
+        return;
+    }
+    deliver_signals(t, frame, false);
+}
+
+static void deliver_signals(struct task *t, struct isr_frame *frame, bool allow_term) {
+    if (!t || t->sig_in_handler) return;
+
+    uint64_t pending = t->sig_pending & ~t->sig_blocked;
+    if (!pending) return;
+
+    int s = __builtin_ctzll(pending) + 1;
+    uint64_t bit = 1ULL << (s - 1);
+    t->sig_pending &= ~bit;
+
+    uint64_t h = t->sig_act_handler[s];
+    if (h == ABI_SIG_IGN) return;
+
+    if (h == ABI_SIG_DFL) {
+        kprintf(PRINT_SERIAL, "SIG DFL pid %u sig %d\n", t->pid, s);
+        if (!allow_term) {
+            t->sig_pending |= bit;
+            return;
+        }
+        task_exit_code(128 + s);
+        for (;;) __asm__ volatile("hlt");
+    }
+
+    uint64_t rsp0 = frame->rsp;
+    uint64_t base = (rsp0 - 208) & ~0xFULL;
+    uint64_t stub = base + 192;
+
+    struct task *sig_t = t;
+    struct page_table *sig_root = sig_t->pml4 ? sig_t->pml4 :
+                                  (sig_t->vs ? sig_t->vs->pml4 : NULL);
+    if (sig_root) vmm_user_page_exec(sig_root, rsp0 & ~(vaddr_t)(PAGE_SIZE - 1));
+
+    struct isr_frame saved = *frame;
+    if (!copyout((void *)base, &saved, sizeof saved)) return;
+
+    uint64_t stub_addr = stub;
+    if (!copyout((void *)(base + 184), &stub_addr, sizeof stub_addr)) return;
+
+    uint8_t code[16];
+    for (int i = 0; i < 16; i++) code[i] = 0x90;
+    code[0] = 0xB8;
+    code[1] = SYS_SIGRETURN & 0xFF;
+    code[2] = (SYS_SIGRETURN >> 8) & 0xFF;
+    code[3] = 0;
+    code[4] = 0;
+    code[5] = 0x0F;
+    code[6] = 0x05;
+    code[7] = 0xC3;
+    if (!copyout((void *)stub, code, sizeof code)) return;
+
+    t->sig_saved_blocked = t->sig_blocked;
+    t->sig_blocked |= bit | t->sig_act_mask[s];
+    t->sig_frame_user = base;
+    t->sig_in_handler = true;
+
+    frame->rip = h;
+    frame->rdi = (uint64_t)s;
+    frame->rsp = base + 184;
+}
+
 #define X(name, num, ...) [SYS_##name] = sys_##name,
 
 void syscall_init(void) {
@@ -1097,14 +1300,20 @@ void syscall_init(void) {
 #define X(name, num, ret, nargs, argnames, ...)                                        \
     case SYS_##name:                                                                  \
             frame->rax = (uint64_t)(int64_t)sys_##name(FARG##nargs);                      \
-        return;
+        break;
 
 void syscall_dispatch(struct isr_frame *frame) {
     current_frame = frame;
+    struct task *dis_t = task_current();
+    if (frame->rax == SYS_SIGRETURN) {
+        sig_return(frame);
+        return;
+    }
     switch (frame->rax) {
         SYSCALLS
         default:
             frame->rax = SYS_ENOSYS;
             return;
     }
+    deliver_signals(dis_t, frame, true);
 }

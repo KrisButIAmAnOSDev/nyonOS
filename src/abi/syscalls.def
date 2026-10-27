@@ -67,6 +67,10 @@
     X(utimensat     ,   59, int32_t, 4, N(dirfd,(ulong)path,(ulong)times,flags), int dirfd, const char *path, struct sys_timespec2 *times, int flags) \
     X(getcwd        ,   60, int32_t, 2, N((ulong)buf,size), char *buf, size_t size) \
     X(chdir         ,   61, int32_t, 1, N((ulong)path), const char *path) \
+    X(kill          ,   62, int32_t, 2, N(pid,sig), int32_t pid, int sig) \
+    X(sigaction     ,   63, int32_t, 3, N(sig,(ulong)act,(ulong)old), int sig, const struct sys_sigaction *act, struct sys_sigaction *old) \
+    X(sigprocmask   ,   64, int32_t, 3, N(how,(ulong)set,(ulong)old), int how, const uint64_t *set, uint64_t *old) \
+    X(fb_map        ,   66, int32_t, 1, N((ulong)out), struct sys_fb *out) \
     X(console_write,  240, int64_t, 4, N(dest,attr,(ulong)buf,len), unsigned dest, unsigned attr, const void *buf, unsigned len) \
     X(debug_print  ,  241, int64_t, 2, N((ulong)msg,len), const char *msg, unsigned len)
 

@@ -359,6 +359,21 @@ bool vmm_cow_privatise(struct page_table *root) {
     return true;
 }
 
+bool vmm_user_page_exec(struct page_table *root, vaddr_t vaddr) {
+    if (!root) return false;
+    int levels = vmm_5level ? 5 : 4;
+    lock_acquire(LOCK_VMM, &vmm_lock);
+    uint64_t *entry = walk_page_table(root, vaddr, levels, false, 0);
+    if (!entry || !(*entry & PAGE_PRESENT)) {
+        lock_release(LOCK_VMM, &vmm_lock);
+        return false;
+    }
+    *entry &= ~(uint64_t)PAGE_NX;
+    invlpg(vaddr);
+    lock_release(LOCK_VMM, &vmm_lock);
+    return true;
+}
+
 bool vmm_cow_resolve(struct page_table *root, vaddr_t vaddr) {
     if (!root) return false;
 

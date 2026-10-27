@@ -93,6 +93,12 @@ static void task_release(struct task *t) {
     fd_table_clear(t);
     t->cpu = TASK_CPU_ANY;
     t->running = false;
+    t->sig_pending = 0;
+    t->sig_blocked = 0;
+    t->sig_saved_blocked = 0;
+    t->sig_in_handler = false;
+    t->sig_frame_user = 0;
+    t->sig_terminate = false;
 
     if (t->vs && t->vs->refcount > 1 && t->user_stack_phys &&
         t->user_stack_top > t->user_stack_base) {
@@ -278,6 +284,12 @@ struct task *task_spawn(const char *name, void (*entry)(void)) {
     t->wake_gen = 0;
     t->debug_log = false;
     t->running = false;
+    t->sig_pending = 0;
+    t->sig_blocked = 0;
+    t->sig_saved_blocked = 0;
+    t->sig_in_handler = false;
+    t->sig_frame_user = 0;
+    t->sig_terminate = false;
     t->cpu = TASK_CPU_ANY;
     t->pid = __atomic_add_fetch(&next_pid, 1, __ATOMIC_RELAXED);
     t->name = name;
@@ -389,6 +401,12 @@ static struct task *spawn_ring3(const char *name, paddr_t code_phys, size_t code
     t->in_use = true;
     t->debug_log = false;
     t->running = false;
+    t->sig_pending = 0;
+    t->sig_blocked = 0;
+    t->sig_saved_blocked = 0;
+    t->sig_in_handler = false;
+    t->sig_frame_user = 0;
+    t->sig_terminate = false;
     t->cpu = TASK_CPU_ANY;
     t->pid = __atomic_add_fetch(&next_pid, 1, __ATOMIC_RELAXED);
     t->name = name;
@@ -463,6 +481,12 @@ struct task *task_spawn_thread(struct task *parent, const char *name,
     t->in_use = true;
     t->debug_log = false;
     t->running = false;
+    t->sig_pending = 0;
+    t->sig_blocked = 0;
+    t->sig_saved_blocked = 0;
+    t->sig_in_handler = false;
+    t->sig_frame_user = 0;
+    t->sig_terminate = false;
     t->cpu = TASK_CPU_ANY;
     t->pid = __atomic_add_fetch(&next_pid, 1, __ATOMIC_RELAXED);
     t->name = name;
@@ -637,6 +661,12 @@ struct task *task_spawn_fork(struct task *parent, const char *name,
     t->in_use = true;
     t->debug_log = false;
     t->running = false;
+    t->sig_pending = 0;
+    t->sig_blocked = 0;
+    t->sig_saved_blocked = 0;
+    t->sig_in_handler = false;
+    t->sig_frame_user = 0;
+    t->sig_terminate = false;
     t->cpu = TASK_CPU_ANY;
     t->pid = __atomic_add_fetch(&next_pid, 1, __ATOMIC_RELAXED);
     t->name = name;
@@ -692,7 +722,12 @@ int task_wait_child(struct task *parent, int32_t want, int32_t *status_out, int3
 
         if (slot) {
             int32_t pid = (int32_t)tasks[slot].pid;
-            int32_t st = (code & 0xFF) << 8;
+            int32_t st;
+            if (code < 128) {
+                st = (code & 0xFF) << 8;
+            } else {
+                st = (code - 128) & 0x7F;
+            }
             lock_release(LOCK_SCHED, &sched_lock);
 
             if (status_out && !copyout((void *)status_out, &st, sizeof(st))) {
@@ -777,6 +812,12 @@ struct task *task_spawn_vmspace(const char *name, struct vmspace *vs, vaddr_t en
     t->in_use = true;
     t->debug_log = false;
     t->running = false;
+    t->sig_pending = 0;
+    t->sig_blocked = 0;
+    t->sig_saved_blocked = 0;
+    t->sig_in_handler = false;
+    t->sig_frame_user = 0;
+    t->sig_terminate = false;
     t->cpu = TASK_CPU_ANY;
     t->pid = __atomic_add_fetch(&next_pid, 1, __ATOMIC_RELAXED);
     t->name = name;
@@ -814,6 +855,26 @@ static struct task *pick_next(uint32_t me) {
     return NULL;
 }
 
+static void task_zombify_locked(struct task *t) {
+    if (!t || !t->in_use || t->zombie) return;
+    fd_tty_task_gone(t->pid);
+    fd_table_clear(t);
+    for (size_t i = 1; i < TASK_MAX; i++) {
+        if (tasks[i].parent_pid == t->pid) tasks[i].parent_pid = 0;
+    }
+    for (size_t i = 1; i < TASK_MAX; i++) {
+        if (tasks[i].in_use && tasks[i].pid == t->parent_pid &&
+            tasks[i].wait_chan == tasks[i].child_chan) {
+            __atomic_store_n(&tasks[i].blocked, false, __ATOMIC_RELEASE);
+        }
+    }
+    t->in_use = false;
+    t->zombie = true;
+    t->blocked = false;
+    t->frame = NULL;
+    t->running = false;
+}
+
 static void task_switch_to(struct isr_frame *frame, bool force_away) {
     if (!sched_enabled()) return;
     if (in_scheduler()) return;
@@ -846,6 +907,12 @@ static void task_switch_to(struct isr_frame *frame, bool force_away) {
             }
         }
     }
+    while (next && next != &tasks[current_slot()] && next->sig_terminate) {
+        task_zombify_locked(next);
+        next = pick_next(cpu_id());
+        if (!next) break;
+        if (next->cpu != TASK_CPU_ANY && next->cpu != cpu_id()) continue;
+    }
     if (!next) {
         uint32_t me = cpu_id();
         if (idle_slot[me] < TASK_MAX && tasks[idle_slot[me]].in_use &&
@@ -867,6 +934,9 @@ static void task_switch_to(struct isr_frame *frame, bool force_away) {
 
     task_kstack_update();
     task_aspace_update();
+
+    if (tasks[current_slot()].frame)
+        task_sig_check(&tasks[current_slot()], tasks[current_slot()].frame);
 
     lock_release(LOCK_SCHED, &sched_lock);
 

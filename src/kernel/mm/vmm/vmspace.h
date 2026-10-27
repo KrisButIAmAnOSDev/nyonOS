@@ -16,6 +16,7 @@
 
 #define VM_BACKING_ANON 0
 #define VM_BACKING_NONE 1
+#define VM_BACKING_PHYS 2
 
 struct vm_region {
     vaddr_t start;
@@ -47,6 +48,7 @@ bool vm_region_remove(struct vmspace *vs, vaddr_t start, vaddr_t end);
 bool vm_find_free(struct vmspace *vs, vaddr_t lo, vaddr_t hi, size_t bytes, vaddr_t *out);
 
 bool vm_map_anon(struct vmspace *vs, vaddr_t vaddr, size_t pages, uint8_t prot);
+bool vm_map_phys(struct vmspace *vs, vaddr_t vaddr, paddr_t phys, size_t pages, uint8_t prot);
 bool vm_map_anon_zeroed(struct vmspace *vs, vaddr_t vaddr, size_t pages, uint8_t prot, bool zero);
 bool vm_protect(struct vmspace *vs, vaddr_t addr, size_t pages, uint8_t prot);
 bool vm_commit(struct vmspace *vs, vaddr_t vaddr, paddr_t phys, size_t pages, uint8_t prot, bool owned);

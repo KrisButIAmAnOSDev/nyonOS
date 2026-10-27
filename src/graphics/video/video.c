@@ -1,6 +1,27 @@
 #include "graphics/font/font.h"
 #include "graphics/video/video.h"
 
+static uint64_t video_phys;
+static uint32_t video_width;
+static uint32_t video_height;
+static uint32_t video_pitch;
+
+void video_setup(uint64_t phys, uint32_t width, uint32_t height, uint32_t pitch) {
+    video_phys = phys;
+    video_width = width;
+    video_height = height;
+    video_pitch = pitch;
+}
+
+bool video_query(struct sys_fb *out) {
+    if (!out || !video_phys) return false;
+    out->phys = video_phys;
+    out->width = video_width;
+    out->height = video_height;
+    out->pitch = video_pitch;
+    return true;
+}
+
 static inline void fb_flush(volatile uint32_t *addr) {
     __asm__ volatile("clflush %0" : : "m"(*(volatile char *)addr) : "memory");
 }

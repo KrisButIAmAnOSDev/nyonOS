@@ -63,6 +63,7 @@
 #define KOBJ_FILE    1
 #define KOBJ_CONSOLE 2
 #define KOBJ_PIPE    3
+#define KOBJ_INPUT   4
 
 struct kobject;
 
@@ -91,6 +92,11 @@ struct file {
     uint64_t pos;
     bool writable;
     bool append;
+};
+
+struct input_file {
+    struct kobject obj;
+    uint32_t seq;
 };
 
 struct console {
@@ -158,5 +164,7 @@ int64_t fd_read(struct task *t, int fd, void *ubuf, uint32_t len);
 int64_t fd_write(struct task *t, int fd, const void *ubuf, uint32_t len);
 int64_t fd_lseek(struct task *t, int fd, int64_t off, int whence);
 int fd_open(struct task *t, const char *path, uint32_t oflags);
+int fd_open_input(struct task *t, uint32_t oflags);
+bool fd_path_is_input(const char *path);
 
 #endif

@@ -29,6 +29,39 @@
 #define ABI_ENAMETOOLONG (-36)
 #define ABI_ENOSYS  (-38)
 #define ABI_ENOTEMPTY (-39)
+#define ABI_ENODEV (-19)
+
+#define ABI_SIG_DFL 0
+#define ABI_SIG_IGN 1
+#define ABI_SIG_BLOCK 0
+#define ABI_SIG_UNBLOCK 1
+#define ABI_SIG_SETMASK 2
+
+struct sys_sigaction {
+    uint64_t handler;
+    uint32_t flags;
+    uint32_t pad;
+    uint64_t restorer;
+    uint64_t mask;
+};
+
+struct sys_input_event {
+    uint64_t sec;
+    uint64_t nsec;
+    uint16_t type;
+    uint16_t code;
+    int32_t value;
+};
+
+#define SYS_EV_KEY 0x01
+#define SYS_EV_SYN 0x00
+
+struct sys_fb {
+    uint64_t phys;
+    uint32_t width;
+    uint32_t height;
+    uint32_t pitch;
+};
 #define ABI_EBADTYPE (-91)
 
 #define ABI_O_ACCMODE   0x3
