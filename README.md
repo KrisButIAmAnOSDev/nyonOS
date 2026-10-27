@@ -1,6 +1,6 @@
 # nyonOS
 
-A minimal x86_64 hobby OS kernel written from scratch. Boots via Limine on BIOS/UEFI with VGA text output and serial debug logging.
+A minimal x86_64 hobby OS kernel written from scratch. Boots via Limine on BIOS/UEFI with idk
 
 ## Features
 
@@ -11,7 +11,7 @@ A minimal x86_64 hobby OS kernel written from scratch. Boots via Limine on BIOS/
 - **elf loader (working!!!)** yea its working
 - **mlibc ruuning (mlibc port ig?)** its running 
 - **Working pmm and vmm** it works,at least (and 5lvl paging)
-- **"working"** keyboard dirver (ps/2)
+- **"bash and busybox "** running
 
 ## Building
 
