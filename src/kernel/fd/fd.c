@@ -8,6 +8,8 @@
 #include "kernel/uaccess/uaccess.h"
 #include "drivers/keyboard/keyboard.h"
 #include "kernel/tty/tty.h"
+#include "graphics/video/video.h"
+#include "kernel/vfs/vfs.h"
 
 static struct console the_ttyin;
 static struct console the_ttyout;
@@ -301,7 +303,7 @@ int fd_truncate(struct task *t, int fd, uint64_t len) {
     struct kobject *o = fd_get_checked(t, fd, KOBJ_FILE, FD_RIGHT_WRITE);
     if (!o) return FD_EBADF;
     struct file *f = (struct file *)o;
-    int r = fs_node_resize(&f->node, (uint32_t)len);
+    int r = fs_node_resize(f->node, (uint32_t)len);
     kobject_put(o);
     return r;
 }
@@ -317,7 +319,18 @@ int fd_utimens(struct task *t, int fd, int64_t mtime) {
     struct kobject *o = fd_get_checked(t, fd, KOBJ_FILE, 0);
     if (!o) return FD_EBADF;
     struct file *f = (struct file *)o;
-    int r = fs_node_utimens(&f->node, mtime);
+    int r = fs_node_utimens(f->node, mtime);
+    kobject_put(o);
+    return r;
+}
+
+int fd_chmod(struct task *t, int fd, unsigned mode) {
+    struct kobject *o = fd_get_checked(t, fd, KOBJ_FILE, 0);
+    if (!o) return FD_EBADF;
+    struct file *f = (struct file *)o;
+    uint8_t attr = f->node->attr & ~(uint8_t)0x01;
+    if (!(mode & 0200)) attr |= 0x01;
+    int r = fs_node_chattr(f->node, attr);
     kobject_put(o);
     return r;
 }
@@ -526,7 +539,7 @@ int64_t fd_write(struct task *t, int fd, const void *ubuf, uint32_t len) {
     uint64_t pos = 0;
     if (o->type == KOBJ_FILE) {
         f = (struct file *)o;
-        if (f->append) f->pos = f->node.size;
+        if (f->append) f->pos = f->node->size;
         pos = f->pos;
     }
 
@@ -602,19 +615,19 @@ int64_t fd_lseek(struct task *t, int fd, int64_t off, int whence) {
 
 static int64_t file_read_at(struct kobject *o, void *ubuf, uint32_t len, uint64_t off) {
     struct file *f = (struct file *)o;
-    if (off >= f->node.size) return 0;
+    if (off >= f->node->size) return 0;
 
-    uint64_t want = f->node.size - off;
+    uint64_t want = f->node->size - off;
     if (want > len) want = len;
 
-    if (!fs_node_read(&f->node, (uint32_t)off, ubuf, (uint32_t)want)) return FD_EIO;
+    if (!fs_node_read(f->node, (uint32_t)off, ubuf, (uint32_t)want)) return FD_EIO;
     return (int64_t)want;
 }
 
 static int64_t file_write_at(struct kobject *o, const void *ubuf, uint32_t len, uint64_t off) {
     struct file *f = (struct file *)o;
     if (!f->writable) return FD_EACCES;
-    int r = fs_node_write(&f->node, (uint32_t)off, ubuf, len);
+    int r = fs_node_write(f->node, (uint32_t)off, ubuf, len);
     if (r < 0) return r;
     return r;
 }
@@ -625,12 +638,18 @@ static int64_t file_lseek(struct kobject *o, int64_t off, int whence) {
 
     if (whence == FD_SEEK_SET) base = 0;
     else if (whence == FD_SEEK_CUR) base = (int64_t)f->pos;
-    else if (whence == FD_SEEK_END) base = (int64_t)f->node.size;
+    else if (whence == FD_SEEK_END) base = (int64_t)f->node->size;
     else return FD_EINVAL;
 
     int64_t np = base + off;
     if (np < 0) return FD_EINVAL;
     return np;
+}
+
+static int file_close(struct kobject *o) {
+    struct file *f = (struct file *)o;
+    fs_node_unref(f->node);
+    return 0;
 }
 
 static int64_t console_write_at(struct kobject *o, const void *ubuf, uint32_t len, uint64_t off) {
@@ -655,7 +674,7 @@ static const struct kobject_ops file_ops = {
     .read_at = file_read_at,
     .write_at = file_write_at,
     .lseek = file_lseek,
-    .close = NULL,
+    .close = file_close,
     .poll_ready = file_poll_ready,
 };
 
@@ -794,6 +813,8 @@ static bool console_poll_write(struct kobject *o, uint16_t events, uint16_t *rev
     return *revents != 0;
 }
 
+static int console_ioctl(struct kobject *o, unsigned req, uint64_t arg, struct task *t);
+
 static const struct kobject_ops tty_in_ops = {
     .wait_readable = console_wait_readable,
     .read_at = console_read_at,
@@ -801,6 +822,7 @@ static const struct kobject_ops tty_in_ops = {
     .lseek = NULL,
     .close = NULL,
     .poll_ready = console_poll_read,
+    .ioctl = console_ioctl,
 };
 
 static const struct kobject_ops tty_out_ops = {
@@ -809,6 +831,7 @@ static const struct kobject_ops tty_out_ops = {
     .lseek = NULL,
     .close = NULL,
     .poll_ready = console_poll_write,
+    .ioctl = console_ioctl,
 };
 
 static const struct kobject_ops tty_err_ops = {
@@ -817,7 +840,65 @@ static const struct kobject_ops tty_err_ops = {
     .lseek = NULL,
     .close = NULL,
     .poll_ready = console_poll_write,
+    .ioctl = console_ioctl,
 };
+
+static int console_ioctl(struct kobject *o, unsigned req, uint64_t arg, struct task *t) {
+    struct console *c = (struct console *)o;
+    switch (req) {
+        case 0x5401: {
+            return (int)c->dest;
+        }
+        case 0x5402: {
+            if (!(o->max_rights & FD_RIGHT_WRITE)) return FD_EBADF;
+            if (arg > PRINT_NONE) return FD_EINVAL;
+            c->dest = (uint32_t)arg;
+            return 0;
+        }
+        case 0x540F: {
+            uint32_t pid = keyboard_owner();
+            if (!copyout((void *)arg, &pid, sizeof(pid))) return FD_EFAULT;
+            return 0;
+        }
+        case 0x5410: {
+            uint32_t pid = 0;
+            if (!copyin(&pid, (const void *)arg, sizeof(pid))) return FD_EFAULT;
+            int r = 0;
+            preempt_disable();
+            uint32_t owner = keyboard_owner();
+            if (owner != 0 && owner != t->pid) r = FD_EPERM;
+            else if (pid != 0 && !task_find_pid(pid)) r = FD_ESRCH;
+            else keyboard_set_owner(pid);
+            preempt_enable();
+            task_wake_chan(keyboard_wait_chan());
+            if (r) return r;
+            return 0;
+        }
+        default:
+            return FD_EINVAL;
+    }
+}
+
+static int fb_ioctl(struct kobject *o, unsigned req, uint64_t arg, struct task *t) {
+    (void)o; (void)t;
+    if (req != 0x4600) return FD_EINVAL;
+    struct sys_fb info;
+    if (!video_query(&info)) return FD_ENODEV;
+    struct fb_var_screeninfo_nyo {
+        uint32_t xres, yres, xres_virtual, yres_virtual;
+        uint32_t xoffset, yoffset, bits_per_pixel, grayscale;
+    } vinfo;
+    vinfo.xres = info.width;
+    vinfo.yres = info.height;
+    vinfo.xres_virtual = info.width;
+    vinfo.yres_virtual = info.height;
+    vinfo.xoffset = 0;
+    vinfo.yoffset = 0;
+    vinfo.bits_per_pixel = 32;
+    vinfo.grayscale = 0;
+    if (!copyout((void *)arg, &vinfo, sizeof vinfo)) return FD_EFAULT;
+    return 0;
+}
 
 static int64_t input_read_at(struct kobject *o, void *ubuf, uint32_t len, uint64_t off) {
     (void)off;
@@ -861,29 +942,132 @@ static const struct kobject_ops input_ops = {
     .poll_ready = input_poll_read,
 };
 
-int fd_open_input(struct task *t, uint32_t oflags) {
-    if ((oflags & FD_OPEN_MODE) != FD_OPEN_READ) return FD_EINVAL;
-    struct input_file *in = (struct input_file *)kmalloc(sizeof(struct input_file));
-    if (!in) return FD_ENOSPC;
-    kobject_init(&in->obj, KOBJ_INPUT, FD_RIGHT_READ | FD_RIGHT_DUP, &input_ops);
-    in->seq = keyboard_event_seq();
-    uint16_t fflags = 0;
-    if (oflags & FD_OPEN_NONBLOCK) fflags |= FD_FLAG_NONBLOCK;
-    int fd = fd_alloc(t, &in->obj, FD_RIGHT_READ, fflags);
-    kobject_put(&in->obj);
-    if (fd < 0) kfree(in);
-    return fd;
+static int64_t fb_read_at(struct kobject *o, void *ubuf, uint32_t len, uint64_t off) {
+    (void)o;
+    struct sys_fb info;
+    if (!video_query(&info)) return -ABI_EIO;
+    uint64_t total = (uint64_t)info.pitch * info.height;
+    if (off >= total) return 0;
+    if ((uint64_t)len > total - off) len = (uint32_t)(total - off);
+    const uint8_t *src = (const uint8_t *)(vmm_hhdm_offset +
+                        (info.phys & ~(uint64_t)(PAGE_SIZE - 1)));
+    if (!copyout(ubuf, src + off, len)) return -ABI_EFAULT;
+    return (int64_t)len;
 }
 
-bool fd_path_is_input(const char *path) {
-    const char *a = "/DEV/INPUT/EVENT0";
-    const char *b = "/DEV/INPUT0";
-    size_t i = 0;
-    while (path[i] && a[i] && (path[i] | 0x20) == (a[i] | 0x20)) i++;
-    if (!path[i] && !a[i]) return true;
-    i = 0;
-    while (path[i] && b[i] && (path[i] | 0x20) == (b[i] | 0x20)) i++;
-    return !path[i] && !b[i];
+static int64_t fb_write_at(struct kobject *o, const void *ubuf, uint32_t len, uint64_t off) {
+    (void)o;
+    struct sys_fb info;
+    if (!video_query(&info)) return -ABI_EIO;
+    uint64_t total = (uint64_t)info.pitch * info.height;
+    if (off >= total) return -ABI_ENOSPC;
+    if ((uint64_t)len > total - off) len = (uint32_t)(total - off);
+    uint8_t *dst = (uint8_t *)(vmm_hhdm_offset +
+                   (info.phys & ~(uint64_t)(PAGE_SIZE - 1)));
+    if (!copyin(dst + off, ubuf, len)) return -ABI_EFAULT;
+    return (int64_t)len;
+}
+
+static const struct kobject_ops tty_duplex_ops = {
+    .wait_readable = console_wait_readable,
+    .read_at = console_read_at,
+    .write_at = console_write_at,
+    .lseek = NULL,
+    .close = NULL,
+    .poll_ready = console_poll_read,
+    .ioctl = console_ioctl,
+};
+
+static const struct kobject_ops fb_ops = {
+    .read_at = fb_read_at,
+    .write_at = fb_write_at,
+    .ioctl = fb_ioctl,
+};
+
+static int64_t zero_read_at(struct kobject *o, void *ubuf, uint32_t len, uint64_t off) {
+    (void)o; (void)off;
+    uint8_t *b = (uint8_t *)ubuf;
+    for (uint32_t i = 0; i < len; i++) b[i] = 0;
+    return (int64_t)len;
+}
+
+static int64_t zero_write_at(struct kobject *o, const void *ubuf, uint32_t len, uint64_t off) {
+    (void)o; (void)ubuf; (void)off;
+    return (int64_t)len;
+}
+
+static int64_t null_read_at(struct kobject *o, void *ubuf, uint32_t len, uint64_t off) {
+    (void)o; (void)ubuf; (void)len; (void)off;
+    return 0;
+}
+
+static int64_t null_write_at(struct kobject *o, const void *ubuf, uint32_t len, uint64_t off) {
+    (void)o; (void)ubuf; (void)off;
+    return (int64_t)len;
+}
+
+static const struct kobject_ops zero_ops = {
+    .read_at = zero_read_at,
+    .write_at = zero_write_at,
+};
+
+static const struct kobject_ops null_ops = {
+    .read_at = null_read_at,
+    .write_at = null_write_at,
+};
+
+int fd_open_dev(struct task *t, uint32_t dev_id, uint32_t oflags, fs_node_t *node) {
+    (void)node;
+    switch (dev_id) {
+        case DEVFS_DEV_EVENT0: {
+            if ((oflags & FD_OPEN_MODE) != FD_OPEN_READ) return FD_EINVAL;
+            struct input_file *in = (struct input_file *)kmalloc(sizeof(struct input_file));
+            if (!in) return FD_ENOSPC;
+            kobject_init(&in->obj, KOBJ_INPUT, FD_RIGHT_READ | FD_RIGHT_DUP, &input_ops);
+            in->seq = keyboard_event_seq();
+            uint16_t fflags = 0;
+            if (oflags & FD_OPEN_NONBLOCK) fflags |= FD_FLAG_NONBLOCK;
+            int fd = fd_alloc(t, &in->obj, FD_RIGHT_READ, fflags);
+            kobject_put(&in->obj);
+            if (fd < 0) kfree(in);
+            return fd;
+        }
+        case DEVFS_DEV_FB0: {
+            struct kobject *fb = kmalloc(sizeof(struct kobject));
+            if (!fb) return FD_ENOSPC;
+            kobject_init(fb, KOBJ_FB, FD_RIGHT_READ | FD_RIGHT_WRITE, &fb_ops);
+            int fd = fd_alloc(t, fb, FD_RIGHT_READ | FD_RIGHT_WRITE, 0);
+            kobject_put(fb);
+            if (fd < 0) kfree(fb);
+            return fd;
+        }
+        case DEVFS_DEV_CONSOLE:
+        case DEVFS_DEV_TTY0: {
+            struct console *c = kmalloc(sizeof(struct console));
+            if (!c) return FD_ENOSPC;
+            kobject_init(&c->obj, KOBJ_CONSOLE, FD_RIGHT_READ | FD_RIGHT_WRITE,
+                         &tty_duplex_ops);
+            c->dest = PRINT_BOTH;
+            int fd = fd_alloc(t, &c->obj, FD_RIGHT_READ | FD_RIGHT_WRITE, 0);
+            kobject_put(&c->obj);
+            if (fd < 0) kfree(c);
+            return fd;
+        }
+        case DEVFS_DEV_ZERO:
+        case DEVFS_DEV_NULL: {
+            struct kobject *zv = kmalloc(sizeof(struct kobject));
+            if (!zv) return FD_ENOSPC;
+            kobject_init(zv, dev_id == DEVFS_DEV_ZERO ? KOBJ_ZERO : KOBJ_NULL,
+                         FD_RIGHT_READ | FD_RIGHT_WRITE,
+                         dev_id == DEVFS_DEV_ZERO ? &zero_ops : &null_ops);
+            int fd = fd_alloc(t, zv, FD_RIGHT_READ | FD_RIGHT_WRITE, 0);
+            kobject_put(zv);
+            if (fd < 0) kfree(zv);
+            return fd;
+        }
+        default:
+            return FD_EINVAL;
+    }
 }
 
 int fd_install_stdio(struct task *t) {
@@ -921,8 +1105,6 @@ int fd_open(struct task *t, const char *path, uint32_t oflags) {
     while (path[pl]) pl++;
     if (pl > FD_PATH_MAX) return FD_ENAMETOOLONG;
 
-    if (fd_path_is_input(path)) return fd_open_input(t, oflags);
-
     fs_node_t node;
     if (!fs_lookup(path, &node)) {
         if (!(oflags & FD_OPEN_CREATE)) return FD_ENOENT;
@@ -932,6 +1114,12 @@ int fd_open(struct task *t, const char *path, uint32_t oflags) {
         int r = fs_create(path, &node);
         if (r != ABI_EEXIST) return r;
         if (!fs_lookup(path, &node)) return FD_ENOENT;
+    }
+
+    if (!node.is_dir && node.ops == devfs_ops()) {
+        int r = fd_open_dev(t, node.dev_id, oflags, &node);
+        if (r) return r;
+        return 0;
     }
     if (node.is_dir && !(oflags & FD_OPEN_DIR)) return FD_EISDIR;
     if (node.is_dir && (oflags & FD_OPEN_MODE) != FD_OPEN_READ) return FD_EISDIR;
@@ -957,11 +1145,12 @@ int fd_open(struct task *t, const char *path, uint32_t oflags) {
     }
 
     kobject_init(&f->obj, KOBJ_FILE, FD_RIGHTS_ALL, &file_ops);
-    f->node = node;
+    f->node = fs_node_ref(&node);
+    if (!f->node) { kfree(f); return FD_ENOSPC; }
     f->pos = 0;
     f->writable = (oflags & FD_OPEN_MODE) != FD_OPEN_READ;
     f->append = (oflags & FD_OPEN_APPEND) != 0;
-    if (f->append) f->pos = f->node.size;
+    if (f->append) f->pos = f->node->size;
 
     uint16_t fflags = 0;
     if (oflags & FD_OPEN_CLOEXEC) fflags |= FD_FLAG_CLOEXEC;

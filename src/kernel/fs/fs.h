@@ -5,11 +5,11 @@
 #include <stddef.h>
 #include <stdbool.h>
 #include "kernel/block/block.h"
+#include "kernel/vfs/vfs.h"
 #include "abi/abi.h"
 
 #define FS_SECTOR_SIZE   512
 #define FS_DIRENT_SIZE   32
-#define FS_MAX_NAME      13
 #define FS_FIRST_CLUSTER 2
 #define FS_EOC_MIN       0xFFF8
 #define FS_BAD_CLUSTER   0xFFF7
@@ -42,39 +42,13 @@ typedef struct {
     bool mounted;
 } fs_volume_t;
 
-typedef struct {
-    char name[FS_MAX_NAME];
-    uint8_t attr;
-    uint32_t cluster;
-    uint32_t size;
-    bool is_dir;
-    bool is_root;
-    uint32_t dir_cluster;
-    uint32_t dir_index;
-} fs_node_t;
-
 bool fs_mount(block_device_t *dev);
 bool fs_is_mounted(void);
 fs_volume_t *fs_get(void);
 
-bool fs_iterate(const fs_node_t *dir, uint32_t index, fs_node_t *out);
-bool fs_lookup(const char *path, fs_node_t *out);
 bool fs_name_eq(const char *a, const char *b);
-
-
-bool fs_node_read(const fs_node_t *node, uint32_t offset, void *buf, uint32_t len);
-int fs_node_write(fs_node_t *node, uint32_t offset, const void *buf, uint32_t len);
-int fs_node_truncate(fs_node_t *node);
-int fs_node_resize(fs_node_t *node, uint32_t size);
-int fs_create(const char *path, fs_node_t *out);
-int fs_mkdir(const char *path, fs_node_t *out);
-int fs_unlink(const char *path);
-int fs_rmdir(const char *path);
-int fs_utimens(const char *path, int64_t mtime);
-int fs_node_utimens(fs_node_t *node, int64_t mtime);
-bool fs_sync(void);
-uint32_t fs_node_read_all(const fs_node_t *node, void *buf, uint32_t max);
-
 const char *fs_fat_name(uint32_t cluster_count);
+
+extern const struct fs_ops fat_ops;
 
 #endif

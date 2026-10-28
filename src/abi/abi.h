@@ -30,6 +30,7 @@
 #define ABI_ENOSYS  (-38)
 #define ABI_ENOTEMPTY (-39)
 #define ABI_ENODEV (-19)
+#define ABI_EOPNOTSUPP (-95)
 
 #define ABI_SIG_DFL 0
 #define ABI_SIG_IGN 1

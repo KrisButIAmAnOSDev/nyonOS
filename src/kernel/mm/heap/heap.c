@@ -251,3 +251,53 @@ void kfree(void *ptr) {
     }
 }
 
+static size_t kalloc_size_locked(void *ptr) {
+    struct block_header *b = (struct block_header *)ptr - 1;
+    if (b->magic != HEAP_MAGIC || b->free) return 0;
+    return b->size;
+}
+
+void *kzalloc(size_t size) {
+    void *p = kmalloc(size);
+    if (!p) return NULL;
+    uint8_t *b = (uint8_t *)p;
+    for (size_t i = 0; i < size; i++) b[i] = 0;
+    return p;
+}
+
+void *kcalloc(size_t n, size_t size) {
+    if (size && n > SIZE_MAX / size) return NULL;
+    return kzalloc(n * size);
+}
+
+void *krealloc(void *ptr, size_t size) {
+    if (!ptr) return kmalloc(size);
+    if (size == 0) { kfree(ptr); return NULL; }
+    if (size > SIZE_MAX - 16 - sizeof(struct block_header)) return NULL;
+
+    size = ALIGN_UP(size, 16);
+
+    lock_acquire(LOCK_HEAP, &heap_lock);
+    size_t old = kalloc_size_locked(ptr);
+    if (old == 0) {
+        lock_release(LOCK_HEAP, &heap_lock);
+        return NULL;
+    }
+    if (old >= size) {
+        split_block((struct block_header *)ptr - 1, size);
+        lock_release(LOCK_HEAP, &heap_lock);
+        return ptr;
+    }
+    void *np = kmalloc_locked(size);
+    if (!np) {
+        lock_release(LOCK_HEAP, &heap_lock);
+        return NULL;
+    }
+    uint8_t *src = (uint8_t *)ptr;
+    uint8_t *dst = (uint8_t *)np;
+    for (size_t i = 0; i < old; i++) dst[i] = src[i];
+    kfree_locked(ptr);
+    lock_release(LOCK_HEAP, &heap_lock);
+    return np;
+}
+

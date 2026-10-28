@@ -8,10 +8,10 @@ USER_CFLAGS = -Wall -Wextra -std=gnu11 -ffreestanding -fno-stack-protector -fno-
               -fomit-frame-pointer -fno-asynchronous-unwind-tables -fno-unwind-tables -I. -I$(CURDIR)/../abi
 USER_LDFLAGS = -nostdlib -static-pie -pie -z noexecstack -T user.ld
 
-BINS = bin/hello bin/fdtest bin/mmtest bin/forktest bin/pipetest bin/fstest bin/fd2test bin/evtest bin/fbtest
+BINS = bin/hello bin/fdtest bin/mmtest bin/forktest bin/pipetest bin/fstest bin/fd2test bin/evtest bin/fbtest bin/devtest
 
 ifneq ($(NYONOS_MLIBC_CC),)
-BINS += bin/mhello bin/sdtest bin/thrtest bin/clktest bin/proctest bin/featest bin/mandel bin/exectest bin/fdprobe bin/sigtest
+BINS += bin/mhello bin/sdtest bin/thrtest bin/clktest bin/proctest bin/featest bin/mandel bin/exectest bin/fdprobe bin/sigtest bin/systest
 endif
 
 -include $(BINS:=.o)
@@ -47,6 +47,10 @@ bin/proctest: proctest.c $(MLIBC_LD) $(MLIBC_LIBC)
 	$(MLIBC_CC) -static -T$(MLIBC_LD) -z max-page-size=0x1000 -s $< -o $@
 
 bin/sigtest: sigtest.c $(MLIBC_LD) $(MLIBC_LIBC)
+	mkdir -p "$(dir $@)"
+	$(MLIBC_CC) -static -T$(MLIBC_LD) -z max-page-size=0x1000 -I$(CURDIR)/../abi -s $< -o $@
+
+bin/systest: systest.c $(MLIBC_LD) $(MLIBC_LIBC)
 	mkdir -p "$(dir $@)"
 	$(MLIBC_CC) -static -T$(MLIBC_LD) -z max-page-size=0x1000 -I$(CURDIR)/../abi -s $< -o $@
 

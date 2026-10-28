@@ -183,6 +183,50 @@ static void ap_entry(struct limine_mp_info *info) {
     for (;;) __asm__ volatile("hlt" ::: "memory");
 }
 
+static void heap_alloc_test(void) {
+    int bad = 0;
+
+    void *a = kmalloc(100);
+    if (!a) bad++;
+    uint8_t *ba = (uint8_t *)a;
+    for (int i = 0; i < 100; i++) ba[i] = (uint8_t)(i & 0xff);
+
+    void *z = kzalloc(256);
+    if (!z) bad++;
+    uint8_t *bz = (uint8_t *)z;
+    for (int i = 0; i < 256; i++) if (bz[i]) bad++;
+
+    void *c = kcalloc(32, 8);
+    if (!c) bad++;
+    uint8_t *bc = (uint8_t *)c;
+    for (int i = 0; i < 256; i++) if (bc[i]) bad++;
+
+    void *r = krealloc(a, 1000);
+    if (!r) bad++;
+    uint8_t *br = (uint8_t *)r;
+    for (int i = 0; i < 100; i++) if (br[i] != (uint8_t)(i & 0xff)) bad++;
+    for (int i = 100; i < 1000; i++) br[i] = 0x5A;
+
+    void *r2 = krealloc(r, 32);
+    if (!r2) bad++;
+    uint8_t *br2 = (uint8_t *)r2;
+    for (int i = 0; i < 32; i++) if (br2[i] != (uint8_t)(i & 0xff)) bad++;
+
+    kfree(z);
+    kfree(c);
+    kfree(r2);
+
+    void *null_a = krealloc(NULL, 64);
+    if (!null_a) bad++;
+    kfree(null_a);
+    void *zero_r = krealloc(null_a, 0);
+    if (zero_r) bad++;
+
+    kprintf(PRINT_SERIAL, "HEAP test: alloc/zero/calloc/realloc, %d bad: ", bad);
+    kprintchar(bad == 0 ? 'Y' : 'N', PRINT_SERIAL);
+    kprintchar('\n', PRINT_SERIAL);
+}
+
 static void lock_invariant_test(void) {
     spinlock_t probe = SPINLOCK_INIT;
     uint32_t depth0 = sync_lock_depth();
@@ -381,6 +425,7 @@ void kmain(void) {
     }
 
     lock_invariant_test();
+    heap_alloc_test();
     task_spawn("aqua", task_aqua);
     task_spawn("seth", task_seth);
 
@@ -481,6 +526,8 @@ void kmain(void) {
             sigtest_run();
             ev_test();
             fb_test();
+            dev_test();
+            sys_test();
             sysdep_test();
             thread_test();
             mlibc_hello_test();

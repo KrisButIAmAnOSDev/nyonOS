@@ -701,7 +701,7 @@ static int64_t sys_fstat(int fd, uintptr_t st) {
     if (!o) return SYS_EBADF;
     if (o->type != KOBJ_FILE) { kobject_put(o); return SYS_EBADF; }
 
-    fill_stat(out, &((struct file *)o)->node);
+    fill_stat(out, ((struct file *)o)->node);
     kobject_put(o);
     if (in_user() && !copyout((void *)st, out, sizeof(*out))) return SYS_EFAULT;
     return 0;
@@ -741,9 +741,9 @@ static int64_t sys_getdents(int fd, unsigned index, uintptr_t buf) {
 
     struct file *fl = (struct file *)o;
     int64_t ret = SYS_EINVAL;
-    if (fl->node.is_dir) {
+    if (fl->node->is_dir) {
         fs_node_t n;
-        if (fs_iterate(&fl->node, index, &n)) {
+        if (fs_iterate(fl->node, index, &n)) {
             out->size = n.size;
             out->cluster = n.cluster;
             out->attr = n.attr;
@@ -1091,35 +1091,17 @@ static int64_t sys_ioctl(int fd, unsigned req, int64_t arg) {
     struct task *t = task_current();
     if (!t) return SYS_ENOSYS;
 
-    uint64_t a = (uint64_t)arg;
+    struct kobject *o = fd_get_checked(t, fd, KOBJ_TYPE_ANY, 0);
+    if (!o) return SYS_EBADF;
 
-    switch (req) {
-        case 0x5401: {
-            uint32_t d = 0;
-            if (fd_console_dest(fd, t, &d)) return SYS_EBADF;
-            return d;
-        }
-        case 0x5402: {
-            int r = fd_console_set_dest(fd, t, (uint32_t)a);
-            if (r) return (uint64_t)(int64_t)r;
-            return 0;
-        }
-        case 0x540F: {
-            uint32_t pid = 0;
-            int r = fd_tty_get_fg(fd, t, &pid);
-            if (r) return (uint64_t)(int64_t)r;
-            if (!copyout((void *)a, &pid, sizeof(pid))) return SYS_EFAULT;
-            return 0;
-        }
-        case 0x5410: {
-            uint32_t pid = 0;
-            if (!copyin(&pid, (const void *)a, sizeof(pid))) return SYS_EFAULT;
-            int r = fd_tty_set_fg(fd, t, pid);
-            if (r) return (uint64_t)(int64_t)r;
-            return 0;
-        }
-        default: return SYS_EINVAL;
+    if (!o->ops || !o->ops->ioctl) {
+        kobject_put(o);
+        return SYS_EINVAL;
     }
+
+    int r = o->ops->ioctl(o, req, (uint64_t)arg, t);
+    kobject_put(o);
+    return (int64_t)r;
 }
 
 static int64_t sys_kill(int32_t pid, int sig) {
@@ -1179,6 +1161,67 @@ static int64_t sys_sigprocmask(int how, uintptr_t set_ptr, uintptr_t old_ptr) {
     }
 
     return 0;
+}
+
+static int64_t sys_fstatat(int dirfd, uintptr_t path, uintptr_t st, int flags) {
+    (void)flags;
+    struct task *t = task_current();
+    if (!t) return SYS_ENOSYS;
+    if (!path) return SYS_EFAULT;
+
+    char kpath[256];
+    int cp_err = copy_path_resolved(path, kpath, sizeof kpath);
+    if (cp_err < 0) return cp_err;
+
+    fs_node_t n;
+    if (!fs_lookup(kpath, &n)) return SYS_ENOENT;
+
+    struct sys_stat kst;
+    fill_stat(&kst, &n);
+    if (!copyout((void *)st, &kst, sizeof kst)) return SYS_EFAULT;
+    return 0;
+}
+
+static int64_t sys_readlink(uintptr_t path, uintptr_t buf, uint64_t size) {
+    (void)path; (void)buf; (void)size;
+    return SYS_EINVAL;
+}
+
+static int64_t sys_symlink(uintptr_t target, uintptr_t path) {
+    (void)target; (void)path;
+    return SYS_EOPNOTSUPP;
+}
+
+static int64_t sys_link(uintptr_t oldp, uintptr_t newp) {
+    (void)oldp; (void)newp;
+    return SYS_EOPNOTSUPP;
+}
+
+static int64_t sys_chmod(uintptr_t path, unsigned mode) {
+    char kpath[256];
+    int cp_err = copy_path_resolved(path, kpath, sizeof kpath);
+    if (cp_err < 0) return cp_err;
+
+    fs_node_t node;
+    if (!fs_lookup(kpath, &node)) return SYS_ENOENT;
+
+    uint8_t attr = node.attr & ~(FS_ATTR_READ_ONLY);
+    if (!(mode & 0200)) attr |= FS_ATTR_READ_ONLY;
+    return (int64_t)fs_node_chattr(&node, attr);
+}
+
+static int64_t sys_fchmod(int fd, unsigned mode) {
+    struct task *t = task_current();
+    if (!t) return SYS_ENOSYS;
+    return (int64_t)fd_chmod(t, fd, mode);
+}
+
+static int64_t sys_utimes(uintptr_t path, uintptr_t times) {
+    (void)times;
+    char kpath[256];
+    int cp_err = copy_path_resolved(path, kpath, sizeof kpath);
+    if (cp_err < 0) return cp_err;
+    return (int64_t)fs_utimens(kpath, 0);
 }
 
 static void sig_return(struct isr_frame *frame) {

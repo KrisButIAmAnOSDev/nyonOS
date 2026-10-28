@@ -53,6 +53,7 @@
 #define FD_ENOTDIR  ABI_ENOTDIR
 #define FD_EISDIR   ABI_EISDIR
 #define FD_EIO      ABI_EIO
+#define FD_ENODEV   ABI_ENODEV
 #define FD_EAGAIN   ABI_EAGAIN
 #define FD_EPERM    ABI_EPERM
 #define FD_ESRCH    ABI_ESRCH
@@ -64,7 +65,11 @@
 #define KOBJ_CONSOLE 2
 #define KOBJ_PIPE    3
 #define KOBJ_INPUT   4
+#define KOBJ_FB      5
+#define KOBJ_ZERO    6
+#define KOBJ_NULL    7
 
+struct task;
 struct kobject;
 
 struct kobject_ops {
@@ -75,6 +80,7 @@ struct kobject_ops {
     int (*wait_readable)(struct kobject *o);
     int (*wait_writable)(struct kobject *o);
     bool (*poll_ready)(struct kobject *o, uint16_t events, uint16_t *revents);
+    int (*ioctl)(struct kobject *o, unsigned req, uint64_t arg, struct task *t);
 };
 
 struct kobject {
@@ -88,7 +94,7 @@ struct kobject {
 
 struct file {
     struct kobject obj;
-    fs_node_t node;
+    fs_node_t *node;
     uint64_t pos;
     bool writable;
     bool append;
@@ -137,6 +143,7 @@ int fd_dup(struct task *t, int fd, uint32_t rights, uint16_t flags);
 int fd_truncate(struct task *t, int fd, uint64_t len);
 int fd_sync(struct task *t, int fd);
 int fd_utimens(struct task *t, int fd, int64_t mtime);
+int fd_chmod(struct task *t, int fd, unsigned mode);
 void fd_close_cloexec(struct task *t);
 int fd_dup2(struct task *t, int oldfd, int newfd, uint32_t flags);
 int fd_dup_min(struct task *t, int oldfd, uint32_t min);
@@ -164,7 +171,6 @@ int64_t fd_read(struct task *t, int fd, void *ubuf, uint32_t len);
 int64_t fd_write(struct task *t, int fd, const void *ubuf, uint32_t len);
 int64_t fd_lseek(struct task *t, int fd, int64_t off, int whence);
 int fd_open(struct task *t, const char *path, uint32_t oflags);
-int fd_open_input(struct task *t, uint32_t oflags);
-bool fd_path_is_input(const char *path);
+int fd_open_dev(struct task *t, uint32_t dev_id, uint32_t oflags, fs_node_t *node);
 
 #endif

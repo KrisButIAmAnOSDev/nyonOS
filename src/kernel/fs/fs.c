@@ -8,10 +8,59 @@
 
 static void fat_stamp(int64_t unix_sec, uint16_t *out_time, uint16_t *out_date);
 
-#define FS_PATH_MAX 128
-
 static spinlock_t fs_lock = SPINLOCK_INIT;
 #define FS_SCAN_MAX 4096
+#define FS_INODE_CACHE 64
+
+static struct {
+    bool used;
+    fs_node_t node;
+    uint32_t refs;
+} fs_inodes[FS_INODE_CACHE];
+
+static bool fs_inode_same(const fs_node_t *a, const fs_node_t *b) {
+    if (a->is_root || b->is_root) return a->is_root == b->is_root;
+    return a->dir_cluster == b->dir_cluster && a->dir_index == b->dir_index;
+}
+
+fs_node_t *fs_node_ref(const fs_node_t *n) {
+    if (!n) return NULL;
+    lock_acquire(LOCK_FS, &fs_lock);
+    for (uint32_t i = 0; i < FS_INODE_CACHE; i++) {
+        if (fs_inodes[i].used && fs_inode_same(&fs_inodes[i].node, n)) {
+            fs_inodes[i].node = *n;
+            fs_inodes[i].refs++;
+            fs_node_t *r = &fs_inodes[i].node;
+            lock_release(LOCK_FS, &fs_lock);
+            return r;
+        }
+    }
+    for (uint32_t i = 0; i < FS_INODE_CACHE; i++) {
+        if (!fs_inodes[i].used) {
+            fs_inodes[i].used = true;
+            fs_inodes[i].node = *n;
+            fs_inodes[i].refs = 1;
+            fs_node_t *r = &fs_inodes[i].node;
+            lock_release(LOCK_FS, &fs_lock);
+            return r;
+        }
+    }
+    lock_release(LOCK_FS, &fs_lock);
+    return NULL;
+}
+
+void fs_node_unref(fs_node_t *n) {
+    if (!n) return;
+    lock_acquire(LOCK_FS, &fs_lock);
+    for (uint32_t i = 0; i < FS_INODE_CACHE; i++) {
+        if (&fs_inodes[i].node == n) {
+            if (fs_inodes[i].refs > 0) fs_inodes[i].refs--;
+            if (fs_inodes[i].refs == 0) fs_inodes[i].used = false;
+            break;
+        }
+    }
+    lock_release(LOCK_FS, &fs_lock);
+}
 
 static fs_volume_t fs;
 
@@ -126,7 +175,9 @@ bool fs_mount_inner(block_device_t *dev) {
 bool fs_mount(block_device_t *dev) {
     lock_acquire(LOCK_FS, &fs_lock);
     bool r = fs_mount_inner(dev);
+    if (r) vfs_set_default(&fat_ops);
     lock_release(LOCK_FS, &fs_lock);
+    if (r) devfs_init();
     return r;
 }
 
@@ -324,12 +375,14 @@ static bool parse_dirent(const uint8_t *e, fs_node_t *out) {
     out->cluster = (uint32_t)rd16(e + 26) | ((uint32_t)rd16(e + 20) << 16);
     out->size = out->is_dir ? 0 : rd32(e + 28);
     out->is_root = false;
+    out->ops = &fat_ops;
+    out->dev_id = 0;
 
     if (!out->is_dir && !cluster_ok(out->cluster)) out->cluster = 0;
     return true;
 }
 
-bool fs_iterate_inner(const fs_node_t *dir, uint32_t index, fs_node_t *out) {
+static bool fat_iterate(const fs_node_t *dir, uint32_t index, fs_node_t *out) {
     if (!fs.mounted || !dir || !out) return false;
     if (!dir->is_dir) return false;
 
@@ -348,13 +401,6 @@ bool fs_iterate_inner(const fs_node_t *dir, uint32_t index, fs_node_t *out) {
     return false;
 }
 
-bool fs_iterate(const fs_node_t *dir, uint32_t index, fs_node_t *out) {
-    lock_acquire(LOCK_FS, &fs_lock);
-    bool r = fs_iterate_inner(dir, index, out);
-    lock_release(LOCK_FS, &fs_lock);
-    return r;
-}
-
 static bool root_node(fs_node_t *out) {
     if (!fs.mounted) return false;
     out->name[0] = '/';
@@ -364,6 +410,7 @@ static bool root_node(fs_node_t *out) {
     out->size = 0;
     out->is_dir = true;
     out->is_root = true;
+    out->ops = &fat_ops;
     return true;
 }
 
@@ -382,7 +429,7 @@ static bool name_eq(const char *a, const char *b) {
     return *a == 0 && *b == 0;
 }
 
-static bool fs_lookup_inner(const char *path, fs_node_t *out);
+static bool fat_lookup(const char *path, fs_node_t *out);
 static int fs_node_write_inner(fs_node_t *node, uint32_t offset, const void *buf,
                                uint32_t len);
 
@@ -412,6 +459,8 @@ static void dir_node(fs_node_t *out, uint32_t cluster) {
     out->is_root = false;
     out->dir_cluster = 0;
     out->dir_index = 0;
+    out->ops = &fat_ops;
+    out->dev_id = 0;
 }
 
 static int fs_resolve_parent(const char *path, fs_node_t *parent, char *name,
@@ -442,7 +491,7 @@ static int fs_resolve_parent(const char *path, fs_node_t *parent, char *name,
         if (!root_node(parent)) return ABI_ENOENT;
     } else {
         buf[cut - 1] = 0;
-        if (!fs_lookup_inner(buf, parent)) return ABI_ENOENT;
+        if (!fat_lookup(buf, parent)) return ABI_ENOENT;
     }
     if (!parent->is_dir) return ABI_ENOTDIR;
     return 0;
@@ -579,6 +628,28 @@ static int fs_node_sync_entry(fs_node_t *node) {
     return sector_write(lba, buf) ? 0 : ABI_EIO;
 }
 
+int fs_node_chattr(fs_node_t *node, uint8_t attr) {
+    if (!node || node->is_root) return ABI_EIO;
+
+    node->attr = attr;
+
+    fs_node_t parent;
+    if (node->dir_cluster == 0) {
+        if (!root_node(&parent)) return ABI_EIO;
+    } else {
+        dir_node(&parent, node->dir_cluster);
+    }
+
+    uint32_t lba, off;
+    if (!dirent_locate(&parent, node->dir_index, &lba, &off)) return ABI_EIO;
+
+    uint8_t buf[FS_SECTOR_SIZE];
+    if (!block_read(fs.dev, lba, 1, buf)) return ABI_EIO;
+
+    buf[off + 11] = attr;
+    return sector_write(lba, buf) ? 0 : ABI_EIO;
+}
+
 static void fat_stamp(int64_t unix_sec, uint16_t *out_time, uint16_t *out_date) {
     int64_t days = unix_sec / 86400;
     int64_t rem = unix_sec % 86400;
@@ -629,19 +700,19 @@ static int fs_node_utimens_inner(fs_node_t *node, int64_t mtime) {
     return sector_write(lba, buf) ? 0 : ABI_EIO;
 }
 
-int fs_node_utimens(fs_node_t *node, int64_t mtime) {
+static int fat_node_utimens(fs_node_t *node, int64_t mtime) {
     lock_acquire(LOCK_FS, &fs_lock);
     int r = fs_node_utimens_inner(node, mtime);
     lock_release(LOCK_FS, &fs_lock);
     return r;
 }
 
-int fs_utimens(const char *path, int64_t mtime) {
+static int fat_utimens(const char *path, int64_t mtime) {
     fs_node_t node;
     if (!fs.mounted) return ABI_EIO;
-    bool ok = fs_lookup(path, &node);
+    bool ok = fat_lookup(path, &node);
     if (!ok) return ABI_ENOENT;
-    return fs_node_utimens(&node, mtime);
+    return fat_node_utimens(&node, mtime);
 }
 
 static int fs_node_resize_inner(fs_node_t *node, uint32_t size) {
@@ -815,6 +886,8 @@ static int fs_create_inner(const char *path, fs_node_t *out) {
         out->is_root = false;
         out->dir_cluster = parent.cluster;
         out->dir_index = index;
+        out->ops = &fat_ops;
+        out->dev_id = 0;
     }
     return 0;
 }
@@ -873,6 +946,8 @@ static int fs_mkdir_inner(const char *path, fs_node_t *out) {
         out->is_root = false;
         out->dir_cluster = parent.cluster;
         out->dir_index = index;
+        out->ops = &fat_ops;
+        out->dev_id = 0;
     }
     return 0;
 }
@@ -912,7 +987,7 @@ static int fs_unlink_inner(const char *path, bool want_dir) {
     return 0;
 }
 
-bool fs_lookup_inner(const char *path, fs_node_t *out) {
+static bool fat_lookup(const char *path, fs_node_t *out) {
     if (!fs.mounted || !path || !out) return false;
 
     char buf[FS_PATH_MAX];
@@ -961,14 +1036,7 @@ bool fs_lookup_inner(const char *path, fs_node_t *out) {
     return true;
 }
 
-bool fs_lookup(const char *path, fs_node_t *out) {
-    lock_acquire(LOCK_FS, &fs_lock);
-    bool r = fs_lookup_inner(path, out);
-    lock_release(LOCK_FS, &fs_lock);
-    return r;
-}
-
-bool fs_node_read_inner(const fs_node_t *node, uint32_t offset, void *buf, uint32_t len) {
+static bool fat_read(const fs_node_t *node, uint32_t offset, void *buf, uint32_t len) {
     if (!fs.mounted || !node || !buf) return false;
     if (node->is_dir) return false;
     if (len == 0) return true;
@@ -1032,80 +1100,15 @@ bool fs_node_read_inner(const fs_node_t *node, uint32_t offset, void *buf, uint3
     return true;
 }
 
-bool fs_node_read(const fs_node_t *node, uint32_t offset, void *buf, uint32_t len) {
-    lock_acquire(LOCK_FS, &fs_lock);
-    bool r = fs_node_read_inner(node, offset, buf, len);
-    lock_release(LOCK_FS, &fs_lock);
-    return r;
+static int fat_unlink(const char *path) {
+    return fs_unlink_inner(path, false);
 }
 
-uint32_t fs_node_read_all_inner(const fs_node_t *node, void *buf, uint32_t max) {
-    if (!node) return 0;
-    uint32_t want = node->size;
-    if (want > max) want = max;
-    if (want == 0) return 0;
-    if (!fs_node_read_inner(node, 0, buf, want)) return 0;
-    return want;
+static int fat_rmdir(const char *path) {
+    return fs_unlink_inner(path, true);
 }
 
-uint32_t fs_node_read_all(const fs_node_t *node, void *buf, uint32_t max) {
-    lock_acquire(LOCK_FS, &fs_lock);
-    uint32_t r = fs_node_read_all_inner(node, buf, max);
-    lock_release(LOCK_FS, &fs_lock);
-    return r;
-}
-
-
-int fs_node_write(fs_node_t *node, uint32_t offset, const void *buf, uint32_t len) {
-    lock_acquire(LOCK_FS, &fs_lock);
-    int r = fs_node_write_inner(node, offset, buf, len);
-    lock_release(LOCK_FS, &fs_lock);
-    return r;
-}
-
-int fs_node_resize(fs_node_t *node, uint32_t size) {
-    lock_acquire(LOCK_FS, &fs_lock);
-    int r = fs_node_resize_inner(node, size);
-    lock_release(LOCK_FS, &fs_lock);
-    return r;
-}
-
-int fs_node_truncate(fs_node_t *node) {
-    lock_acquire(LOCK_FS, &fs_lock);
-    int r = fs_node_truncate_inner(node);
-    lock_release(LOCK_FS, &fs_lock);
-    return r;
-}
-
-int fs_create(const char *path, fs_node_t *out) {
-    lock_acquire(LOCK_FS, &fs_lock);
-    int r = fs_create_inner(path, out);
-    lock_release(LOCK_FS, &fs_lock);
-    return r;
-}
-
-int fs_mkdir(const char *path, fs_node_t *out) {
-    lock_acquire(LOCK_FS, &fs_lock);
-    int r = fs_mkdir_inner(path, out);
-    lock_release(LOCK_FS, &fs_lock);
-    return r;
-}
-
-int fs_unlink(const char *path) {
-    lock_acquire(LOCK_FS, &fs_lock);
-    int r = fs_unlink_inner(path, false);
-    lock_release(LOCK_FS, &fs_lock);
-    return r;
-}
-
-int fs_rmdir(const char *path) {
-    lock_acquire(LOCK_FS, &fs_lock);
-    int r = fs_unlink_inner(path, true);
-    lock_release(LOCK_FS, &fs_lock);
-    return r;
-}
-
-bool fs_sync(void) {
+static bool fat_sync(void) {
     if (!fs.mounted) return false;
     return block_flush(fs.dev);
 }
@@ -1113,3 +1116,19 @@ bool fs_sync(void) {
 bool fs_name_eq(const char *a, const char *b) {
     return name_eq(a, b);
 }
+
+const struct fs_ops fat_ops = {
+    .iterate = fat_iterate,
+    .lookup = fat_lookup,
+    .read = fat_read,
+    .write = fs_node_write_inner,
+    .truncate = fs_node_truncate_inner,
+    .resize = fs_node_resize_inner,
+    .create = fs_create_inner,
+    .mkdir = fs_mkdir_inner,
+    .unlink = fat_unlink,
+    .rmdir = fat_rmdir,
+    .utimens = fat_utimens,
+    .node_utimens = fat_node_utimens,
+    .sync = fat_sync,
+};
