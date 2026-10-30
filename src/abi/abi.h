@@ -31,6 +31,8 @@
 #define ABI_ENOTEMPTY (-39)
 #define ABI_ENODEV (-19)
 #define ABI_EOPNOTSUPP (-95)
+#define ABI_ENXIO (-6)
+#define ABI_ENOTTY (-25)
 
 #define ABI_SIG_DFL 0
 #define ABI_SIG_IGN 1
@@ -92,6 +94,8 @@ struct sys_fb {
 #define ABI_KTTY_SETDEST 0x5402
 #define ABI_KTTY_GETFG   0x540F
 #define ABI_KTTY_SETFG   0x5410
+#define ABI_KTTY_SETCTTY 0x540E
+#define ABI_KTTY_NOTTY   0x5422
 
 #define ABI_FD_RIGHT_READ 1
 

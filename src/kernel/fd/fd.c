@@ -722,6 +722,7 @@ int fd_tty_set_fg(int fd, struct task *t, uint32_t pid) {
 void fd_tty_task_gone(uint32_t pid) {
     preempt_disable();
     if (pid != 0 && keyboard_owner() == pid) keyboard_set_owner(0);
+    if (pid != 0 && tty_fg() == pid) tty_set_fg(0);
     preempt_enable();
     task_wake_chan(keyboard_wait_chan());
 }
@@ -856,22 +857,48 @@ static int console_ioctl(struct kobject *o, unsigned req, uint64_t arg, struct t
             return 0;
         }
         case 0x540F: {
-            uint32_t pid = keyboard_owner();
+            uint32_t pid = tty_fg();
+            if (!pid) pid = keyboard_owner();
             if (!copyout((void *)arg, &pid, sizeof(pid))) return FD_EFAULT;
             return 0;
         }
         case 0x5410: {
             uint32_t pid = 0;
             if (!copyin(&pid, (const void *)arg, sizeof(pid))) return FD_EFAULT;
+            if (tty_ctty_session() && tty_ctty_session() != t->sid) return FD_ENOTTY;
             int r = 0;
             preempt_disable();
             uint32_t owner = keyboard_owner();
+            uint32_t curfg = tty_fg();
             if (owner != 0 && owner != t->pid) r = FD_EPERM;
-            else if (pid != 0 && !task_find_pid(pid)) r = FD_ESRCH;
-            else keyboard_set_owner(pid);
+            else if (pid != 0 && !task_find_pid(pid) && !task_pgrp_exists(pid)) r = FD_ESRCH;
+            else {
+                bool is_fg = (curfg != 0 && curfg == t->pid) || (curfg == 0 && owner == t->pid);
+                bool ttou_ignored = (t->sig_act_handler[22] == ABI_SIG_IGN);
+                bool ttou_blocked = (t->sig_blocked & (1ULL << 21)) != 0;
+                if (pid != 0 && !is_fg && !ttou_ignored && !ttou_blocked && t->pgid != 0) {
+                    if (task_pgrp_orphaned(t->pgid)) r = FD_EIO;
+                } else {
+                    keyboard_set_owner(pid);
+                    tty_set_fg(pid);
+                }
+            }
             preempt_enable();
             task_wake_chan(keyboard_wait_chan());
             if (r) return r;
+            return 0;
+        }
+        case 0x540E: {
+            if (!tty_acquire_ctty(t->sid)) return FD_EPERM;
+            keyboard_set_owner(t->pid);
+            tty_set_fg(t->pid);
+            return 0;
+        }
+        case 0x5422: {
+            tty_release_ctty(t->sid);
+            keyboard_set_owner(0);
+            tty_set_fg(0);
+            task_wake_chan(keyboard_wait_chan());
             return 0;
         }
         default:
@@ -1042,7 +1069,11 @@ int fd_open_dev(struct task *t, uint32_t dev_id, uint32_t oflags, fs_node_t *nod
             return fd;
         }
         case DEVFS_DEV_CONSOLE:
-        case DEVFS_DEV_TTY0: {
+        case DEVFS_DEV_TTY0:
+        case DEVFS_DEV_TTY: {
+            if (dev_id == DEVFS_DEV_TTY) {
+                if (!tty_ctty_session() || tty_ctty_session() != t->sid) return FD_ENXIO;
+            }
             struct console *c = kmalloc(sizeof(struct console));
             if (!c) return FD_ENOSPC;
             kobject_init(&c->obj, KOBJ_CONSOLE, FD_RIGHT_READ | FD_RIGHT_WRITE,
@@ -1086,9 +1117,9 @@ int fd_install_stdio(struct task *t) {
         console_ready = true;
     }
 
-    int in = fd_alloc(t, &the_ttyin.obj, FD_RIGHT_READ, 0);
-    int out = fd_alloc(t, &the_ttyout.obj, FD_RIGHT_WRITE, 0);
-    int err = fd_alloc(t, &the_ttyerr.obj, FD_RIGHT_WRITE, 0);
+    int in = fd_alloc(t, &the_ttyin.obj, FD_RIGHT_READ | FD_RIGHT_DUP, 0);
+    int out = fd_alloc(t, &the_ttyout.obj, FD_RIGHT_WRITE | FD_RIGHT_DUP, 0);
+    int err = fd_alloc(t, &the_ttyerr.obj, FD_RIGHT_WRITE | FD_RIGHT_DUP, 0);
 
     if (in < 0 || out < 0 || err < 0) {
         if (in >= 0) fd_close(t, in);

@@ -192,6 +192,17 @@ static uint8_t scancode_to_ascii(uint8_t scancode) {
         if (scancode < sizeof(scancode_set1)) ascii = scancode_set1[scancode];
     }
 
+    if (ctrl_pressed) {
+        if (ascii >= 'a' && ascii <= 'z') ascii = (uint8_t)(ascii - 'a' + 1);
+        else if (ascii >= 'A' && ascii <= 'Z') ascii = (uint8_t)(ascii - 'A' + 1);
+        else if (ascii == '@') ascii = 0;
+        else if (ascii == '[') ascii = 0x1B;
+        else if (ascii == '\\') ascii = 0x1C;
+        else if (ascii == ']') ascii = 0x1D;
+        else if (ascii == '^') ascii = 0x1E;
+        else if (ascii == '_') ascii = 0x1F;
+    }
+
     return ascii;
 }
 
@@ -235,6 +246,14 @@ void keyboard_handler(struct isr_frame *frame) {
 
     char c = (char)scancode_to_ascii(sc);
     if (!c) return;
+
+    int csig = tty_cc_signal(c);
+    if (csig) {
+        uint32_t pg = tty_fg();
+        if (!pg) pg = keyboard_owner();
+        if (pg) task_kill_pgrp(pg, csig);
+        return;
+    }
 
     keyboard_buffer_push(c);
 

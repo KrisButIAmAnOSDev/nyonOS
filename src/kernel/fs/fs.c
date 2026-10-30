@@ -382,21 +382,55 @@ static bool parse_dirent(const uint8_t *e, fs_node_t *out) {
     return true;
 }
 
+#define FS_LFN_MAX 300
+
+static bool lfn_parse_entry(const uint8_t *e, char *lfn) {
+    if (e[11] != FS_ATTR_LFN) return false;
+    if (e[0] == 0x00 || e[0] == 0xE5) return false;
+    uint32_t ord = (uint32_t)(e[0] & 0x1F);
+    if (e[0] & 0x40) {
+        for (uint32_t k = 0; k < FS_LFN_MAX; k++) lfn[k] = 0;
+    }
+    if (ord >= 1 && ord <= 20) {
+        uint32_t base = (ord - 1) * 13;
+        for (int k = 0; k < 13; k++) {
+            int off = (k < 5) ? (1 + k * 2) : (k < 11 ? (14 + (k - 5) * 2) : (28 + (k - 11) * 2));
+            uint16_t u = (uint16_t)(e[off] | (e[off + 1] << 8));
+            if (u == 0 || u == 0xFFFF) break;
+            if (base + (uint32_t)k < FS_LFN_MAX - 1)
+                lfn[base + (uint32_t)k] = (u < 0x80) ? (char)u : '?';
+        }
+    }
+    return true;
+}
+
 static bool fat_iterate(const fs_node_t *dir, uint32_t index, fs_node_t *out) {
     if (!fs.mounted || !dir || !out) return false;
     if (!dir->is_dir) return false;
 
+    char lfn[FS_LFN_MAX];
+    bool have_lfn = false;
     uint32_t live = 0;
     for (uint32_t i = 0; i < FS_SCAN_MAX; i++) {
         uint8_t e[FS_DIRENT_SIZE];
-        fs_node_t tmp;
         if (!dirent_raw(dir, i, e)) return false;
-        if (!parse_dirent(e, &tmp)) continue;
+        if (e[11] == FS_ATTR_LFN) {
+            if (lfn_parse_entry(e, lfn)) have_lfn = true;
+            continue;
+        }
+        fs_node_t tmp;
+        if (!parse_dirent(e, &tmp)) { have_lfn = false; continue; }
+        if (have_lfn) {
+            uint32_t k = 0;
+            while (k < FS_MAX_NAME - 1 && lfn[k]) { tmp.name[k] = lfn[k]; k++; }
+            tmp.name[k] = 0;
+        }
         if (live == index) {
             *out = tmp;
             return true;
         }
         live++;
+        have_lfn = false;
     }
     return false;
 }
@@ -435,16 +469,23 @@ static int fs_node_write_inner(fs_node_t *node, uint32_t offset, const void *buf
 
 static bool dir_find(const fs_node_t *dir, const char *name, uint32_t *raw_index,
                      fs_node_t *out) {
+    char lfn[FS_LFN_MAX];
+    bool have_lfn = false;
     for (uint32_t i = 0; i < FS_SCAN_MAX; i++) {
         uint8_t e[FS_DIRENT_SIZE];
         if (!dirent_raw(dir, i, e)) break;
+        if (e[11] == FS_ATTR_LFN) {
+            if (lfn_parse_entry(e, lfn)) have_lfn = true;
+            continue;
+        }
         fs_node_t tmp;
-        if (!parse_dirent(e, &tmp)) continue;
-        if (name_eq(tmp.name, name)) {
+        if (!parse_dirent(e, &tmp)) { have_lfn = false; continue; }
+        if (name_eq(tmp.name, name) || (have_lfn && name_eq(lfn, name))) {
             if (raw_index) *raw_index = i;
             if (out) *out = tmp;
             return true;
         }
+        have_lfn = false;
     }
     return false;
 }

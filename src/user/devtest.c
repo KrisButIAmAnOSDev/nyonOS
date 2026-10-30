@@ -68,7 +68,7 @@ int main(void) {
             entries++;
             if (de.name[0] == 'I' || de.name[0] == 'i') found_input = 1;
         }
-        ck(entries, 6);
+        ck(entries, 7);
         ck_true(found_input);
         ck(sys_close((int)fd), 0);
     }
@@ -81,6 +81,41 @@ int main(void) {
     }
 
     fd = sys_open("/DEV/TTY0", O_RDWR);
+    ck_true(fd >= 0);
+    if (fd >= 0) {
+        ck(sys_close((int)fd), 0);
+    }
+
+    fd = sys_open("/DEV/TTY", O_RDWR);
+    ck(fd, ENXIO);
+
+    ck(sys_setsid(), sys_getpid());
+    ck(sys_getpgid(0), sys_getpid());
+    ck(sys_setpgid(0, 0), 0);
+    ck(sys_getpgid(0), sys_getpid());
+    ck(sys_kill(-(slong)sys_getpid(), 0), 0);
+    ck(sys_kill(-99999, 0), ESRCH);
+
+    int fg = 0;
+    ck(sys_ioctl(2, KTTY_SETFG, (long)&fg), 0);
+    ck_true(fg == 0);
+
+    slong me = sys_getpid();
+    ck(sys_ioctl(2, KTTY_SETFG, (long)&me), EIO);
+
+    uint64_t ttou = 1ULL << (22 - 1);
+    ck(sys_sigprocmask(0, &ttou, 0), 0);
+    ck(sys_ioctl(2, KTTY_SETFG, (long)&me), 0);
+    uint64_t none = 0;
+    ck(sys_sigprocmask(2, &none, 0), 0);
+    ck(sys_ioctl(2, KTTY_SETFG, (long)&fg), 0);
+
+    ck(sys_ioctl(2, KTTY_SETCTTY, 0), 0);
+    fg = 0;
+    ck(sys_ioctl(2, KTTY_GETFG, (long)&fg), 0);
+    ck_true(fg == sys_getpid());
+
+    fd = sys_open("/DEV/TTY", O_RDWR);
     ck_true(fd >= 0);
     if (fd >= 0) {
         ck(sys_close((int)fd), 0);

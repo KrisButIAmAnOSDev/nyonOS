@@ -54,6 +54,8 @@
 #define FD_EISDIR   ABI_EISDIR
 #define FD_EIO      ABI_EIO
 #define FD_ENODEV   ABI_ENODEV
+#define FD_ENXIO    ABI_ENXIO
+#define FD_ENOTTY   ABI_ENOTTY
 #define FD_EAGAIN   ABI_EAGAIN
 #define FD_EPERM    ABI_EPERM
 #define FD_ESRCH    ABI_ESRCH

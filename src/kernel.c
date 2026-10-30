@@ -527,6 +527,7 @@ void kmain(void) {
             ev_test();
             fb_test();
             dev_test();
+            tty_cc_test();
             sys_test();
             sysdep_test();
             thread_test();

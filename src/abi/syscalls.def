@@ -78,6 +78,9 @@
     X(chmod         ,   72, int32_t, 2, N((ulong)path,mode), const char *path, unsigned mode) \
     X(fchmod       ,   73, int32_t, 2, N(fd,mode), int fd, unsigned mode) \
     X(utimes       ,   74, int32_t, 2, N((ulong)path,(ulong)times), const char *path, struct sys_timespec2 *times) \
+    X(setsid       ,   75, int32_t, 0, N(0)) \
+    X(getpgid      ,   76, int32_t, 1, N(pid), int32_t pid) \
+    X(setpgid      ,   77, int32_t, 2, N(pid,pgid), int32_t pid, int32_t pgid) \
     X(console_write,  240, int64_t, 4, N(dest,attr,(ulong)buf,len), unsigned dest, unsigned attr, const void *buf, unsigned len) \
     X(debug_print  ,  241, int64_t, 2, N((ulong)msg,len), const char *msg, unsigned len)
 

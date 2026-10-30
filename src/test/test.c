@@ -15,6 +15,7 @@
 #include "arch/x86_64/cpu/cpu.h"
 #include "drivers/ata/ata.h"
 #include "drivers/keyboard/keyboard.h"
+#include "kernel/tty/tty.h"
 
 extern uint8_t user_test_entry[];
 extern uint8_t user_tty_a_entry[];
@@ -1416,6 +1417,44 @@ void fb_test(void) {
     pmm_free(phys, 1);
 }
 
+void tty_cc_test(void) {
+    struct sys_termios saved, t;
+    tty_termios_get(0, &saved);
+
+    int checks = 0, bad = 0;
+#define TCHECK(cond, label) do { \
+        if (cond) checks++; \
+        else { bad++; kprintf(PRINT_SERIAL, "    FAIL tty cc: %s\n", label); } \
+    } while (0)
+
+    TCHECK(tty_cc_signal(3) == 2, "VINTR maps to SIGINT");
+    TCHECK(tty_cc_signal(28) == 3, "VQUIT maps to SIGQUIT");
+    TCHECK(tty_cc_signal(26) == 20, "VSUSP maps to SIGTSTP");
+    TCHECK(tty_cc_signal('a') == 0, "ordinary char is not a signal");
+    TCHECK(tty_cc_signal(0) == 0, "NUL is not a signal");
+
+    t = saved;
+    t.c_cc[0] = 'x';
+    t.c_cc[1] = 'y';
+    t.c_cc[10] = 'z';
+    tty_termios_set(0, 0, &t);
+    TCHECK(tty_cc_signal('x') == 2, "custom VINTR maps to SIGINT");
+    TCHECK(tty_cc_signal('y') == 3, "custom VQUIT maps to SIGQUIT");
+    TCHECK(tty_cc_signal('z') == 20, "custom VSUSP maps to SIGTSTP");
+    TCHECK(tty_cc_signal(3) == 0, "old VINTR no longer maps");
+
+    t.c_lflag &= ~1u;
+    tty_termios_set(0, 0, &t);
+    TCHECK(tty_cc_signal('x') == 0, "ISIG off disables signals");
+
+    tty_termios_set(0, 0, &saved);
+
+    kprintf(PRINT_SERIAL, "TTY cc: %d of %d checks passed: ", checks, checks + bad);
+    kprintchar(bad == 0 && checks > 0 ? 'Y' : 'N', PRINT_SERIAL);
+    kprintchar('\n', PRINT_SERIAL);
+#undef TCHECK
+}
+
 void dev_test(void) {
     fs_node_t node;
     if (!fs_lookup("/BIN/DEVTEST", &node) && !fs_lookup("/BIN/devtest", &node)) {
@@ -1470,10 +1509,19 @@ void dev_test(void) {
         "close zero",
         "open /dev/null WRONLY", "write null returns 2", "close null",
         "open /dev/fb0 RDONLY", "read fb returns 4", "close fb",
-        "open /dev O_DIRECTORY", "iterate returns 6 entries", "saw INPUT entry",
+        "open /dev O_DIRECTORY", "iterate returns 7 entries", "saw INPUT entry",
         "close dev",
         "open /dev/console RDWR", "write console returns 9", "close console",
         "open /dev/tty0 RDWR", "close tty0",
+        "open /dev/tty ENXIO", "setsid ok", "getpgid(0) == self",
+        "setpgid(0,0) ok", "getpgid(0) still self", "kill(-pgid,0) ok",
+        "kill(-bogus,0) ESRCH",
+        "TIOCSPGRP 0 ok", "fg clears to 0",
+        "orphaned tcsetpgrp returns EIO",
+        "block SIGTTOU ok", "tcsetpgrp allowed when SIGTTOU blocked",
+        "unblock SIGTTOU ok", "TIOCSPGRP 0 again ok",
+        "TIOCSCTTY ok", "TIOCGPGRP ok", "foreground == self",
+        "open /dev/tty ok", "close tty",
     };
 
     int checks = 0, bad = 0;

@@ -139,10 +139,22 @@ static void ansi_run(char final) {
         return;
     }
     if (final == 'J') {
+        if (!fb) return;
         if (p0 == 2) {
             kprintf_clear();
             cur_x = home_x;
             cur_y = 0;
+        } else if (p0 == 1) {
+            for (uint32_t y = 0; y < cur_y + GLYPH_H && y < fb_h; y++) {
+                uint32_t x1 = (y < cur_y) ? fb_w : (cur_x + GLYPH_W);
+                for (uint32_t x = 0; x < x1 && x < fb_w; x++)
+                    fb[y * fb_w + x] = cur_bg;
+            }
+        } else {
+            ansi_erase_range(cur_x, fb_w);
+            for (uint32_t y = cur_y + GLYPH_H; y < fb_h; y++)
+                for (uint32_t x = 0; x < fb_w; x++)
+                    fb[y * fb_w + x] = cur_bg;
         }
         return;
     }

@@ -9,12 +9,16 @@
 #define TTY_ISIG   0000001
 #define TTY_ECHO   0000010
 #define TTY_VINTR  0
-#define TTY_VEOF   4
+#define TTY_VQUIT  1
 #define TTY_VKILL  3
+#define TTY_VEOF   4
+#define TTY_VSUSP  10
 
 static struct sys_termios console_termios;
 static struct sys_winsize console_winsize = { 25, 80, 0, 0 };
 static bool tty_ready;
+static uint32_t tty_fg_pgrp;
+static uint32_t tty_ctty_sid;
 
 void tty_set_display_size(uint16_t rows, uint16_t cols) {
     console_winsize.ws_row = rows;
@@ -28,8 +32,10 @@ void tty_init(void) {
     console_termios.c_lflag = TTY_ISIG | TTY_ICANON | TTY_ECHO;
     console_termios.c_line = 0;
     console_termios.c_cc[TTY_VINTR] = 3;
+    console_termios.c_cc[TTY_VQUIT] = 28;
     console_termios.c_cc[TTY_VEOF] = 4;
-    console_termios.c_cc[TTY_VKILL] = 3;
+    console_termios.c_cc[TTY_VKILL] = 21;
+    console_termios.c_cc[TTY_VSUSP] = 26;
     console_termios.c_ibaud = 0;
     console_termios.c_obaud = 0;
     console_winsize.ws_row = 25;
@@ -115,4 +121,51 @@ bool tty_poll_ready(int fd, uint16_t events, uint16_t *revents) {
 bool tty_wait_input(uint64_t deadline) {
     task_wait(keyboard_wait_chan(), deadline);
     return tty_input_ready();
+}
+
+uint32_t tty_fg(void) {
+    if (!tty_ready) tty_init();
+    return tty_fg_pgrp;
+}
+
+void tty_set_fg(uint32_t pgid) {
+    if (!tty_ready) tty_init();
+    tty_fg_pgrp = pgid;
+}
+
+uint32_t tty_ctty_session(void) {
+    if (!tty_ready) tty_init();
+    return tty_ctty_sid;
+}
+
+bool tty_acquire_ctty(uint32_t session_id) {
+    if (!tty_ready) tty_init();
+    if (tty_ctty_sid && tty_ctty_sid != session_id) return false;
+    tty_ctty_sid = session_id;
+    tty_fg_pgrp = 0;
+    return true;
+}
+
+void tty_release_ctty(uint32_t session_id) {
+    if (!tty_ready) tty_init();
+    if (tty_ctty_sid == session_id) {
+        tty_ctty_sid = 0;
+        tty_fg_pgrp = 0;
+    }
+}
+
+bool tty_isig(void) {
+    if (!tty_ready) tty_init();
+    return (console_termios.c_lflag & TTY_ISIG) != 0;
+}
+
+int tty_cc_signal(char c) {
+    if (!tty_ready) tty_init();
+    if (!(console_termios.c_lflag & TTY_ISIG)) return 0;
+    if (!c) return 0;
+    uint8_t u = (uint8_t)c;
+    if (u && u == console_termios.c_cc[TTY_VINTR]) return 2;
+    if (u && u == console_termios.c_cc[TTY_VQUIT]) return 3;
+    if (u && u == console_termios.c_cc[TTY_VSUSP]) return 20;
+    return 0;
 }

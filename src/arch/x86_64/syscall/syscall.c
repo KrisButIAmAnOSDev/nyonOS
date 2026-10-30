@@ -1106,10 +1106,50 @@ static int64_t sys_ioctl(int fd, unsigned req, int64_t arg) {
 
 static int64_t sys_kill(int32_t pid, int sig) {
     if (sig < 0 || sig >= 65) return SYS_EINVAL;
+    if (pid < 0) {
+        uint32_t pgid = (uint32_t)(-pid);
+        if (!task_pgrp_exists(pgid)) return SYS_ESRCH;
+        if (sig) {
+            for (size_t i = 1; i < TASK_MAX; i++) {
+                struct task *t = task_at(i);
+                if (!t || !t->in_use || t->zombie || t->pgid != pgid) continue;
+                __atomic_or_fetch(&t->sig_pending, 1ULL << (sig - 1), __ATOMIC_RELAXED);
+            }
+        }
+        return 0;
+    }
     struct task *t = task_find_pid((uint32_t)pid);
     if (!t) return SYS_ESRCH;
     if (sig == 0) return 0;
     __atomic_or_fetch(&t->sig_pending, 1ULL << (sig - 1), __ATOMIC_RELAXED);
+    return 0;
+}
+
+static int64_t sys_setsid(void) {
+    struct task *self = task_current();
+    if (!self) return SYS_ENOSYS;
+
+    if (task_is_leader(self->pid)) return SYS_EPERM;
+
+    task_pgrp_join(self, self->pid, self->pid);
+    return (int64_t)self->pid;
+}
+
+static int64_t sys_getpgid(int32_t pid) {
+    struct task *self = task_current();
+    if (!self) return SYS_ENOSYS;
+
+    if (pid == 0) return (int64_t)self->pgid;
+
+    struct task *t = task_find_pid((uint32_t)pid);
+    if (!t) return SYS_ESRCH;
+    return (int64_t)t->pgid;
+}
+
+static int64_t sys_setpgid(int32_t pid, int32_t pgid) {
+    int r = task_set_pgid((uint32_t)pid, (uint32_t)pgid);
+    if (r == -1) return SYS_EPERM;
+    if (r == -3) return SYS_ESRCH;
     return 0;
 }
 

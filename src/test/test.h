@@ -29,6 +29,7 @@ void sigtest_run(void);
 void ev_test(void);
 void fb_test(void);
 void dev_test(void);
+void tty_cc_test(void);
 void sys_test(void);
 void shell_run(void);
 void thread_test(void);

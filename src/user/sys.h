@@ -39,6 +39,8 @@ typedef unsigned char uchar;
 #define KTTY_SETDEST ABI_KTTY_SETDEST
 #define KTTY_GETFG   ABI_KTTY_GETFG
 #define KTTY_SETFG   ABI_KTTY_SETFG
+#define KTTY_SETCTTY ABI_KTTY_SETCTTY
+#define KTTY_NOTTY   ABI_KTTY_NOTTY
 
 #define FD_RIGHT_READ ABI_FD_RIGHT_READ
 
@@ -61,6 +63,7 @@ typedef unsigned char uchar;
 #define EMFILE  ABI_EMFILE
 #define ENOSPC  ABI_ENOSPC
 #define ENOSYS  ABI_ENOSYS
+#define ENXIO   ABI_ENXIO
 #define ETIMEDOUT ABI_ETIMEDOUT
 
 #define SYS_MAX_NAME ABI_MAX_NAME

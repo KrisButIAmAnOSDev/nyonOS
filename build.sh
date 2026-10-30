@@ -16,12 +16,15 @@ fi
 echo "Creating bootable disk image..."
 dd if=/dev/zero bs=1M count=64 of=nyonOS.img
 
+FAT_MB=${FAT_MB:-256}
+FAT_SECTORS=$((FAT_MB * 2048 - 2048))
+
 rm -f fat16.img
 
 if [ ! -f fat16.img ]; then
-    dd if=/dev/zero bs=1M count=128 of=fat16.img
+    dd if=/dev/zero bs=1M count=$FAT_MB of=fat16.img
     printf 'label: dos\nunit: sectors\n\nstart=2048, type=0e, bootable\n' | sfdisk --no-reread --no-tell-kernel fat16.img >/dev/null
-    mformat -i fat16.img@@1M -T 260096 -h 64 -s 32 ::
+    mformat -i fat16.img@@1M -T $FAT_SECTORS -h 64 -s 32 -c 64 ::
     awk 'BEGIN{printf "that my jarona"; for(i=0;i<2986;i++) printf "."}' > /tmp/nyonos-fs-test.txt
     mcopy -i fat16.img@@1M /tmp/nyonos-fs-test.txt ::/TEST.TXT
     mmd -i fat16.img@@1M ::/SUB
@@ -90,7 +93,8 @@ tools/build-busybox.sh || true
 BB=${BUSYBOX_SRC:-../busybox}/busybox
 if [ -f "$BB" ]; then
     mcopy -i fat16.img@@1M "$BB" ::/BIN/busybox
-    for applet in touch mkdir rm ls cat cp mv grep; do
+    BB_APPLETS="basename cat clear cmp comm cp cut dirname du echo env expand expr false find grep head hexdump hostname id install ln ls md5sum mkdir mktemp mv nl od printf readlink rev rm rmdir seq sha256sum shred sleep sort split stat strings sync tac tail tee test touch tr true uname unexpand uniq wc which xargs yes"
+    for applet in $BB_APPLETS; do
         mcopy -i fat16.img@@1M "$BB" "::/BIN/$applet"
     done
 fi

@@ -88,9 +88,97 @@ void task_aspace_update(void) {
     msr_write(MSR_FS_BASE, tasks[current_slot()].fs_base);
 }
 
+#define PGROUP_NONE 0xFFFFFFFFu
+
+struct pgroup {
+    bool used;
+    uint32_t pgid;
+    uint32_t sid;
+    uint32_t count;
+    uint32_t head;
+};
+
+static struct pgroup pgroups[TASK_MAX];
+
+static int pgroup_find(uint32_t pgid, uint32_t sid) {
+    for (size_t i = 0; i < TASK_MAX; i++)
+        if (pgroups[i].used && pgroups[i].pgid == pgid && pgroups[i].sid == sid)
+            return (int)i;
+    return -1;
+}
+
+static int pgroup_find_or_create(uint32_t pgid, uint32_t sid) {
+    int i = pgroup_find(pgid, sid);
+    if (i >= 0) return i;
+    for (size_t j = 0; j < TASK_MAX; j++) {
+        if (pgroups[j].used) continue;
+        pgroups[j].used = true;
+        pgroups[j].pgid = pgid;
+        pgroups[j].sid = sid;
+        pgroups[j].count = 0;
+        pgroups[j].head = 0;
+        return (int)j;
+    }
+    return -1;
+}
+
+static void pgroup_unlink(struct task *t) {
+    if (!t || t->pg_idx == PGROUP_NONE || t->pg_idx >= TASK_MAX) {
+        if (t) {
+            t->pg_idx = PGROUP_NONE;
+            t->pg_next = 0;
+        }
+        return;
+    }
+    struct pgroup *g = &pgroups[t->pg_idx];
+    if (g->used) {
+        uint32_t self1 = (uint32_t)(t - tasks) + 1;
+        uint32_t *link = &g->head;
+        while (*link) {
+            if (*link == self1) {
+                *link = t->pg_next;
+                break;
+            }
+            struct task *n = &tasks[*link - 1];
+            link = &n->pg_next;
+        }
+        if (g->count) g->count--;
+        if (g->count == 0) {
+            g->used = false;
+            g->head = 0;
+        }
+    }
+    t->pg_idx = PGROUP_NONE;
+    t->pg_next = 0;
+}
+
+void task_pgrp_join(struct task *t, uint32_t pgid, uint32_t sid) {
+    if (!t) return;
+    pgroup_unlink(t);
+    t->pgid = pgid;
+    t->sid = sid;
+    if (!pgid) {
+        t->pg_idx = PGROUP_NONE;
+        return;
+    }
+    int i = pgroup_find_or_create(pgid, sid);
+    if (i < 0) {
+        t->pg_idx = PGROUP_NONE;
+        return;
+    }
+    struct pgroup *g = &pgroups[i];
+    t->pg_idx = (uint32_t)i;
+    t->pg_next = g->head;
+    g->head = (uint32_t)(t - tasks) + 1;
+    g->count++;
+}
+
 static void task_release(struct task *t) {
     fd_tty_task_gone(t->pid);
     fd_table_clear(t);
+    pgroup_unlink(t);
+    t->pgid = 0;
+    t->sid = 0;
     t->cpu = TASK_CPU_ANY;
     t->running = false;
     t->sig_pending = 0;
@@ -209,6 +297,10 @@ void task_init(void) {
         tasks[i].name = NULL;
         tasks[i].cpu = TASK_CPU_ANY;
         tasks[i].running = false;
+        tasks[i].pgid = 0;
+        tasks[i].sid = 0;
+        tasks[i].pg_idx = PGROUP_NONE;
+        tasks[i].pg_next = 0;
         tasks[i].cwd[0] = '/';
         tasks[i].cwd[1] = 0;
         fd_table_init(&tasks[i]);
@@ -292,6 +384,7 @@ struct task *task_spawn(const char *name, void (*entry)(void)) {
     t->sig_terminate = false;
     t->cpu = TASK_CPU_ANY;
     t->pid = __atomic_add_fetch(&next_pid, 1, __ATOMIC_RELAXED);
+    task_pgrp_join(t, 0, 0);
     t->name = name;
 
     lock_release(LOCK_SCHED, &sched_lock);
@@ -409,6 +502,7 @@ static struct task *spawn_ring3(const char *name, paddr_t code_phys, size_t code
     t->sig_terminate = false;
     t->cpu = TASK_CPU_ANY;
     t->pid = __atomic_add_fetch(&next_pid, 1, __ATOMIC_RELAXED);
+    task_pgrp_join(t, 0, 0);
     t->name = name;
     fd_table_init(t);
     fd_install_stdio(t);
@@ -444,6 +538,7 @@ struct task *task_spawn_thread(struct task *parent, const char *name,
 
     struct task *t = &tasks[slot];
     t->parent_pid = parent->pid;
+    task_pgrp_join(t, parent->pgid, parent->sid);
     t->child_chan = &t->child_chan;
     t->stack_base = vmm_hhdm_offset + kphys;
     t->stack_top = t->stack_base + TASK_STACK_PAGES * PAGE_SIZE;
@@ -489,6 +584,7 @@ struct task *task_spawn_thread(struct task *parent, const char *name,
     t->sig_terminate = false;
     t->cpu = TASK_CPU_ANY;
     t->pid = __atomic_add_fetch(&next_pid, 1, __ATOMIC_RELAXED);
+    task_pgrp_join(t, 0, 0);
     t->name = name;
 
     for (size_t i = 0; i < FD_PATH_MAX; i++) t->cwd[i] = parent->cwd[i];
@@ -580,6 +676,7 @@ struct task *task_spawn_fork(struct task *parent, const char *name,
 
     struct task *t = &tasks[slot];
     t->parent_pid = parent->pid;
+    task_pgrp_join(t, parent->pgid, parent->sid);
     t->child_chan = &t->child_chan;
     t->stack_base = vmm_hhdm_offset + kphys;
     t->stack_top = t->stack_base + TASK_STACK_PAGES * PAGE_SIZE;
@@ -669,6 +766,7 @@ struct task *task_spawn_fork(struct task *parent, const char *name,
     t->sig_terminate = false;
     t->cpu = TASK_CPU_ANY;
     t->pid = __atomic_add_fetch(&next_pid, 1, __ATOMIC_RELAXED);
+    task_pgrp_join(t, 0, 0);
     t->name = name;
 
     if (clone_fds) {
@@ -820,6 +918,7 @@ struct task *task_spawn_vmspace(const char *name, struct vmspace *vs, vaddr_t en
     t->sig_terminate = false;
     t->cpu = TASK_CPU_ANY;
     t->pid = __atomic_add_fetch(&next_pid, 1, __ATOMIC_RELAXED);
+    task_pgrp_join(t, 0, 0);
     t->name = name;
 
     fd_table_init(t);
@@ -846,7 +945,7 @@ static struct task *pick_next(uint32_t me) {
     for (size_t i = 1; i <= TASK_MAX; i++) {
         size_t idx = (current_slot() + i) % TASK_MAX;
         struct task *t = &tasks[idx];
-        if (!t->in_use || t->blocked) continue;
+        if (!t->in_use || t->blocked || t->stopped) continue;
         if (t->running) continue;
         if (t->cpu != TASK_CPU_ANY && t->cpu != me) continue;
         if (idle_slot[me] < TASK_MAX && idx == idle_slot[me]) continue;
@@ -868,6 +967,7 @@ static void task_zombify_locked(struct task *t) {
             __atomic_store_n(&tasks[i].blocked, false, __ATOMIC_RELEASE);
         }
     }
+    pgroup_unlink(t);
     t->in_use = false;
     t->zombie = true;
     t->blocked = false;
@@ -1025,6 +1125,7 @@ void task_exit_code(uint64_t code) {
 
     task_fpu_save();
 
+    pgroup_unlink(self);
     self->in_use = false;
     self->blocked = false;
     self->zombie = true;
@@ -1270,6 +1371,80 @@ struct task *task_find_pid(uint32_t pid) {
         if (tasks[i].in_use && !tasks[i].zombie && tasks[i].pid == pid) return &tasks[i];
     }
     return NULL;
+}
+
+struct task *task_at(size_t i) {
+    if (i >= TASK_MAX) return NULL;
+    return &tasks[i];
+}
+
+void task_kill_pgrp(uint32_t pgid, int sig) {
+    if (sig < 0 || sig >= 65) return;
+    if (!pgid) {
+        for (size_t i = 1; i < TASK_MAX; i++) {
+            struct task *t = &tasks[i];
+            if (!t->in_use || t->zombie) continue;
+            __atomic_or_fetch(&t->sig_pending, 1ULL << (sig - 1), __ATOMIC_RELAXED);
+        }
+        return;
+    }
+    for (size_t gi = 0; gi < TASK_MAX; gi++) {
+        struct pgroup *g = &pgroups[gi];
+        if (!g->used || g->pgid != pgid) continue;
+        for (uint32_t m = g->head; m; ) {
+            struct task *t = &tasks[m - 1];
+            m = t->pg_next;
+            if (!t->in_use || t->zombie) continue;
+            __atomic_or_fetch(&t->sig_pending, 1ULL << (sig - 1), __ATOMIC_RELAXED);
+        }
+    }
+}
+
+bool task_in_pgrp(uint32_t pgid) {
+    struct task *self = task_current();
+    if (!self) return false;
+    if (!pgid) return true;
+    return self->pgid == pgid;
+}
+
+bool task_is_leader(uint32_t pid) {
+    for (size_t i = 0; i < TASK_MAX; i++)
+        if (pgroups[i].used && pgroups[i].pgid == pid) return true;
+    return false;
+}
+
+int task_set_pgid(uint32_t pid, uint32_t pgid) {
+    struct task *self = task_current();
+    if (!self) return -1;
+    struct task *t = self;
+    if (pid) {
+        t = task_find_pid(pid);
+        if (!t) return -3;
+    }
+    if (t->sid != self->sid) return -1;
+    task_pgrp_join(t, pgid ? pgid : t->pid, t->sid);
+    return 0;
+}
+
+bool task_pgrp_exists(uint32_t pgid) {
+    for (size_t i = 0; i < TASK_MAX; i++)
+        if (pgroups[i].used && pgroups[i].pgid == pgid) return true;
+    return false;
+}
+
+bool task_pgrp_orphaned(uint32_t pgid) {
+    for (size_t gi = 0; gi < TASK_MAX; gi++) {
+        struct pgroup *g = &pgroups[gi];
+        if (!g->used || g->pgid != pgid) continue;
+        for (uint32_t m = g->head; m; ) {
+            struct task *t = &tasks[m - 1];
+            m = t->pg_next;
+            if (t->zombie || !t->parent_pid) continue;
+            struct task *p = task_find_pid(t->parent_pid);
+            if (p && p->sid == t->sid && p->pgid != pgid) return false;
+        }
+    }
+    return true;
 }
 
 struct page_table *task_current_pml4(void) {

@@ -23,4 +23,12 @@ bool tty_wait_input(uint64_t deadline);
 
 void tty_set_display_size(uint16_t rows, uint16_t cols);
 
+uint32_t tty_fg(void);
+void tty_set_fg(uint32_t pgid);
+uint32_t tty_ctty_session(void);
+bool tty_acquire_ctty(uint32_t session_id);
+void tty_release_ctty(uint32_t session_id);
+bool tty_isig(void);
+int tty_cc_signal(char c);
+
 #endif
