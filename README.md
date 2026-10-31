@@ -35,7 +35,9 @@ of any kind.
 
 also sometime stupid llm i try touch my code and make my code stupid too so expect werid things,i did check my code after "stupid" llm touch it but still,be aware of it
 
-and if you think this project is vibecoded,tag me in osdev discord server and ask me about an random function,i will explain it myself
+and if you think this project is vibecoded,tag me in my discord server and ask me about an random function,i will explain it myself
+
+also i use stupid way to fix things,jk that
 
 ## License
 
