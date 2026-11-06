@@ -1,9 +1,28 @@
+#include <string.h>
 #include "vmspace.h"
 #include "kernel/kprintf/kprintf.h"
 #include "kernel/mm/pmm/pmm.h"
 #include "kernel/sync/preempt.h"
 #include "kernel/uaccess/uaccess.h"
 #include "kernel/mm/heap/heap.h"
+#include "kernel/mm/slab/slab.h"
+
+static struct kmem_cache *vmspace_cache;
+
+void vm_cache_init(void) {
+    vmspace_cache = kmem_cache_create("vmspace", sizeof(struct vmspace), 16);
+}
+
+struct vmspace *vmspace_alloc(void) {
+    if (!vmspace_cache) return NULL;
+    struct vmspace *vs = (struct vmspace *)kmem_cache_alloc(vmspace_cache);
+    if (vs) memset(vs, 0, sizeof(struct vmspace));
+    return vs;
+}
+
+void vmspace_free(struct vmspace *vs) {
+    if (vs) kmem_cache_free(vmspace_cache, vs);
+}
 
 bool vm_protect(struct vmspace *vs, vaddr_t addr, size_t pages, uint8_t prot) {
     if (!vs) return false;
@@ -22,11 +41,11 @@ static struct vm_region *region_slot(struct vmspace *vs) {
 }
 
 struct vmspace *vm_create(void) {
-    struct vmspace *vs = (struct vmspace *)kmalloc(sizeof(struct vmspace));
+    struct vmspace *vs = vmspace_alloc();
     if (!vs) return NULL;
 
     vs->pml4 = vmm_create_address_space();
-    if (!vs->pml4) { kfree(vs); return NULL; }
+    if (!vs->pml4) { vmspace_free(vs); return NULL; }
 
     vs->refcount = 1;
     vs->region_count = 0;
@@ -56,7 +75,7 @@ void vm_free_range(struct vmspace *vs, vaddr_t start, vaddr_t end) {
     for (size_t i = 0; i < pages; i++) {
         uint64_t entry = vmm_query_in(vs->pml4, a + i * PAGE_SIZE);
         if ((entry & PAGE_PRESENT) && (entry & PAGE_OWNED))
-            pmm_free(entry & 0x000FFFFFFFFFF000ULL, 1);
+            pmm_free(entry & VMM_PT_ADDR_MASK, 1);
     }
 
     vmm_unmap_keep(vs->pml4, a, pages);
@@ -71,7 +90,7 @@ void vm_destroy(struct vmspace *vs) {
         vs->pml4 = NULL;
     }
 
-    kfree(vs);
+    vmspace_free(vs);
 }
 
 int vm_region_add(struct vmspace *vs, vaddr_t start, vaddr_t end, uint8_t prot, uint8_t backing) {
@@ -162,17 +181,17 @@ bool vm_map_phys(struct vmspace *vs, vaddr_t vaddr, paddr_t phys, size_t pages, 
 bool vm_map_anon_zeroed(struct vmspace *vs, vaddr_t vaddr, size_t pages, uint8_t prot, bool zero) {
     if (!vs || !vs->pml4 || pages == 0) return false;
 
-    paddr_t phys;
-    if (!pmm_alloc(&phys, pages)) return false;
+    for (size_t i = 0; i < pages; i++) {
+        paddr_t phys;
+        if (!pmm_alloc(&phys, 1)) return false;
 
-    if (zero) {
-        uint8_t *dst = (uint8_t *)(vmm_hhdm_offset + phys);
-        for (size_t i = 0; i < pages * PAGE_SIZE; i++) dst[i] = 0;
-    }
+        if (zero)
+            memset((void *)(vmm_hhdm_offset + phys), 0, PAGE_SIZE);
 
-    if (!vm_commit(vs, vaddr, phys, pages, prot, true)) {
-        pmm_free(phys, pages);
-        return false;
+        if (!vm_commit(vs, vaddr + i * PAGE_SIZE, phys, 1, prot, true)) {
+            pmm_free(phys, 1);
+            return false;
+        }
     }
 
     struct vm_region *r = vm_region_find(vs, vaddr);
@@ -212,7 +231,7 @@ bool vm_setup_stack(struct vmspace *vs) {
 static uint8_t *stack_page(struct vmspace *vs, uint64_t *vbase_out) {
     uint64_t entry = vmm_query_in(vs->pml4, (vs->stack_top - 1) & ~(PAGE_SIZE - 1));
     if (!(entry & PAGE_PRESENT)) return NULL;
-    uint8_t *base = (uint8_t *)(vmm_hhdm_offset + (entry & 0x000FFFFFFFFFF000ULL));
+    uint8_t *base = (uint8_t *)(vmm_hhdm_offset + (entry & VMM_PT_ADDR_MASK));
     *vbase_out = (vs->stack_top - 1) & ~(uint64_t)(PAGE_SIZE - 1);
     return base;
 }
@@ -243,26 +262,24 @@ bool vm_stack_push_strings(struct vmspace *vs, const char **strs, size_t count,
     uint64_t envp_ptr[128];
 
     for (size_t i = 0; i < count; i++) {
-        size_t sl = 0;
-        while (strs[i][sl]) sl++;
+        size_t sl = strlen(strs[i]);
 
         if ((size_t)(top - floor) < sl + 16) return false;
 
         uint8_t *dst = top - sl - 1;
-        for (size_t k = 0; k <= sl; k++) dst[k] = (uint8_t)strs[i][k];
+        memcpy(dst, strs[i], sl + 1);
 
         argv_ptr[i] = vbase + (uint64_t)(dst - base);
         top = (uint8_t *)((uintptr_t)dst & ~0x7ULL);
     }
 
     for (size_t i = 0; i < envc; i++) {
-        size_t sl = 0;
-        while (envp[i][sl]) sl++;
+        size_t sl = strlen(envp[i]);
 
         if ((size_t)(top - floor) < sl + 16) return false;
 
         uint8_t *dst = top - sl - 1;
-        for (size_t k = 0; k <= sl; k++) dst[k] = (uint8_t)envp[i][k];
+        memcpy(dst, envp[i], sl + 1);
 
         envp_ptr[i] = vbase + (uint64_t)(dst - base);
         top = (uint8_t *)((uintptr_t)dst & ~0x7ULL);
@@ -277,9 +294,11 @@ bool vm_stack_push_strings(struct vmspace *vs, const char **strs, size_t count,
     uint64_t *sp = (uint64_t *)top - words;
     size_t w = 0;
     sp[w++] = count;
-    for (size_t i = 0; i < count; i++) sp[w++] = argv_ptr[i];
+    memcpy(&sp[w], argv_ptr, count * sizeof(uint64_t));
+    w += count;
     sp[w++] = 0;
-    for (size_t i = 0; i < envc; i++) sp[w++] = envp_ptr[i];
+    memcpy(&sp[w], envp_ptr, envc * sizeof(uint64_t));
+    w += envc;
     sp[w++] = 0;
     for (size_t i = 0; i < auxc; i++) {
         sp[w++] = aux[i].type;

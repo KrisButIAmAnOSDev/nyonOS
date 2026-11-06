@@ -261,7 +261,7 @@ struct percpu *cpu_self(void) {
     if (((uint64_t)high << 32 | low) == 0) return &percpu_table[0];
 
     struct percpu *p;
-    __asm__ volatile("mov %0, %%gs:0xfffffffffffffff8" : "=r"(p) : : "memory");
+    __asm__ volatile("mov %%gs:0xfffffffffffffff8, %0" : "=r"(p) : : "memory");
     if (!p) return &percpu_table[0];
     return p;
 }
@@ -375,15 +375,6 @@ void cpu_bootstrap_ap(uint32_t processor_id, uint32_t lapic_id, uint64_t hhdm_of
     lapic_write_lvt_timer(lapic, LAPIC_RESCHED_VECTOR);
 
     percpu_table[processor_id].online = true;
-}
-
-void cpu_init_cpu(void) {
-    struct percpu *s = cpu_self();
-    s->current_slot = 0;
-    s->in_scheduler = false;
-    s->sched_enabled = true;
-    s->switch_count = 0;
-    s->earliest_wake = UINT64_MAX;
 }
 
 static uint32_t limine_paging_mode;

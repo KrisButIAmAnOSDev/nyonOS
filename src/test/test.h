@@ -26,6 +26,7 @@ void proctest_run(void);
 void clktest_run(void);
 void forktest_run(void);
 void sigtest_run(void);
+void asynctest_run(void);
 void ev_test(void);
 void fb_test(void);
 void dev_test(void);

@@ -21,6 +21,8 @@ void kprintf_output_lock(void);
 void kprintf_output_unlock(void);
 void kprintf(uint32_t attr, const char *fmt, ...);
 void kvprintf(uint32_t attr, const char *fmt, va_list args);
+int vsnprintf(char *buf, size_t size, const char *fmt, va_list args);
+int snprintf(char *buf, size_t size, const char *fmt, ...);
 
 void kprintf_attach(volatile uint32_t *fb, uint32_t width, uint32_t height);
 void kprintf_home(uint32_t x, uint32_t y);

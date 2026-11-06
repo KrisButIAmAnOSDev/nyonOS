@@ -10,5 +10,6 @@
 struct task;
 
 int pipe_create(struct task *t, int fds[2]);
+void pipe_cache_init(void);
 
 #endif

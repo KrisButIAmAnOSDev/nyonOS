@@ -111,7 +111,7 @@ static void child_vfork_touch(void) {
 int main(int argc, char **argv) {
     (void)argc;
     (void)argv;
-    for (int i = 0; i < RES_SLOTS; i++) res[i] = RES_PENDING;
+    res_reset_pending(res);
 
     uint32_t cpid = 0;
     int32_t status = 0;

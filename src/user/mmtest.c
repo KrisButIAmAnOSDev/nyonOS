@@ -78,7 +78,7 @@ int main(int argc, char **argv) {
         sys_exit(2);
     }
 
-    for (int i = 0; i < RES_SLOTS; i++) res[i] = RES_PENDING;
+    res_reset_pending(res);
 
     slong m = sys_mmap(PAGE, ABI_MMAP_PROT_READ | ABI_MMAP_PROT_WRITE, ABI_MMAP_ANON);
     ck_ge(m, 0x100000000L);

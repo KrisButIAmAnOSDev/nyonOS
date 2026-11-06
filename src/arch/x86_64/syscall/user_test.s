@@ -967,10 +967,10 @@ report:
 fdbuf:
     .space 256
 stbuf:
-    .space 64
+    .space 512
     .align 8
 dent:
-    .space 56
+    .space 64
 abi_rsp:
     .quad 0
 

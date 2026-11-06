@@ -42,6 +42,10 @@ struct vmspace *vm_create(void);
 void vm_destroy(struct vmspace *vs);
 struct vmspace *vm_ref(struct vmspace *vs);
 
+void vm_cache_init(void);
+struct vmspace *vmspace_alloc(void);
+void vmspace_free(struct vmspace *vs);
+
 int vm_region_add(struct vmspace *vs, vaddr_t start, vaddr_t end, uint8_t prot, uint8_t backing);
 struct vm_region *vm_region_find(struct vmspace *vs, vaddr_t addr);
 bool vm_region_remove(struct vmspace *vs, vaddr_t start, vaddr_t end);

@@ -232,7 +232,7 @@ static void nonblock_test(void) {
 }
 
 int main(void) {
-    for (int i = 0; i < RES_SLOTS; i++) res[i] = RES_PENDING;
+    res_reset_pending(res);
 
     hole_test();
     trunc_test();

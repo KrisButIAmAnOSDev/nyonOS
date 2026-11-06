@@ -50,7 +50,7 @@ int main(int argc, char **argv) {
     (void)argc;
     (void)argv;
 
-    for (int i = 0; i < RES_SLOTS; i++) res[i] = RES_PENDING;
+    res_reset_pending(res);
 
     char buf[CHUNK];
     struct sys_stat st;

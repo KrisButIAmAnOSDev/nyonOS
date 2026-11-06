@@ -1,6 +1,11 @@
 CC = gcc
 LD = ld
-CFLAGS = -g -Wall -Wextra -std=gnu11 -ffreestanding -fno-stack-protector -fno-stack-check -fno-lto -fno-PIC -ffunction-sections -fdata-sections -m64 -march=x86-64 -mabi=sysv -mno-80387 -mno-mmx -mno-sse -mno-sse2 -mno-red-zone -mcmodel=kernel -Isrc
+JOBS ?= $(shell nproc 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 1)
+ifneq ($(findstring j,$(MAKEFLAGS)),)
+else
+MAKEFLAGS += -j$(JOBS)
+endif
+CFLAGS = -g -O2 -Wall -Wextra -std=gnu11 -ffreestanding -fno-stack-protector -fno-stack-check -fno-lto -fno-PIC -ffunction-sections -fdata-sections -m64 -march=x86-64 -mabi=sysv -mno-80387 -mno-mmx -mno-sse -mno-sse2 -mno-red-zone -mcmodel=kernel -Isrc
 
 TOOLCHAIN_CC_GLOB = $(wildcard ../nyonos-toolchain/toolchain16/bin/x86_64-nyonos-gcc \
                             toolchain/toolchain16/bin/x86_64-nyonos-gcc \
@@ -17,7 +22,7 @@ export NYONOS_MLIBC_LD
 
 TOOLCHAIN_BIN = $(patsubst %/,%,$(dir $(NYONOS_MLIBC_CC)))
 export PATH := $(TOOLCHAIN_BIN):$(PATH)
-LDFLAGS = -m elf_x86_64 -nostdlib -static -z max-page-size=0x1000 -z noexecstack -T linker.ld -no-pie
+LDFLAGS = -m elf_x86_64 -nostdlib -static -z max-page-size=0x1000 -z noexecstack -T linker.ld -no-pie --gc-sections
 
 SRCFILES = $(filter-out $(EXCLUDE),$(shell find -L src -type f 2>/dev/null | LC_ALL=C sort))
 CFILES = $(filter %.c,$(SRCFILES))

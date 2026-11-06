@@ -99,12 +99,62 @@ static int test_kill_invalid(void) {
     return 0;
 }
 
+static int test_stop_cont(void) {
+    pid_t p = fork();
+    if (p == 0) {
+        for (;;) sched_yield();
+    }
+    ck(kill(p, SIGTSTP), 0);
+    ck(kill(p, SIGCONT), 0);
+    ck(kill(p, SIGTERM), 0);
+    int st = 0;
+    ck(waitpid(p, &st, 0), p);
+    ck_true(WIFSIGNALED(st));
+    ck_true(WTERMSIG(st) == SIGTERM);
+
+    pid_t q = fork();
+    if (q == 0) {
+        for (;;) sched_yield();
+    }
+    ck(kill(q, SIGSTOP), 0);
+    ck(kill(q, SIGCONT), 0);
+    ck(kill(q, SIGKILL), 0);
+    st = 0;
+    ck(waitpid(q, &st, 0), q);
+    ck_true(WIFSIGNALED(st));
+    ck_true(WTERMSIG(st) == SIGKILL);
+    return 0;
+}
+
+static int test_stop_blocked_unblocked(void) {
+    sigset_t set, old;
+    sigemptyset(&set);
+    sigaddset(&set, SIGTSTP);
+    ck(sigprocmask(SIG_BLOCK, &set, &old), 0);
+
+    pid_t p = fork();
+    if (p == 0) {
+        for (;;) sched_yield();
+    }
+    ck(kill(p, SIGTSTP), 0);
+    ck(sigprocmask(SIG_UNBLOCK, &set, 0), 0);
+    ck(kill(p, SIGCONT), 0);
+    ck(kill(p, SIGKILL), 0);
+    int st = 0;
+    ck(waitpid(p, &st, 0), p);
+    ck_true(WIFSIGNALED(st));
+    ck_true(WTERMSIG(st) == SIGKILL);
+    return 0;
+}
+
 int main(void) {
-    for (int i = 0; i < RES_SLOTS; i++) res[i] = RES_PENDING;
+    res_reset_pending(res);
     test_handler_delivery();
     test_mask_blocks();
     test_default_kills();
     test_kill_invalid();
+    test_stop_cont();
+    test_stop_blocked_unblocked();
     res[RES_DONE] = failed ? RES_FAILED : RES_ALLPASS;
     return failed ? 1 : 0;
 }

@@ -23,8 +23,10 @@ void pit_handler(struct isr_frame *frame) {
     pit_ticks++;
     task_tick(pit_ticks);
 
-    if (pit_ticks % TASK_QUANTUM_TICKS != 0 && !task_current_blocked()) return;
     if (preempt_count() != 0) return;
+
+    bool resched = task_take_resched();
+    if (pit_ticks % TASK_QUANTUM_TICKS != 0 && !task_current_blocked() && !resched) return;
 
     task_schedule(frame);
 }
@@ -61,6 +63,10 @@ void pit_sleep(uint64_t ms) {
 
 uint64_t pit_ms_to_ticks(uint64_t ms) {
     return (ms * pit_frequency_hz + 999) / 1000;
+}
+
+uint64_t pit_ticks_to_ms(uint64_t ticks) {
+    return (ticks * 1000) / pit_frequency_hz;
 }
 
 uint64_t pit_get_ticks(void) {

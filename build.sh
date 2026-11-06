@@ -38,7 +38,7 @@ if [ ! -f fat16.img ]; then
     exit 1
 fi
 
-PROGRAMS="hello fdtest mmtest forktest pipetest fstest fd2test evtest fbtest devtest systest"
+PROGRAMS="hello fdtest mmtest forktest pipetest fstest fd2test evtest fbtest devtest systest asynctest"
 if [ -f src/user/bin/mhello ]; then
     PROGRAMS="$PROGRAMS mhello"
 fi

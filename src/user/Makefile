@@ -11,7 +11,7 @@ USER_LDFLAGS = -nostdlib -static-pie -pie -z noexecstack -T user.ld
 BINS = bin/hello bin/fdtest bin/mmtest bin/forktest bin/pipetest bin/fstest bin/fd2test bin/evtest bin/fbtest bin/devtest
 
 ifneq ($(NYONOS_MLIBC_CC),)
-BINS += bin/mhello bin/sdtest bin/thrtest bin/clktest bin/proctest bin/featest bin/mandel bin/exectest bin/fdprobe bin/sigtest bin/systest
+BINS += bin/mhello bin/sdtest bin/thrtest bin/clktest bin/proctest bin/featest bin/mandel bin/exectest bin/fdprobe bin/sigtest bin/systest bin/asynctest
 endif
 
 -include $(BINS:=.o)
@@ -51,6 +51,10 @@ bin/sigtest: sigtest.c $(MLIBC_LD) $(MLIBC_LIBC)
 	$(MLIBC_CC) -static -T$(MLIBC_LD) -z max-page-size=0x1000 -I$(CURDIR)/../abi -s $< -o $@
 
 bin/systest: systest.c $(MLIBC_LD) $(MLIBC_LIBC)
+	mkdir -p "$(dir $@)"
+	$(MLIBC_CC) -static -T$(MLIBC_LD) -z max-page-size=0x1000 -I$(CURDIR)/../abi -s $< -o $@
+
+bin/asynctest: asynctest.c $(MLIBC_LD) $(MLIBC_LIBC)
 	mkdir -p "$(dir $@)"
 	$(MLIBC_CC) -static -T$(MLIBC_LD) -z max-page-size=0x1000 -I$(CURDIR)/../abi -s $< -o $@
 

@@ -1,11 +1,18 @@
+#include <string.h>
 #include "vmm.h"
 #include "kernel/kprintf/kprintf.h"
 #include "kernel/mm/pmm/pmm.h"
 #include "arch/x86_64/cpu/cpu.h"
+#include "arch/x86_64/lapic/lapic.h"
 #include "drivers/serial/serial.h"
 #include "kernel/sync/sync.h"
 
 static spinlock_t vmm_lock = SPINLOCK_INIT;
+
+static void vmm_tlb_shootdown(void) {
+    if (cpu_online_count() > 1)
+        lapic_ipi_broadcast(cpu_self()->lapic_base, LAPIC_SHOOTDOWN_VECTOR);
+}
 
 struct page_table *kernel_pml4 = NULL;
 bool vmm_5level = false;
@@ -35,13 +42,12 @@ static bool cpu_has_5level(void) {
 
 #define VMM_PT_ENTRIES 512
 #define VMM_PT_INDEX_MASK 0x1FF
-#define VMM_PT_ADDR_MASK 0x000FFFFFFFFFF000ULL
 
 static struct page_table *alloc_page_table(void) {
     paddr_t phys;
     if (!pmm_alloc(&phys, 1)) return NULL;
     struct page_table *pt = (struct page_table *)(vmm_hhdm_offset + phys);
-    for (size_t i = 0; i < VMM_PT_ENTRIES; i++) pt->entries[i] = 0;
+    memset(pt->entries, 0, sizeof(pt->entries));
     return pt;
 }
 
@@ -129,7 +135,7 @@ void vmm_init(uint64_t hhdm_offset) {
     vmm_5level = cpu_supports_la57 && paging_is_5level;
 
     uint64_t cr3 = read_cr3();
-    kernel_pml4 = (struct page_table *)(vmm_hhdm_offset + (cr3 & 0x000FFFFFFFFFF000ULL));
+    kernel_pml4 = (struct page_table *)(vmm_hhdm_offset + (cr3 & VMM_PT_ADDR_MASK));
 
     kprintf(PRINT_SERIAL, "VMM: Initialized, ");
     kprintf(PRINT_SERIAL, "%s", vmm_5level ? "5-level paging\n" : "4-level paging\n");
@@ -371,6 +377,7 @@ bool vmm_user_page_exec(struct page_table *root, vaddr_t vaddr) {
     *entry &= ~(uint64_t)PAGE_NX;
     invlpg(vaddr);
     lock_release(LOCK_VMM, &vmm_lock);
+    vmm_tlb_shootdown();
     return true;
 }
 
@@ -394,7 +401,7 @@ bool vmm_cow_resolve(struct page_table *root, vaddr_t vaddr) {
 
     const uint8_t *src = (const uint8_t *)(vmm_hhdm_offset + old);
     uint8_t *dst = (uint8_t *)(vmm_hhdm_offset + np);
-    for (size_t i = 0; i < PAGE_SIZE; i++) dst[i] = src[i];
+    memcpy(dst, src, PAGE_SIZE);
 
     if (*entry & PAGE_SHAREDREF) {
         if (pmm_unshare_ref(old)) pmm_free(old, 1);
@@ -408,6 +415,7 @@ bool vmm_cow_resolve(struct page_table *root, vaddr_t vaddr) {
     *entry = nf | np;
     invlpg(vaddr);
     lock_release(LOCK_VMM, &vmm_lock);
+    vmm_tlb_shootdown();
     return true;
 }
 
@@ -491,6 +499,7 @@ bool vmm_unmap_keep(struct page_table *root, vaddr_t vaddr, size_t pages) {
     reclaim_range(root, vaddr, pages, levels);
 
     lock_release(LOCK_VMM, &vmm_lock);
+    vmm_tlb_shootdown();
     return true;
 }
 
@@ -545,6 +554,7 @@ bool vmm_protect(struct page_table *root, vaddr_t addr, size_t pages, uint8_t pr
     for (size_t i = 0; i < pages; i++)
         invlpg(addr + i * PAGE_SIZE);
 
+    vmm_tlb_shootdown();
     return true;
 }
 
@@ -619,6 +629,7 @@ bool vmm_unmap_from(struct page_table *root, vaddr_t vaddr, size_t pages) {
 
 void vmm_switch_address_space(struct page_table *pml4) {
     uint64_t cr3 = (uint64_t)pml4 - vmm_hhdm_offset;
+    if ((read_cr3() & VMM_PT_ADDR_MASK) == cr3) return;
     __asm__ volatile("mov %0, %%cr3" :: "r"(cr3) : "memory");
     cpu_flush_pcid();
 }

@@ -1,4 +1,6 @@
+#include <string.h>
 #include "heap.h"
+#include "kernel/mm/vmm/vmm_va.h"
 #include "kernel/kprintf/kprintf.h"
 #include "kernel/mm/vmm/vmm.h"
 #include "kernel/mm/pmm/pmm.h"
@@ -28,6 +30,8 @@ struct block_header {
     uint32_t seg;
     struct block_header *next;
     struct block_header *prev;
+    struct block_header *fnext;
+    struct block_header *fprev;
 };
 
 struct heap_segment {
@@ -40,12 +44,39 @@ static struct block_header *heap_head = NULL;
 static struct block_header *heap_tail_block = NULL;
 static struct heap_segment segments[HEAP_MAX_SEGMENTS];
 static size_t segment_count = 0;
-static uint64_t heap_committed = 0;
 static uint64_t heap_max_bytes = 0;
+static struct vmm_va heap_va;
 
-static void coalesce(struct block_header *b) {
+#define HEAP_BINS 64
+static struct block_header *heap_bins[HEAP_BINS];
+
+static unsigned bin_for(size_t size) {
+    if (size < 16) size = 16;
+    unsigned b = (unsigned)(63 - __builtin_clzll((unsigned long long)size));
+    return b < HEAP_BINS ? b : HEAP_BINS - 1;
+}
+
+static void bin_insert(struct block_header *b) {
+    unsigned i = bin_for(b->size);
+    b->fprev = NULL;
+    b->fnext = heap_bins[i];
+    if (b->fnext) b->fnext->fprev = b;
+    heap_bins[i] = b;
+}
+
+static void bin_remove(struct block_header *b) {
+    unsigned i = bin_for(b->size);
+    if (b->fprev) b->fprev->fnext = b->fnext;
+    else if (heap_bins[i] == b) heap_bins[i] = b->fnext;
+    if (b->fnext) b->fnext->fprev = b->fprev;
+    b->fnext = NULL;
+    b->fprev = NULL;
+}
+
+static struct block_header *coalesce(struct block_header *b) {
     while (b->next && b->next->free && b->next->seg == b->seg) {
         struct block_header *n = b->next;
+        bin_remove(n);
         b->size += sizeof(struct block_header) + n->size;
         b->next = n->next;
         if (b->next) b->next->prev = b;
@@ -53,12 +84,14 @@ static void coalesce(struct block_header *b) {
     }
     while (b->prev && b->prev->free && b->prev->seg == b->seg) {
         struct block_header *p = b->prev;
+        bin_remove(p);
         p->size += sizeof(struct block_header) + b->size;
         p->next = b->next;
         if (b->next) b->next->prev = p;
         if (b == heap_tail_block) heap_tail_block = p;
         b = p;
     }
+    return b;
 }
 
 static void heap_trim(void) {
@@ -76,6 +109,8 @@ static void heap_trim(void) {
         if (bstart != (uint8_t *)seg->vaddr) return;
         if (tail->seg != (uint32_t)(segment_count - 1)) return;
 
+        bin_remove(tail);
+
         if (tail->prev) {
             tail->prev->next = NULL;
             heap_tail_block = tail->prev;
@@ -87,7 +122,7 @@ static void heap_trim(void) {
         vmm_unmap(seg->vaddr, seg->pages);
         pmm_free(seg->phys, seg->pages);
 
-        heap_committed -= seg->pages * PAGE_SIZE;
+        vmm_va_free(&heap_va, seg->vaddr, seg->pages);
         segment_count--;
     }
 }
@@ -103,15 +138,20 @@ static bool heap_grow(size_t min_extra) {
     size_t pages = chunk / PAGE_SIZE;
     if (pages == 0) return false;
 
-    if (heap_committed + chunk > heap_max_bytes) return false;
     if (segment_count >= HEAP_MAX_SEGMENTS) return false;
 
-    paddr_t phys;
-    if (!pmm_alloc(&phys, pages)) return false;
+    vaddr_t vaddr;
+    if (!vmm_va_alloc(&heap_va, pages, &vaddr)) return false;
 
-    vaddr_t vaddr = HEAP_VIRT_BASE + heap_committed;
+    paddr_t phys;
+    if (!pmm_alloc(&phys, pages)) {
+        vmm_va_free(&heap_va, vaddr, pages);
+        return false;
+    }
+
     if (!vmm_map(vaddr, phys, pages, VMM_DEFAULT_FLAGS)) {
         pmm_free(phys, pages);
+        vmm_va_free(&heap_va, vaddr, pages);
         return false;
     }
 
@@ -137,7 +177,8 @@ static bool heap_grow(size_t min_extra) {
     }
     heap_tail_block = new_block;
 
-    heap_committed += chunk;
+    bin_insert(new_block);
+
     return true;
 }
 
@@ -145,10 +186,12 @@ void heap_init(void) {
     heap_head = NULL;
     heap_tail_block = NULL;
     segment_count = 0;
-    heap_committed = 0;
+    memset(heap_bins, 0, sizeof heap_bins);
 
     uint64_t total_bytes = (uint64_t)pmm_total_pages() * PAGE_SIZE;
     heap_max_bytes = (total_bytes * HEAP_MAX_PERCENT) / 100;
+
+    vmm_va_init(&heap_va, HEAP_VIRT_BASE, heap_max_bytes / PAGE_SIZE);
 
     if (!heap_grow(PAGE_SIZE * 4)) {
         kprintf(PRINT_SERIAL, "Heap: initial grow failed!\n");
@@ -174,31 +217,25 @@ static void split_block(struct block_header *b, size_t size) {
     b->next = new_block;
     b->size = size;
     if (b == heap_tail_block) heap_tail_block = new_block;
+
+    bin_insert(new_block);
 }
 
 static void *kmalloc_locked(size_t size) {
-    struct block_header *b = heap_head;
-    while (b) {
-        if (b->free && b->size >= size) {
+    unsigned start = 0;
+    for (size_t v = size - 1; v; v >>= 1) start++;
+
+    for (;;) {
+        for (unsigned i = start; i < HEAP_BINS; i++) {
+            struct block_header *b = heap_bins[i];
+            if (!b) continue;
+            bin_remove(b);
             split_block(b, size);
             b->free = false;
             return (void *)(b + 1);
         }
-        b = b->next;
+        if (!heap_grow(size + sizeof(struct block_header))) return NULL;
     }
-
-    if (!heap_grow(size + sizeof(struct block_header))) return NULL;
-
-    b = heap_head;
-    while (b) {
-        if (b->free && b->size >= size) {
-            split_block(b, size);
-            b->free = false;
-            return (void *)(b + 1);
-        }
-        b = b->next;
-    }
-    return NULL;
 }
 
 void *kmalloc(size_t size) {
@@ -214,15 +251,23 @@ void *kmalloc(size_t size) {
     return result;
 }
 
+static bool heap_contains(vaddr_t addr) {
+    for (size_t i = 0; i < segment_count; i++) {
+        vaddr_t s = segments[i].vaddr;
+        vaddr_t e = s + segments[i].pages * PAGE_SIZE;
+        if (addr >= s && addr < e) return true;
+    }
+    return false;
+}
+
 static kfree_result_t kfree_locked(void *ptr) {
     uint64_t addr = (uint64_t)ptr;
 
-    if (addr < HEAP_VIRT_BASE + sizeof(struct block_header) ||
-        addr >= HEAP_VIRT_BASE + heap_committed) {
-        return KFREE_OUTSIDE;
-    }
+    if (addr < sizeof(struct block_header)) return KFREE_OUTSIDE;
+    vaddr_t hdr = (vaddr_t)(addr - sizeof(struct block_header));
+    if (!heap_contains(hdr)) return KFREE_OUTSIDE;
 
-    struct block_header *b = (struct block_header *)ptr - 1;
+    struct block_header *b = (struct block_header *)hdr;
     if (b->magic != HEAP_MAGIC) {
         return KFREE_NOT_BOUNDARY;
     }
@@ -231,7 +276,8 @@ static kfree_result_t kfree_locked(void *ptr) {
     }
 
     b->free = true;
-    coalesce(b);
+    b = coalesce(b);
+    bin_insert(b);
     heap_trim();
     return KFREE_OK;
 }
@@ -260,8 +306,7 @@ static size_t kalloc_size_locked(void *ptr) {
 void *kzalloc(size_t size) {
     void *p = kmalloc(size);
     if (!p) return NULL;
-    uint8_t *b = (uint8_t *)p;
-    for (size_t i = 0; i < size; i++) b[i] = 0;
+    memset(p, 0, size);
     return p;
 }
 
@@ -293,9 +338,7 @@ void *krealloc(void *ptr, size_t size) {
         lock_release(LOCK_HEAP, &heap_lock);
         return NULL;
     }
-    uint8_t *src = (uint8_t *)ptr;
-    uint8_t *dst = (uint8_t *)np;
-    for (size_t i = 0; i < old; i++) dst[i] = src[i];
+    memcpy(np, ptr, old);
     kfree_locked(ptr);
     lock_release(LOCK_HEAP, &heap_lock);
     return np;

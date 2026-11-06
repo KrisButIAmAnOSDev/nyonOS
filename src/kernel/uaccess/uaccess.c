@@ -1,3 +1,4 @@
+#include <string.h>
 #include "uaccess.h"
 #include "kernel/kprintf/kprintf.h"
 #include "kernel/mm/vmm/vmm.h"
@@ -95,8 +96,8 @@ bool copyinstr(char *dst, const char *src, size_t max) {
     struct task *t = ring3_task();
 
     if (!t) {
-        size_t i = 0;
-        while (i < max && src[i]) { dst[i] = src[i]; i++; }
+        size_t i = strnlen(src, max);
+        memcpy(dst, src, i);
         dst[i] = 0;
         return true;
     }

@@ -20,4 +20,8 @@
 #define RES_ALLPASS 1
 #define RES_FAILED  2
 
+static inline void res_reset_pending(volatile ulong *r) {
+    for (int i = 0; i < RES_SLOTS; i++) r[i] = RES_PENDING;
+}
+
 #endif

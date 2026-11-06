@@ -36,6 +36,7 @@ static ulong abi_got[8];
 struct abi_area {
     struct sys_stat st;
     char path[16];
+    char pad[512];
 };
 static struct abi_area abi_area;
 
@@ -66,7 +67,7 @@ static slong abi_probe(int use_int80) {
         "1:\n\tsyscall\n"
         "2:\n\ttest %%rax, %%rax\n\tjne 3f\n\t"
 
-        "mov $11, %%eax\n\tmov %[a], %%rsi\n\tlea 56(%[a]), %%rdi\n\t"
+        "mov $11, %%eax\n\tmov %[a], %%rsi\n\tlea %c[poff](%[a]), %%rdi\n\t"
         "test %[mode], %[mode]\n\tjz 4f\n\t"
         ".byte 0xcd, 0x80\n\tjmp 5f\n"
         "4:\n\tsyscall\n"
@@ -86,7 +87,7 @@ static slong abi_probe(int use_int80) {
           [g2] "=&m"(abi_got[2]), [g3] "=&m"(abi_got[3]), [g4] "=&m"(abi_got[4]),
           [g5] "=&m"(abi_got[5]), [g6] "=&m"(abi_got[6]), [g7] "=&m"(abi_got[7])
         : [mode] "r"((ulong)use_int80), [w] "r"((ulong)abi_want),
-          [a] "r"((ulong)&abi_area)
+          [a] "r"((ulong)&abi_area), [poff] "i"(__builtin_offsetof(struct abi_area, path))
         : "rax", "rbx", "rdi", "rsi", "r10", "r11", "r12", "r13", "r14", "r15",
           "rcx", "memory");
 
@@ -121,7 +122,7 @@ int main(void) {
     struct sys_stat st;
     struct sys_dirent dent;
 
-    for (int i = 0; i < RES_SLOTS; i++) res[i] = RES_PENDING;
+    res_reset_pending(res);
 
     slong f = sys_open("/TEST.TXT", O_RDONLY);
     ck(f >= 0, 1);

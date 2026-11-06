@@ -1,3 +1,4 @@
+#include <string.h>
 #include "gdt.h"
 #include "tss.h"
 #include "drivers/serial/serial.h"
@@ -95,7 +96,7 @@ void gdt_init(uint64_t hhdm_offset, uint32_t id) {
 
     uint8_t *g = gdt[id];
 
-    for (size_t i = 0; i < GDT_ENTRIES * 8; i++) g[i] = 0;
+    memset(g, 0, GDT_ENTRIES * 8);
 
     gdt_encode(&g[0x08], 0, 0x000FFFFF, 0x9B, 0xA);
     gdt_encode(&g[0x10], 0, 0x000FFFFF, 0x93, 0xC);
@@ -103,7 +104,7 @@ void gdt_init(uint64_t hhdm_offset, uint32_t id) {
     gdt_encode(&g[0x20], 0, 0x000FFFFF, 0xFB, 0xA);
     gdt_encode_tss(&g[0x28], tss_addr(id), sizeof(struct tss) - 1);
 
-    for (size_t i = 0; i < 16; i++) gdt_tss_desc[id][i] = g[0x28 + i];
+    memcpy(gdt_tss_desc[id], g + 0x28, 16);
 
     struct gdt_pointer gdtr = {
         .limit = GDT_ENTRIES * 8 - 1,

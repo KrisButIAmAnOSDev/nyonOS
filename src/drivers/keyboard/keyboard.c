@@ -280,6 +280,11 @@ bool keyboard_try_pop(char *out) {
     return false;
 }
 
+void keyboard_flush_input(void) {
+    size_t head = __atomic_load_n(&buffer_head, __ATOMIC_ACQUIRE);
+    __atomic_store_n(&buffer_tail, head, __ATOMIC_RELEASE);
+}
+
 bool keyboard_inject_char(char c) {
     uint64_t rflags;
     __asm__ volatile("pushfq; pop %0; cli" : "=r"(rflags) :: "memory");

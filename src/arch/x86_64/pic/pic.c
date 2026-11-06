@@ -40,20 +40,7 @@ void pic_remap(uint8_t offset1, uint8_t offset2) {
     outb(PIC1_DATA, 0xFF);
     outb(PIC2_DATA, 0xFF);
 
-    kprintf(PRINT_SERIAL, "PIC remapped to ");
-    char buf[4];
-    buf[0] = '0' + (offset1 / 100);
-    buf[1] = '0' + ((offset1 / 10) % 10);
-    buf[2] = '0' + (offset1 % 10);
-    buf[3] = 0;
-    kprintf(PRINT_SERIAL, "%s", buf);
-    kprintf(PRINT_SERIAL, "-");
-    buf[0] = '0' + (offset2 / 100);
-    buf[1] = '0' + ((offset2 / 10) % 10);
-    buf[2] = '0' + (offset2 % 10);
-    buf[3] = 0;
-    kprintf(PRINT_SERIAL, "%s", buf);
-    kprintf(PRINT_SERIAL, "\n");
+    kprintf(PRINT_SERIAL, "PIC remapped to %u-%u\n", (unsigned)offset1, (unsigned)offset2);
 }
 
 void pic_send_eoi(uint8_t irq) {

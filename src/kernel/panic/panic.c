@@ -1,3 +1,4 @@
+#include <string.h>
 #include "kernel/panic/panic.h"
 #include "kernel/multitask/task.h"
 #include "kernel/mm/vmm/vmm.h"
@@ -160,16 +161,8 @@ void panic_dump_regs(struct panic_context* ctx) {
         } else {
             exc_name = "Unexpected interrupt";
         }
-        char num[4];
-        num[0] = '0' + (f->interrupt_number / 100);
-        num[1] = '0' + ((f->interrupt_number / 10) % 10);
-        num[2] = '0' + (f->interrupt_number % 10);
-        num[3] = 0;
-        kprintf(PRINT_BOTH, "Exception: ");
-        kprintf(PRINT_BOTH, "%s", exc_name);
-        kprintf(PRINT_BOTH, " (vector ");
-        kprintf(PRINT_BOTH, "%s", num);
-        kprintf(PRINT_BOTH, ")\n");
+        kprintf(PRINT_BOTH, "Exception: %s (vector %u)\n", exc_name,
+                (unsigned)f->interrupt_number);
     }
 
     __asm__ volatile("mov %%cr0, %0" : "=r"(ctx->cr0));
@@ -248,8 +241,7 @@ static void capture_frame(struct isr_frame* f) {
 
 void panic_assert(const char* msg) {
     struct panic_context ctx;
-    uint8_t* z = (uint8_t*)&ctx;
-    for (size_t i = 0; i < sizeof(ctx); i++) z[i] = 0;
+    memset(&ctx, 0, sizeof(ctx));
 
     capture_frame(&ctx.frame);
     ctx.reason = msg;
@@ -262,8 +254,7 @@ void panic_assert(const char* msg) {
 
 void panic(const char* msg __attribute__((unused)), struct isr_frame* frame) {
     struct panic_context ctx;
-    uint8_t* z = (uint8_t*)&ctx;
-    for (size_t i = 0; i < sizeof(ctx); i++) z[i] = 0;
+    memset(&ctx, 0, sizeof(ctx));
 
     ctx.frame = *frame;
     ctx.reason = NULL;

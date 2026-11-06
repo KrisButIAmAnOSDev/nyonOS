@@ -1,3 +1,4 @@
+#include <string.h>
 #include "ata.h"
 #include "kernel/kprintf/kprintf.h"
 #include "arch/x86_64/pic/pic.h"
@@ -86,36 +87,34 @@ static bool fail(ata_error_t err) {
 }
 
 static void detail(const char *s) {
-    uint32_t i = 0;
-    for (; s[i] && i < sizeof(last_detail) - 1; i++) last_detail[i] = s[i];
-    last_detail[i] = 0;
+    size_t n = strnlen(s, sizeof(last_detail) - 1);
+    memcpy(last_detail, s, n);
+    last_detail[n] = 0;
 }
 
 static void decode_err(uint8_t reg) {
+    static const struct {
+        uint8_t bit;
+        const char *msg;
+    } errs[] = {
+        { ERR_UNC, "uncorrectable data" },
+        { ERR_BBK, "bad block" },
+        { ERR_IDNF, "id not found" },
+        { ERR_MC, "media changed" },
+        { ERR_MCR, "media change requested" },
+        { ERR_ABRT, "command aborted" },
+        { ERR_TK0NF, "track 0 not found" },
+        { ERR_AMNF, "address mark not found" },
+    };
+
+    const char *s = NULL;
+    for (size_t i = 0; i < sizeof(errs) / sizeof(errs[0]); i++) {
+        if (reg & errs[i].bit) { s = errs[i].msg; break; }
+    }
+    if (!s) s = reg ? "unknown" : "none";
+
     char buf[48];
-    uint32_t n = 0;
-    const char *s = "none";
-
-    if (reg & ERR_UNC) s = "uncorrectable data";
-    else if (reg & ERR_BBK) s = "bad block";
-    else if (reg & ERR_IDNF) s = "id not found";
-    else if (reg & ERR_MC) s = "media changed";
-    else if (reg & ERR_MCR) s = "media change requested";
-    else if (reg & ERR_ABRT) s = "command aborted";
-    else if (reg & ERR_TK0NF) s = "track 0 not found";
-    else if (reg & ERR_AMNF) s = "address mark not found";
-    else if (reg) s = "unknown";
-
-    while (*s && n < sizeof(buf) - 8) buf[n++] = *s++;
-
-    uint32_t v = reg;
-    buf[n++] = ' ';
-    buf[n++] = '(';
-    if (v >= 0x10) { buf[n++] = (char)('0' + ((v >> 4) & 0xF)); buf[n++] = (char)('0' + (v & 0xF)); }
-    else { buf[n++] = (char)('0' + v); }
-    buf[n++] = ')';
-    buf[n] = 0;
-
+    snprintf(buf, sizeof buf, "%s (%02X)", s, (unsigned)reg);
     detail(buf);
 }
 

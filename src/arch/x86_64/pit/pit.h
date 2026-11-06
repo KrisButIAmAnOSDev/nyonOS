@@ -14,6 +14,7 @@ void pit_sleep(uint64_t ms);
 uint64_t pit_get_ticks(void);
 uint32_t pit_frequency(void);
 uint64_t pit_ms_to_ticks(uint64_t ms);
+uint64_t pit_ticks_to_ms(uint64_t ticks);
 void pit_handler(struct isr_frame *frame);
 
 #endif

@@ -1,3 +1,4 @@
+#include <string.h>
 #include "elf.h"
 #include "kernel/kprintf/kprintf.h"
 #include "kernel/mm/vmm/vmm.h"
@@ -274,7 +275,7 @@ static int elf_load_core(const fs_node *file, struct elf_image *out, const char 
 
     uint8_t *prot = (uint8_t *)kmalloc(npages);
     if (!prot) { vm_destroy(vs); kfree((void *)ph); if (err) *err = "out of memory"; return ELF_ETOOLARGE; }
-    for (size_t i = 0; i < npages; i++) prot[i] = 0;
+    memset(prot, 0, npages);
 
     for (size_t i = 0; i < phnum; i++) {
         if (ph[i].type != ELF_PT_LOAD || ph[i].memsz == 0) continue;
@@ -318,7 +319,7 @@ static int elf_load_core(const fs_node *file, struct elf_image *out, const char 
 
             if (existing & PAGE_PRESENT) {
                 if (!(existing & PAGE_WRITE)) continue;
-                phys = existing & 0x000FFFFFFFFFF000ULL;
+                phys = existing & VMM_PT_ADDR_MASK;
                 page = (uint8_t *)(vmm_hhdm_offset + phys);
             } else {
                 if (!pmm_alloc(&phys, 1)) {
@@ -327,7 +328,7 @@ static int elf_load_core(const fs_node *file, struct elf_image *out, const char 
                     break;
                 }
                 page = (uint8_t *)(vmm_hhdm_offset + phys);
-                for (size_t k = 0; k < PAGE_SIZE; k++) page[k] = 0;
+                memset(page, 0, PAGE_SIZE);
             }
 
             vaddr_t read_from = va > fstart ? va : fstart;
@@ -422,7 +423,7 @@ static int elf_load_core(const fs_node *file, struct elf_image *out, const char 
                           VM_PROT_READ | VM_PROT_WRITE, VM_BACKING_ANON) == 0 &&
             vm_map_anon_zeroed(vs, rbase, 1, VM_PROT_READ | VM_PROT_WRITE, true)) {
             uint64_t *slot = (uint64_t *)(vmm_hhdm_offset +
-                (vmm_query_in(vs->pml4, rbase) & 0x000FFFFFFFFFF000ULL));
+                (vmm_query_in(vs->pml4, rbase) & VMM_PT_ADDR_MASK));
             slot[0] = crypto_random_u64();
             slot[1] = crypto_random_u64();
             random_addr = rbase;

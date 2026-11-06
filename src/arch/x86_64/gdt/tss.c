@@ -1,3 +1,4 @@
+#include <string.h>
 #include "tss.h"
 #include "kernel/kprintf/kprintf.h"
 #include "drivers/serial/serial.h"
@@ -20,8 +21,7 @@ void tss_init(uint64_t hhdm_offset, uint32_t id) {
 
     struct tss *t = &tss[id];
 
-    uint8_t *raw = (uint8_t *)t;
-    for (size_t i = 0; i < sizeof(*t); i++) raw[i] = 0;
+    memset(t, 0, sizeof(*t));
 
     t->iomap_base = sizeof(struct tss);
 

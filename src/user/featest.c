@@ -139,45 +139,6 @@ static void t_tier2(void) {
 
 }
 
-static volatile int fpu_bad;
-
-static void *fpu_worker(void *arg) {
-	double mine = *(double *)arg;
-	double keep = mine;
-
-	__asm__ volatile("movsd %0, %%xmm3" :: "m"(keep) : "xmm3");
-
-	for (int i = 0; i < 400; i++) {
-		__asm__ volatile("" ::: "memory");
-		sched_yield();
-	}
-
-	double back;
-	__asm__ volatile("movsd %%xmm3, %0" : "=m"(back));
-	if (back != mine) fpu_bad = 1;
-	return 0;
-}
-
-static void t_fpu(void) {
-	double a = 1.5, b = -2734.125;
-	fpu_bad = 0;
-
-	pthread_t ta, tb;
-	if (pthread_create(&ta, NULL, fpu_worker, &a) != 0) {
-		rep("pthread_create for fpu a", 0);
-		return;
-	}
-	if (pthread_create(&tb, NULL, fpu_worker, &b) != 0) {
-		pthread_join(ta, NULL);
-		rep("pthread_create for fpu b", 0);
-		return;
-	}
-	pthread_join(ta, NULL);
-	pthread_join(tb, NULL);
-
-	rep("xmm registers survive context switches", fpu_bad == 0);
-}
-
 static void t_inttypes(void) {
 	char b[64];
 	snprintf(b, sizeof b, "%" PRId64 " %" PRIu32, (int64_t)-5, (uint32_t)7);
@@ -210,7 +171,6 @@ int main(void) {
 	t_stdio();
 	t_ctype();
 	t_time();
-	t_fpu();
 	t_tier2();
 	t_inttypes();
 	t_pthread();

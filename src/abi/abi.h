@@ -4,11 +4,12 @@
 #include <stdint.h>
 #include <stddef.h>
 
-#define ABI_MAX_NAME 32
+#define ABI_MAX_NAME 256
 
 #define ABI_EPERM   (-1)
 #define ABI_ENOENT  (-2)
 #define ABI_ESRCH   (-3)
+#define ABI_EINTR   (-4)
 #define ABI_EIO     (-5)
 #define ABI_EBADF   (-9)
 #define ABI_EAGAIN  (-11)
@@ -39,6 +40,21 @@
 #define ABI_SIG_BLOCK 0
 #define ABI_SIG_UNBLOCK 1
 #define ABI_SIG_SETMASK 2
+
+#define ABI_SIGHUP  1
+#define ABI_SIGINT  2
+#define ABI_SIGQUIT 3
+#define ABI_SIGABRT 6
+#define ABI_SIGKILL 9
+#define ABI_SIGUSR1 10
+#define ABI_SIGSEGV 11
+#define ABI_SIGPIPE 13
+#define ABI_SIGALRM 14
+#define ABI_SIGTERM 15
+#define ABI_SIGCHLD 17
+#define ABI_SIGCONT 18
+#define ABI_SIGSTOP 19
+#define ABI_SIGTSTP 20
 
 struct sys_sigaction {
     uint64_t handler;
@@ -156,6 +172,69 @@ struct sys_winsize {
 #define ABI_POLLERR  0x008
 #define ABI_POLLHUP  0x010
 #define ABI_POLLNVAL 0x020
+
+#define ABI_EPOLLIN     0x001
+#define ABI_EPOLLPRI    0x002
+#define ABI_EPOLLOUT    0x004
+#define ABI_EPOLLERR    0x008
+#define ABI_EPOLLHUP    0x010
+#define ABI_EPOLLRDNORM 0x040
+#define ABI_EPOLLWRNORM 0x100
+#define ABI_EPOLLRDHUP  0x2000
+#define ABI_EPOLLET     (1U << 31)
+#define ABI_EPOLL_CTL_ADD 1
+#define ABI_EPOLL_CTL_DEL 2
+#define ABI_EPOLL_CTL_MOD 3
+#define ABI_EPOLL_CLOEXEC 0x80000
+
+#define ABI_EFD_SEMAPHORE 0x1
+#define ABI_EFD_CLOEXEC   0x80000
+#define ABI_EFD_NONBLOCK  0x800
+
+#define ABI_TFD_NONBLOCK   0x800
+#define ABI_TFD_CLOEXEC    0x80000
+#define ABI_TFD_TIMER_ABSTIME 0x1
+
+#define ABI_SFD_CLOEXEC  0x80000
+#define ABI_SFD_NONBLOCK 0x800
+
+#define ABI_MFD_CLOEXEC      0x1
+#define ABI_MFD_ALLOW_SEALING 0x2
+
+struct sys_epoll_event {
+    uint32_t events;
+    uint64_t data;
+} __attribute__((packed));
+
+struct sys_signalfd_siginfo {
+    uint32_t ssi_signo;
+    int32_t ssi_errno;
+    int32_t ssi_code;
+    uint32_t ssi_pid;
+    uint32_t ssi_uid;
+    int32_t ssi_fd;
+    uint32_t ssi_tid;
+    uint32_t ssi_band;
+    uint32_t ssi_overrun;
+    uint32_t ssi_trapno;
+    int32_t ssi_status;
+    int32_t ssi_int;
+    uint64_t ssi_ptr;
+    uint64_t ssi_utime;
+    uint64_t ssi_stime;
+    uint64_t ssi_addr;
+    uint16_t ssi_addr_lsb;
+    uint16_t __pad2;
+    int32_t ssi_syscall;
+    uint64_t ssi_call_addr;
+    uint32_t ssi_arch;
+    uint8_t __pad[28];
+};
+
+struct sys_itimerspec {
+    struct sys_timespec it_interval;
+    struct sys_timespec it_value;
+};
 
 #define ABI_TCGETATTR 0
 #define ABI_TCSETATTR 1

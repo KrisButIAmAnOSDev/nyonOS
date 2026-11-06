@@ -1,3 +1,4 @@
+#include <string.h>
 #include "crypto.h"
 #include "kernel/kprintf/kprintf.h"
 #include "kernel/sync/preempt.h"
@@ -43,7 +44,7 @@ static void quarter_round(uint32_t *s, int a, int b, int c, int d) {
 
 static void chacha_block(chacha_ctx *c) {
     uint32_t x[CHACHA_WORDS];
-    for (int i = 0; i < CHACHA_WORDS; i++) x[i] = c->state[i];
+    memcpy(x, c->state, sizeof x);
 
     for (int i = 0; i < CHACHA_ROUNDS; i += 2) {
         quarter_round(x, 0, 4, 8, 12);
@@ -167,14 +168,14 @@ static void crypto_seed_cpu(uint32_t id) {
     }
 
     chacha_init(&rng[id], seed, (uint64_t)id + 1);
-    for (size_t i = 0; i < sizeof(pool[id]); i++) ((uint8_t *)pool[id])[i] = 0;
+    memset(pool[id], 0, sizeof(pool[id]));
     chacha_bytes(&rng[id], pool[id], sizeof(pool[id]));
     pool_ready[id] = true;
 }
 
 void crypto_init(void) {
     static uint8_t raw[CRYPTO_GATHER];
-    for (size_t i = 0; i < sizeof(raw); i++) raw[i] = 0;
+    memset(raw, 0, sizeof(raw));
 
     uint8_t seed[CRYPTO_MAX_ENTROPY];
 
@@ -199,7 +200,7 @@ void crypto_init(void) {
         }
     }
 
-    for (size_t i = 0; i < sizeof(crypto_seed_key); i++) crypto_seed_key[i] = seed[i];
+    memcpy(crypto_seed_key, seed, sizeof(crypto_seed_key));
 
     for (uint32_t id = 0; id < MAX_CPUS; id++) crypto_seed_cpu(id);
     seeded_once = true;
@@ -224,7 +225,7 @@ void crypto_random_bytes(void *out, size_t len) {
     uint32_t id = cpu_id();
 
     if (id >= MAX_CPUS || !pool_ready[id]) {
-        for (size_t i = 0; i < len; i++) p[i] = 0;
+        memset(p, 0, len);
         return;
     }
 

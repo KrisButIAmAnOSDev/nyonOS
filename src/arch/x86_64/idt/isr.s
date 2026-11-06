@@ -6,6 +6,7 @@
 .extern smp_resched_handler
 
 .set RESCHED_VECTOR, 0xFD
+.set SHOOTDOWN_VECTOR, 0xFC
 
 .macro ISR_NOERRCODE num
 .global isr_stub_\num
@@ -26,6 +27,12 @@ isr_stub_\num:
 isr_stub_resched:
     push 0
     push RESCHED_VECTOR
+    jmp isr_common
+
+.global isr_stub_shootdown
+isr_stub_shootdown:
+    push 0
+    push SHOOTDOWN_VECTOR
     jmp isr_common
 
 .global isr_common
@@ -50,6 +57,8 @@ isr_common:
     mov rsi, [rsp + 120]
     cmp rsi, RESCHED_VECTOR
     je 3f
+    cmp rsi, SHOOTDOWN_VECTOR
+    je 4f
     cmp rsi, 32
     jl 1f
     cmp rsi, 47
@@ -58,6 +67,9 @@ isr_common:
     jmp 2f
 3:
     call smp_resched_handler
+    jmp 2f
+4:
+    call smp_shootdown_handler
     jmp 2f
 1:
     call exception_handler

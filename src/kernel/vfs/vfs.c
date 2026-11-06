@@ -1,6 +1,9 @@
 #include "kernel/vfs/vfs.h"
 #include "kernel/kprintf/kprintf.h"
 
+#include <string.h>
+#include <strings.h>
+
 #define VFS_MAX_MOUNTS 8
 
 typedef struct {
@@ -15,15 +18,8 @@ static const struct fs_ops *vfs_default_ops;
 
 static bool path_has_prefix(const char *path, const char *prefix, size_t plen) {
     if (!path || !prefix) return false;
-    for (size_t i = 0; i < plen; i++) {
-        char a = path[i], b = prefix[i];
-        if (a >= 'a' && a <= 'z') a = (char)(a - 32);
-        if (b >= 'a' && b <= 'z') b = (char)(b - 32);
-        if (a != b) return false;
-        if (path[i] == 0) return false;
-    }
+    if (strncasecmp(path, prefix, plen) != 0) return false;
     char p = path[plen];
-    if (p >= 'a' && p <= 'z') p = (char)(p - 32);
     return p == 0 || p == '/';
 }
 
@@ -35,12 +31,11 @@ bool vfs_set_default(const struct fs_ops *ops) {
 
 bool vfs_mount(const char *prefix, const struct fs_ops *ops) {
     if (mount_count >= VFS_MAX_MOUNTS || !prefix || !ops) return false;
-    size_t n = 0;
-    while (prefix[n]) n++;
+    size_t n = strlen(prefix);
     while (n > 1 && prefix[n - 1] == '/') n--;
     if (n == 0 || (n == 1 && prefix[0] == '/')) return false;
     if (n >= FS_MAX_NAME) return false;
-    for (size_t i = 0; i < n; i++) mounts[mount_count].prefix[i] = prefix[i];
+    memcpy(mounts[mount_count].prefix, prefix, n);
     mounts[mount_count].prefix[n] = 0;
     mounts[mount_count].plen = n;
     mounts[mount_count].ops = ops;
@@ -93,17 +88,16 @@ bool vfs_iterate(const fs_node_t *dir, uint32_t index, fs_node_t *out) {
         if (m >= mount_count) return false;
         const char *p = mounts[m].prefix;
         while (*p == '/') p++;
-        uint32_t n = 0;
-        while (p[n] && n < FS_MAX_NAME - 1) n++;
+        uint32_t n = (uint32_t)strnlen(p, FS_MAX_NAME - 1);
         if (vfs_default_ops && vfs_default_ops->lookup) {
             char bare[FS_MAX_NAME];
-            for (uint32_t i = 0; i < n; i++) bare[i] = p[i];
+            memcpy(bare, p, n);
             bare[n] = 0;
             fs_node_t probe;
             if (vfs_default_ops->lookup(bare, &probe)) return false;
         }
-        for (uint32_t i = 0; i < FS_MAX_NAME; i++) out->name[i] = 0;
-        for (uint32_t i = 0; i < n; i++) out->name[i] = p[i];
+        memset(out->name, 0, FS_MAX_NAME);
+        memcpy(out->name, p, n);
         out->attr = 0x10;
         out->cluster = 0;
         out->size = 0;

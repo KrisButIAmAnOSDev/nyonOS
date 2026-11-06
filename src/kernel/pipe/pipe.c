@@ -1,6 +1,7 @@
 #include "kernel/pipe/pipe.h"
 #include "kernel/fd/fd.h"
 #include "kernel/mm/heap/heap.h"
+#include "kernel/mm/slab/slab.h"
 #include "kernel/sync/preempt.h"
 #include "kernel/sync/sync.h"
 #include "kernel/multitask/task.h"
@@ -24,6 +25,12 @@ struct pipe_end {
     struct pipe_pair *pair;
     bool is_read;
 };
+
+static struct kmem_cache *pipe_end_cache;
+
+void pipe_cache_init(void) {
+    pipe_end_cache = kmem_cache_create("pipe_end", sizeof(struct pipe_end), 16);
+}
 
 static int64_t pipe_read_at(struct kobject *o, void *ubuf, uint32_t len, uint64_t off) {
     (void)off;
@@ -132,6 +139,10 @@ static int pipe_wait_readable(struct kobject *o) {
     __asm__ volatile("pushfq; pop %0; cli" : "=r"(rflags) :: "memory");
 
     for (;;) {
+        if (task_sig_pending()) {
+            if (rflags & 0x200) __asm__ volatile("sti" ::: "memory");
+            return FD_EINTR;
+        }
         lock_acquire(LOCK_PIPE, &pipe_lock);
         bool ready = p->count > 0 || p->write_ends == 0;
         lock_release(LOCK_PIPE, &pipe_lock);
@@ -151,6 +162,10 @@ static int pipe_wait_writable(struct kobject *o) {
     __asm__ volatile("pushfq; pop %0; cli" : "=r"(rflags) :: "memory");
 
     for (;;) {
+        if (task_sig_pending()) {
+            if (rflags & 0x200) __asm__ volatile("sti" ::: "memory");
+            return FD_EINTR;
+        }
         lock_acquire(LOCK_PIPE, &pipe_lock);
         bool ready = (p->cap - p->count) > 0 || p->read_ends == 0;
         lock_release(LOCK_PIPE, &pipe_lock);
@@ -248,16 +263,18 @@ int pipe_create(struct task *t, int fds[2]) {
     p->write_ends = 1;
     p->refs = 2;
 
-    struct pipe_end *r = kmalloc(sizeof(struct pipe_end));
-    struct pipe_end *w = kmalloc(sizeof(struct pipe_end));
+    struct pipe_end *r = (struct pipe_end *)kmem_cache_alloc(pipe_end_cache);
+    struct pipe_end *w = (struct pipe_end *)kmem_cache_alloc(pipe_end_cache);
     if (!r || !w) {
-        if (r) kfree(r);
-        if (w) kfree(w);
+        if (r) kmem_cache_free(pipe_end_cache, r);
+        if (w) kmem_cache_free(pipe_end_cache, w);
         kfree(p->ring);
         kfree(p);
         return -1;
     }
 
+    r->obj.cache = pipe_end_cache;
+    w->obj.cache = pipe_end_cache;
     r->pair = p;
     r->is_read = true;
     w->pair = p;

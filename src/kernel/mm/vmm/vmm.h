@@ -8,6 +8,7 @@
 
 #define PAGE_SIZE 4096
 #define PAGE_PRESENT    (1ULL << 0)
+#define VMM_PT_ADDR_MASK 0x000FFFFFFFFFF000ULL
 #define PAGE_WRITE      (1ULL << 1)
 #define PAGE_USER       (1ULL << 2)
 #define PAGE_PWT        (1ULL << 3)

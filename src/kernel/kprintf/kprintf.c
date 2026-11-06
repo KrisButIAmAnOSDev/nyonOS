@@ -1,3 +1,4 @@
+#include <string.h>
 #include "kprintf.h"
 #include <stdbool.h>
 #include "drivers/serial/serial.h"
@@ -48,14 +49,10 @@ static void screen_scroll(void) {
     if (!fb || GLYPH_H >= fb_h) return;
 
     uint32_t keep = fb_h - GLYPH_H;
-    for (uint32_t y = 0; y < keep; y++) {
-        for (uint32_t x = 0; x < fb_w; x++) {
-            fb[y * fb_w + x] = fb[(y + GLYPH_H) * fb_w + x];
-        }
-    }
-    for (uint32_t y = keep; y < fb_h; y++) {
-        for (uint32_t x = 0; x < fb_w; x++) fb[y * fb_w + x] = 0;
-    }
+    for (uint32_t y = 0; y < keep; y++)
+        memcpy((void *)&fb[y * fb_w], (const void *)&fb[(y + GLYPH_H) * fb_w], fb_w * sizeof(fb[0]));
+    for (uint32_t y = keep; y < fb_h; y++)
+        memset((void *)&fb[y * fb_w], 0, fb_w * sizeof(fb[0]));
 
     if (cur_y >= fb_h) cur_y = keep;
 }
@@ -263,13 +260,30 @@ void kprintchar(char c, uint32_t attr) {
     screen_char(c);
 }
 
-static void put_unsigned(uint64_t v, unsigned base, bool upper, uint32_t attr, int min_digits, char pad) {
+struct fmt_sink {
+    uint32_t attr;
+    char *buf;
+    size_t cap;
+    size_t len;
+};
+
+static void sink_putc(struct fmt_sink *s, char c) {
+    if (!s->buf) {
+        kprintchar(c, s->attr);
+        return;
+    }
+    if (s->len + 1 < s->cap) s->buf[s->len] = c;
+    s->len++;
+}
+
+static void put_unsigned(struct fmt_sink *s, uint64_t v, unsigned base, bool upper,
+                         int min_digits, char pad) {
     const char *digits = upper ? "0123456789ABCDEF" : "0123456789abcdef";
     char buf[24];
     int i = 0;
 
     if (v == 0) {
-        kprintchar('0', attr);
+        sink_putc(s, '0');
         return;
     }
 
@@ -280,22 +294,22 @@ static void put_unsigned(uint64_t v, unsigned base, bool upper, uint32_t attr, i
 
     while (i < min_digits && i < 24) buf[i++] = pad;
 
-    while (i--) kprintchar(buf[i], attr);
+    while (i--) sink_putc(s, buf[i]);
 }
 
-static void put_signed(int64_t v, uint32_t attr, int min_digits, char pad) {
+static void put_signed(struct fmt_sink *s, int64_t v, int min_digits, char pad) {
     if (v < 0) {
-        kprintchar('-', attr);
-        put_unsigned((uint64_t)(-(v + 1)) + 1, 10, false, attr, min_digits, pad);
+        sink_putc(s, '-');
+        put_unsigned(s, (uint64_t)(-(v + 1)) + 1, 10, false, min_digits, pad);
         return;
     }
-    put_unsigned((uint64_t)v, 10, false, attr, min_digits, pad);
+    put_unsigned(s, (uint64_t)v, 10, false, min_digits, pad);
 }
 
-void kvprintf(uint32_t attr, const char *fmt, va_list args) {
+static void kvformat(struct fmt_sink *s, const char *fmt, va_list args) {
     for (; *fmt; fmt++) {
         if (*fmt != '%') {
-            kprintchar(*fmt, attr);
+            sink_putc(s, *fmt);
             continue;
         }
 
@@ -339,14 +353,14 @@ void kvprintf(uint32_t attr, const char *fmt, va_list args) {
                 int64_t v = (longness >= 2) ? va_arg(args, long long)
                           : (longness == 1) ? (long)va_arg(args, long)
                           : (int)va_arg(args, int);
-                put_signed(v, attr, min_digits, pad);
+                put_signed(s, v, min_digits, pad);
                 break;
             }
             case 'u': {
                 uint64_t v = (longness >= 2) ? va_arg(args, unsigned long long)
                            : (longness == 1) ? (unsigned long)va_arg(args, unsigned long)
                            : (unsigned)va_arg(args, unsigned int);
-                put_unsigned(v, 10, false, attr, min_digits, pad);
+                put_unsigned(s, v, 10, false, min_digits, pad);
                 break;
             }
             case 'x':
@@ -354,37 +368,60 @@ void kvprintf(uint32_t attr, const char *fmt, va_list args) {
                 uint64_t v = (longness >= 2) ? va_arg(args, unsigned long long)
                            : (longness == 1) ? (unsigned long)va_arg(args, unsigned long)
                            : (unsigned)va_arg(args, unsigned int);
-                put_unsigned(v, 16, *fmt == 'X', attr, min_digits, pad);
+                put_unsigned(s, v, 16, *fmt == 'X', min_digits, pad);
                 break;
             }
             case 'p': {
-                kprintchar('0', attr);
-                kprintchar('x', attr);
-                put_unsigned((uint64_t)(uintptr_t)va_arg(args, void *), 16, false, attr, min_digits, pad);
+                sink_putc(s, '0');
+                sink_putc(s, 'x');
+                put_unsigned(s, (uint64_t)(uintptr_t)va_arg(args, void *), 16, false, min_digits, pad);
                 break;
             }
             case 's': {
-                const char *s = va_arg(args, const char *);
-                if (!s) s = "(null)";
+                const char *str = va_arg(args, const char *);
+                if (!str) str = "(null)";
 
                 size_t slen = 0;
-                while (s[slen] && slen < (size_t)prec) slen++;
-                for (size_t i = slen; i < (size_t)width; i++) kprintchar(' ', attr);
-                for (size_t i = 0; i < slen; i++) kprintchar(s[i], attr);
+                while (str[slen] && slen < (size_t)prec) slen++;
+                for (size_t i = slen; i < (size_t)width; i++) sink_putc(s, ' ');
+                for (size_t i = 0; i < slen; i++) sink_putc(s, str[i]);
                 break;
             }
             case 'c':
-                kprintchar((char)va_arg(args, int), attr);
+                sink_putc(s, (char)va_arg(args, int));
                 break;
             case '%':
-                kprintchar('%', attr);
+                sink_putc(s, '%');
                 break;
             default:
-                kprintchar('%', attr);
-                kprintchar(*fmt, attr);
+                sink_putc(s, '%');
+                sink_putc(s, *fmt);
                 break;
         }
     }
+}
+
+void kvprintf(uint32_t attr, const char *fmt, va_list args) {
+    struct fmt_sink s = { .attr = attr, .buf = NULL, .cap = 0, .len = 0 };
+    kvformat(&s, fmt, args);
+}
+
+int vsnprintf(char *buf, size_t size, const char *fmt, va_list args) {
+    struct fmt_sink s = { .attr = 0, .buf = buf, .cap = size, .len = 0 };
+    kvformat(&s, fmt, args);
+    if (size) {
+        size_t n = s.len < size ? s.len : size - 1;
+        buf[n] = 0;
+    }
+    return (int)s.len;
+}
+
+int snprintf(char *buf, size_t size, const char *fmt, ...) {
+    va_list args;
+    va_start(args, fmt);
+    int r = vsnprintf(buf, size, fmt, args);
+    va_end(args);
+    return r;
 }
 
 static volatile uint32_t printing;
