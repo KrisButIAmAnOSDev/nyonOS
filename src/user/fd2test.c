@@ -1,4 +1,5 @@
 #include "res.h"
+#include <string.h>
 
 static volatile ulong *res = (volatile ulong *)RES_VIRT;
 static int idx;
@@ -59,11 +60,11 @@ static void hole_test(void) {
     fd = (int)sys_open(HFILE, O_RDONLY);
     ck_true(fd >= 0);
     if (fd < 0) return;
-    for (int i = 0; i < 8; i++) buf[i] = 0;
+    memset(buf, 0, 8);
     ck(sys_read(fd, buf, 8), 8);
     ck_true(streq(buf, "start123"));
     ck(sys_lseek(fd, 1000, SEEK_SET), 1000);
-    for (int i = 0; i < 8; i++) buf[i] = 0;
+    memset(buf, 0, 8);
     ck(sys_read(fd, buf, 8), 8);
     ck_true(streq(buf, "end45678"));
     ck(sys_lseek(fd, 100, SEEK_SET), 100);
@@ -115,7 +116,7 @@ static void multi_test(void) {
     ck(sys_fstat(fd, &st), 0);
     ck((slong)st.size, total);
     for (int r = 0; r < 5; r++) {
-        for (int i = 0; i < 4096; i++) buf[i] = 0;
+        memset(buf, 0, 4096);
         ck(sys_read(fd, buf, 4096), 4096);
         int badn = 0;
         for (int i = 0; i < 4096; i++) {
@@ -157,7 +158,7 @@ static void dir_test(void) {
     fd = (int)sys_open(DFILE, O_RDONLY);
     ck_true(fd >= 0);
     if (fd >= 0) {
-        for (int i = 0; i < 8; i++) buf[i] = 0;
+        memset(buf, 0, 8);
         ck(sys_read(fd, buf, 6), 6);
         ck_true(streq(buf, "nested"));
         ck(sys_close(fd), 0);
@@ -225,7 +226,7 @@ static void nonblock_test(void) {
     ck_true(fd >= 0);
     if (fd < 0) return;
     ck(sys_fcntl(fd, F_GETFL, 0) & O_NONBLOCK, O_NONBLOCK);
-    for (int i = 0; i < 9; i++) buf[i] = 0;
+    memset(buf, 0, 9);
     ck(sys_read(fd, buf, 8), 8);
     ck_true(streq(buf, "that my "));
     ck(sys_close(fd), 0);

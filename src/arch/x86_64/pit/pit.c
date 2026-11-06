@@ -25,8 +25,7 @@ void pit_handler(struct isr_frame *frame) {
 
     if (preempt_count() != 0) return;
 
-    bool resched = task_take_resched();
-    if (pit_ticks % TASK_QUANTUM_TICKS != 0 && !task_current_blocked() && !resched) return;
+    if (pit_ticks % TASK_QUANTUM_TICKS != 0 && !task_current_blocked()) return;
 
     task_schedule(frame);
 }

@@ -1,4 +1,5 @@
 #include "res.h"
+#include <string.h>
 
 static volatile ulong *res = (volatile ulong *)RES_VIRT;
 static int idx;
@@ -33,7 +34,7 @@ static int streq(const char *a, const char *b) {
 }
 
 static void wipe(char *b, int n) {
-    for (int i = 0; i < n; i++) b[i] = 0;
+    memset(b, 0, n);
 }
 
 int main(int argc, char **argv) {

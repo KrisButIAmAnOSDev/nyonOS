@@ -1,4 +1,5 @@
 #include "kernel/fd/fd.h"
+#include <string.h>
 #include "kernel/kprintf/kprintf.h"
 #include "kernel/panic/panic.h"
 #include "kernel/mm/heap/heap.h"
@@ -23,6 +24,11 @@ void kobject_init(struct kobject *o, uint32_t type, uint32_t max_rights,
     o->max_rights = max_rights;
     o->user_bufs = false;
     o->ops = ops;
+}
+
+void kobject_free(struct kobject *o) {
+    if (!o) return;
+    kfree(o);
 }
 
 bool kobject_valid(const struct kobject *o) {
@@ -1014,7 +1020,7 @@ static const struct kobject_ops fb_ops = {
 static int64_t zero_read_at(struct kobject *o, void *ubuf, uint32_t len, uint64_t off) {
     (void)o; (void)off;
     uint8_t *b = (uint8_t *)ubuf;
-    for (uint32_t i = 0; i < len; i++) b[i] = 0;
+    memset(b, 0, len);
     return (int64_t)len;
 }
 

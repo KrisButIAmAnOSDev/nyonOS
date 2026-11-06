@@ -155,7 +155,7 @@ int epoll_wait(int epfd, void *events, int maxevents, int timeout_ms) {
     struct epoll *ep = (struct epoll *)epo;
 
     uint64_t deadline = 0;
-    if (timeout_ms > 0) deadline = pit_get_ticks() + (uint64_t)timeout_ms;
+    if (timeout_ms > 0) deadline = pit_get_ticks() + pit_ms_to_ticks((uint64_t)timeout_ms);
 
     for (;;) {
         int ready = 0;

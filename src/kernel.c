@@ -1,4 +1,5 @@
 #include <stdint.h>
+#include <string.h>
 #include <stddef.h>
 #include <stdbool.h>
 #include "boot/limine/limine.h"
@@ -16,6 +17,7 @@
 #include "kernel/crypto/crypto.h"
 #include "kernel/exec/elf.h"
 #include "kernel/mm/vmm/vmspace.h"
+#include "kernel/pipe/pipe.h"
 #include "kernel/mm/pmm/pmm.h"
 #include "kernel/mm/heap/heap.h"
 #include "kernel/sync/sync.h"
@@ -89,7 +91,7 @@ static void validate_spawn(vaddr_t entry_rip, size_t code_bytes, size_t code_pag
     }
 
     volatile uint8_t *dst = (volatile uint8_t *)(vmm_hhdm_offset + code_phys);
-    for (size_t i = 0; i < code_bytes; i++) dst[i] = user_test_entry[i];
+    memcpy(dst, user_test_entry, code_bytes);
 
     volatile uint64_t *res = (volatile uint64_t *)(vmm_hhdm_offset + results_phys);
     for (int i = 0; i < 10; i++) res[i] = 0xdeadbeefdeadbeefULL;
@@ -253,7 +255,7 @@ static void task_aqua(void) {
     for (int round = 0; round < 4; round++) {
         char *p = kmalloc(64);
         if (!p) { kprintf(PRINT_SERIAL, "[aqua] kmalloc failed\n"); task_exit(); }
-        for (int i = 0; i < 64; i++) p[i] = (char)0xA5;
+        memset(p, 0xA5, 64);
         busy_wait_ms(60);
         for (int i = 0; i < 64; i++) {
             if (p[i] != (char)0xA5) { kprintf(PRINT_SERIAL, "[aqua] DATA CORRUPTED\n"); }
@@ -270,7 +272,7 @@ static void task_seth(void) {
     for (int round = 0; round < 4; round++) {
         char *p = kmalloc(64);
         if (!p) { kprintf(PRINT_SERIAL, "[seth] kmalloc failed\n"); task_exit(); }
-        for (int i = 0; i < 64; i++) p[i] = (char)0x5A;
+        memset(p, 0x5A, 64);
         busy_wait_ms(60);
         for (int i = 0; i < 64; i++) {
             if (p[i] != (char)0x5A) { kprintf(PRINT_SERIAL, "[seth] DATA CORRUPTED\n"); }
@@ -414,6 +416,8 @@ void kmain(void) {
     kprintf(PRINT_SERIAL, "nyonOS: init done\n");
 
     heap_init();
+    pipe_cache_init();
+    vm_cache_init();
 
     if (!ata_init()) kprintf(PRINT_SERIAL, "ATA: no drive found\n");
 
@@ -455,7 +459,7 @@ void kmain(void) {
             if (!pmm_alloc(&uphys, code_pages)) break;
 
             volatile uint8_t *dst = (volatile uint8_t *)(vmm_hhdm_offset + uphys);
-            for (size_t k = 0; k < code_bytes; k++) dst[k] = user_test_entry[k];
+            memcpy(dst, user_test_entry, code_bytes);
 
             if (!task_spawn_ring3("ring3", uphys, code_pages, TASK_USER_CODE_VIRT, TASK_USER_CODE_VIRT, 0, 0)) {
                 pmm_free(uphys, code_pages);
@@ -472,7 +476,7 @@ void kmain(void) {
             paddr_t uphys;
             if (pmm_alloc(&uphys, code_pages)) {
                 volatile uint8_t *dst = (volatile uint8_t *)(vmm_hhdm_offset + uphys);
-                for (size_t k = 0; k < code_bytes; k++) dst[k] = user_test_entry[k];
+                memcpy(dst, user_test_entry, code_bytes);
                 struct task *ft = task_spawn_ring3("ring3fault", uphys, code_pages, TASK_USER_CODE_VIRT, fault_rip, 0, 0);
                 if (!ft) {
                     pmm_free(uphys, code_pages);

@@ -1,4 +1,5 @@
 #include "test.h"
+#include <string.h>
 
 #include "kernel/kprintf/kprintf.h"
 #include "kernel/fd/fd.h"
@@ -200,9 +201,32 @@ void fs_test(void) {
     kprintchar(dir_read_refused ? 'Y' : 'N', PRINT_SERIAL);
     kprintchar('\n', PRINT_SERIAL);
 
+        const char *lfn_name = "this_is_a_very_long_file_name_that_exercises_fat_lfn_support_0123456789.txt";
+    char lfn_path[FS_MAX_NAME + 2];
+    snprintf(lfn_path, sizeof lfn_path, "/%s", lfn_name);
+    fs_node_t lfn_node;
+    int lfn_create = fs_create(lfn_path, &lfn_node);
+    const char *lfn_payload = "long name payload";
+    int lfn_write = (lfn_create == 0)
+        ? fs_node_write(&lfn_node, 0, lfn_payload, (uint32_t)strlen(lfn_payload))
+        : ABI_EIO;
+    fs_node_t lfn_found;
+    bool lfn_lookup = lfn_write >= 0 && fs_lookup(lfn_path, &lfn_found) &&
+                      strcmp(lfn_found.name, lfn_name) == 0;
+    char lfn_read_buf[32];
+    uint32_t lfn_read = lfn_lookup ? fs_node_read_all(&lfn_found, lfn_read_buf, sizeof lfn_read_buf) : 0;
+    bool lfn_content = lfn_read == strlen(lfn_payload) &&
+                       memcmp(lfn_read_buf, lfn_payload, lfn_read) == 0;
+    bool lfn_unlink = lfn_create == 0 && fs_unlink(lfn_path) == 0 && !fs_lookup(lfn_path, &lfn_found);
+    bool lfn_ok = lfn_create == 0 && lfn_write == (int)strlen(lfn_payload) &&
+                  lfn_lookup && lfn_content && lfn_unlink;
+    kprintf(PRINT_SERIAL, "  LFN create/write/lookup/read/unlink: ");
+    kprintchar(lfn_ok ? 'Y' : 'N', PRINT_SERIAL);
+    kprintf(PRINT_SERIAL, " (create=%d write=%d lookup=%d content=%d unlink=%d)\n",
+            lfn_create, lfn_write, lfn_lookup ? 1 : 0, lfn_content ? 1 : 0, lfn_unlink ? 1 : 0);
     kprintf(PRINT_SERIAL, "FS test: usable: ");
     kprintchar((fixtures && size_ok && content_ok && edge_ok && p2 && oob && missing &&
-                got_sub && sub_count == 1 && inner_ok && bad_path && dir_read_refused) ? 'Y' : 'N', PRINT_SERIAL);
+                got_sub && sub_count == 1 && inner_ok && bad_path && dir_read_refused && lfn_ok) ? 'Y' : 'N', PRINT_SERIAL);
     kprintchar('\n', PRINT_SERIAL);
 }
 
@@ -220,7 +244,7 @@ static volatile uint64_t *tty_peer(const char *name, vaddr_t rip, size_t code_by
     if (!pmm_alloc(&results_phys, 1)) { pmm_free(code_phys, code_pages); return NULL; }
 
     volatile uint8_t *dst = (volatile uint8_t *)(vmm_hhdm_offset + code_phys);
-    for (size_t i = 0; i < code_bytes; i++) dst[i] = user_test_entry[i];
+    memcpy(dst, user_test_entry, code_bytes);
 
     volatile uint64_t *res = (volatile uint64_t *)(vmm_hhdm_offset + results_phys);
     for (int i = 0; i < 64; i++) res[i] = TTY_UNSET;
@@ -1851,55 +1875,55 @@ void elf_reject_test(int *bad) {
         fsize = node.size;
     }
 
-    for (size_t i = 0; i < sizeof(good); i++) good[i] = real[i];
+    memcpy(good, real, sizeof(good));
 
     elf_bad_test("a valid binary is accepted", good, 512, fsize, 0, bad);
 
     uint8_t t[512];
-    for (size_t i = 0; i < sizeof(t); i++) t[i] = good[i];
+    memcpy(t, good, sizeof(t));
 
     t[1] = 'X';
     elf_bad_test("bad magic rejected", t, 512, fsize, ELF_EBADMAGIC, bad);
 
-    for (size_t i = 0; i < sizeof(t); i++) t[i] = good[i];
+    memcpy(t, good, sizeof(t));
     t[4] = 1;
     elf_bad_test("32-bit class rejected", t, 512, fsize, ELF_EBADCLASS, bad);
 
-    for (size_t i = 0; i < sizeof(t); i++) t[i] = good[i];
+    memcpy(t, good, sizeof(t));
     t[5] = 2;
     elf_bad_test("big endian rejected", t, 512, fsize, ELF_EBADDATA, bad);
 
-    for (size_t i = 0; i < sizeof(t); i++) t[i] = good[i];
+    memcpy(t, good, sizeof(t));
     t[18] = 3; t[19] = 0;
     elf_bad_test("wrong machine rejected", t, 512, fsize, ELF_EBADMACHINE, bad);
 
-    for (size_t i = 0; i < sizeof(t); i++) t[i] = good[i];
+    memcpy(t, good, sizeof(t));
     t[16] = 1;
     elf_bad_test("relocatable object rejected", t, 512, fsize, ELF_EBADTYPE, bad);
 
-    for (size_t i = 0; i < sizeof(t); i++) t[i] = good[i];
+    memcpy(t, good, sizeof(t));
     t[56] = 0; t[57] = 0;
     elf_bad_test("zero program headers rejected", t, 512, fsize, ELF_EPHNUM, bad);
 
-    for (size_t i = 0; i < sizeof(t); i++) t[i] = good[i];
+    memcpy(t, good, sizeof(t));
     t[56] = 200; t[57] = 0;
     elf_bad_test("absurd program header count rejected", t, 512, fsize, ELF_EPHNUM, bad);
 
-    for (size_t i = 0; i < sizeof(t); i++) t[i] = good[i];
+    memcpy(t, good, sizeof(t));
     for (int k = 0; k < 8; k++) t[32 + k] = (uint8_t)((fsize >> (8 * k)) & 0xff);
     elf_bad_test("program headers past end of file rejected", t, 512, fsize, ELF_EOFFSET, bad);
 
-    for (size_t i = 0; i < sizeof(t); i++) t[i] = good[i];
+    memcpy(t, good, sizeof(t));
     for (int k = 0; k < 8; k++) { t[64 + 32 + k] = 0xf0; t[64 + 40 + k] = 0xf0; }
     t[64 + 32] = 0xf0; t[64 + 40] = 0xf8;
     elf_bad_test("filesz past end of file rejected", t, 512, fsize, ELF_EOFFSET, bad);
 
-    for (size_t i = 0; i < sizeof(t); i++) t[i] = good[i];
-    for (int k = 0; k < 8; k++) t[64 + 40 + k] = 0;
+    memcpy(t, good, sizeof(t));
+    memset(t + 64 + 40, 0, 8);
     t[64 + 40] = 1;
     elf_bad_test("memsz smaller than filesz rejected", t, 512, fsize, ELF_EMEMSZ, bad);
 
-    for (size_t i = 0; i < sizeof(t); i++) t[i] = good[i];
+    memcpy(t, good, sizeof(t));
     for (int k = 0; k < 8; k++) { t[64 + 16 + k] = 0; t[64 + 24 + k] = 0; t[64 + 32 + k] = 0; t[64 + 40 + k] = 0; }
     t[64 + 23] = 0x80;
     t[64 + 31] = 0x80;
@@ -1907,15 +1931,15 @@ void elf_reject_test(int *bad) {
     t[27] = 0x00; t[28] = 0x80;
     elf_bad_test("kernel-half address rejected", t, 512, fsize, ELF_EADDR, bad);
 
-    for (size_t i = 0; i < sizeof(t); i++) t[i] = good[i];
+    memcpy(t, good, sizeof(t));
     t[64 + 4] = ELF_PF_W | ELF_PF_X;
     elf_bad_test("writable and executable segment rejected", t, 512, fsize, ELF_EWX, bad);
 
-    for (size_t i = 0; i < sizeof(t); i++) t[i] = good[i];
+    memcpy(t, good, sizeof(t));
     t[64] = ELF_PT_INTERP;
     elf_bad_test("dynamic binary rejected for now", t, 512, fsize, ELF_EINTERP, bad);
 
-    for (size_t i = 0; i < sizeof(t); i++) t[i] = good[i];
+    memcpy(t, good, sizeof(t));
     t[24] = 0x11; t[25] = 0x22; t[26] = 0x33; t[27] = 0x44;
     t[28] = 0; t[29] = 0; t[30] = 0; t[31] = 0;
     elf_bad_test("entry point outside every segment rejected", t, 512, fsize, ELF_EENTRY, bad);

@@ -1,4 +1,5 @@
 #include "kernel/vfs/vfs.h"
+#include <string.h>
 #include "graphics/video/video.h"
 #include "kernel/mm/vmm/vmm.h"
 #include "kernel/uaccess/uaccess.h"
@@ -109,7 +110,7 @@ static bool devfs_lookup(const char *path, fs_node_t *out) {
         uint32_t n = 0;
         while (p[n] && p[n] != '/') n++;
         if (n == 0 || n >= FS_MAX_NAME + 1) return false;
-        for (uint32_t i = 0; i < n; i++) comp[i] = p[i];
+        memcpy(comp, p, n);
         comp[n] = 0;
         p += n;
         while (*p == '/') p++;
@@ -134,7 +135,7 @@ static bool devfs_read(const fs_node_t *node, uint32_t offset, void *buf, uint32
     switch (node->dev_id) {
         case DEVFS_DEV_ZERO: {
             uint8_t *b = (uint8_t *)buf;
-            for (uint32_t i = 0; i < len; i++) b[i] = 0;
+            memset(b, 0, len);
             return true;
         }
         case DEVFS_DEV_NULL:

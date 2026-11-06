@@ -2,6 +2,7 @@ MLIBC_CC = $(NYONOS_MLIBC_CC)
 MLIBC_LD = $(NYONOS_MLIBC_LD)
 MLIBC_LIBC ?= /home/quan/kawkaw/nyonos-toolchain/sysroot/usr/lib/libc.a
 
+USER_STRING = string.o
 USER_CC = gcc
 USER_CFLAGS = -Wall -Wextra -std=gnu11 -ffreestanding -fno-stack-protector -fno-stack-check \
               -fno-builtin -fPIE -m64 -mno-red-zone -mcmodel=small \
@@ -18,9 +19,12 @@ endif
 
 all: $(BINS)
 
-bin/%: %.o crt0.o user.ld
+string.o: string.c
+	$(USER_CC) $(USER_CFLAGS) -c $< -o $@
+
+bin/%: %.o crt0.o user.ld $(USER_STRING)
 	mkdir -p "$(dir $@)"
-	$(USER_CC) $(USER_LDFLAGS) $(filter %.o $%,$^) -o $@
+	$(USER_CC) $(USER_LDFLAGS) $(USER_STRING) $(filter-out $(USER_STRING),$(filter %.o $%,$^)) -o $@
 
 bin/mhello: mlibc_hello.c $(MLIBC_LD)
 	mkdir -p "$(dir $@)"

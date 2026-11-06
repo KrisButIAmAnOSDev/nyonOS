@@ -1,4 +1,5 @@
 #include "task.h"
+#include <string.h>
 #include "kernel/kprintf/kprintf.h"
 #include "drivers/serial/serial.h"
 #include "kernel/sync/sync.h"
@@ -252,7 +253,7 @@ static void task_reap_zombies(void) {
 
 static void task_kstack_zero(paddr_t phys) {
     uint8_t *ks = (uint8_t *)(vmm_hhdm_offset + phys);
-    for (size_t z = 0; z < TASK_STACK_PAGES * PAGE_SIZE; z++) ks[z] = 0;
+    memset(ks, 0, TASK_STACK_PAGES * PAGE_SIZE);
 }
 
 static inline void task_fpu_save(void) {
@@ -355,7 +356,7 @@ struct task *task_spawn(const char *name, void (*entry)(void)) {
     struct isr_frame *f = (struct isr_frame *)frame_addr;
     uint64_t *q = (uint64_t *)f;
 
-    for (size_t i = 0; i < sizeof(struct isr_frame) / 8; i++) q[i] = 0;
+    memset(f, 0, sizeof(struct isr_frame));
 
     *(uint64_t *)(frame_addr - 8) = (uint64_t)task_return_stub;
 
@@ -482,7 +483,7 @@ static struct task *spawn_ring3(const char *name, paddr_t code_phys, size_t code
     vaddr_t frame_addr = (t->stack_top - TASK_FRAME_GUARD) & ~0xFULL;
     struct isr_frame *f = (struct isr_frame *)frame_addr;
     uint64_t *q = (uint64_t *)f;
-    for (size_t i = 0; i < sizeof(struct isr_frame) / 8; i++) q[i] = 0;
+    memset(f, 0, sizeof(struct isr_frame));
 
     q[QW_RIP] = entry_rip;
     q[QW_CS] = GDT_USER_CODE_RPL3;
@@ -564,7 +565,7 @@ struct task *task_spawn_thread(struct task *parent, const char *name,
     vaddr_t frame_addr = (t->stack_top - TASK_FRAME_GUARD) & ~0xFULL;
     struct isr_frame *f = (struct isr_frame *)frame_addr;
     uint64_t *q = (uint64_t *)f;
-    for (size_t i = 0; i < sizeof(struct isr_frame) / 8; i++) q[i] = 0;
+    memset(f, 0, sizeof(struct isr_frame));
 
     q[QW_RIP] = entry_rip;
     q[QW_CS] = GDT_USER_CODE_RPL3;
@@ -704,7 +705,7 @@ struct task *task_spawn_fork(struct task *parent, const char *name,
                 const uint8_t *src = (const uint8_t *)(vmm_hhdm_offset +
                                                        (page & 0x000FFFFFFFFFF000ULL));
                 uint8_t *out = dst + i * PAGE_SIZE;
-                for (size_t k = 0; k < PAGE_SIZE; k++) out[k] = src[k];
+                memcpy(out, src, PAGE_SIZE);
             }
 
             if (vmm_map_frames(vs->pml4, cbase, cstack, spages,
@@ -740,11 +741,11 @@ struct task *task_spawn_fork(struct task *parent, const char *name,
     vaddr_t frame_addr = (t->stack_top - TASK_FRAME_GUARD) & ~0xFULL;
     struct isr_frame *f = (struct isr_frame *)frame_addr;
     uint64_t *q = (uint64_t *)f;
-    for (size_t i = 0; i < sizeof(struct isr_frame) / 8; i++) q[i] = 0;
+    memset(f, 0, sizeof(struct isr_frame));
 
     if (src) {
         const uint64_t *s = (const uint64_t *)src;
-        for (size_t i = 0; i < 14; i++) q[i] = s[i];
+        memcpy(q, s, 14 * sizeof(uint64_t));
     }
 
     q[QW_RIP] = entry_rip;
@@ -898,7 +899,7 @@ struct task *task_spawn_vmspace(const char *name, struct vmspace *vs, vaddr_t en
     vaddr_t frame_addr = (t->stack_top - TASK_FRAME_GUARD) & ~0xFULL;
     struct isr_frame *f = (struct isr_frame *)frame_addr;
     uint64_t *q = (uint64_t *)f;
-    for (size_t i = 0; i < sizeof(struct isr_frame) / 8; i++) q[i] = 0;
+    memset(f, 0, sizeof(struct isr_frame));
 
     q[QW_RIP] = entry_rip;
     q[QW_CS] = GDT_USER_CODE_RPL3;
@@ -1074,6 +1075,12 @@ void smp_resched_handler(struct isr_frame *frame) {
         lapic_timer_set(cpu_self()->lapic_base,
                         task_is_idle_current(cpu_id()) ? LAPIC_IDLE_PERIOD : LAPIC_TIMER_PERIOD,
                         LAPIC_TIMER_DIV);
+}
+
+void smp_shootdown_handler(struct isr_frame *frame) {
+    (void)frame;
+    cpu_flush_pcid();
+    if (cpu_self()->lapic_base) lapic_eoi(cpu_self()->lapic_base);
 }
 
 void task_schedule(struct isr_frame *frame) {
@@ -1332,6 +1339,11 @@ void task_tick(uint64_t now) {
 
 bool task_current_blocked(void) {
     return __atomic_load_n(&tasks[current_slot()].blocked, __ATOMIC_ACQUIRE);
+}
+
+bool task_sig_pending(void) {
+    struct task *t = task_current();
+    return t && t->sig_pending;
 }
 
 uint64_t task_wake_seq(void) {

@@ -101,6 +101,7 @@ int task_futex_wait(void *chan, uintptr_t uaddr, uint32_t expected, uint64_t dea
 void task_wake_chan(void *chan);
 void task_tick(uint64_t now);
 bool task_current_blocked(void);
+bool task_sig_pending(void);
 void task_reap_now(void);
 
 struct task *task_current(void);

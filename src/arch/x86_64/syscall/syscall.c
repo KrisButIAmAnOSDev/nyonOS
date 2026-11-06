@@ -1,4 +1,5 @@
 #include "kernel/mm/heap/heap.h"
+#include <string.h>
 #include "arch/x86_64/cpu/cpu.h"
 #include "kernel/mm/vmm/vmm.h"
 #include "kernel/tty/tty.h"
@@ -10,6 +11,11 @@
 #include "kernel/multitask/task.h"
 #include "kernel/sync/preempt.h"
 #include "kernel/fd/fd.h"
+#include "kernel/fd/eventfd.h"
+#include "kernel/fd/memfd.h"
+#include "kernel/fd/timerfd.h"
+#include "kernel/fd/signalfd.h"
+#include "kernel/fd/epoll.h"
 #include "kernel/pipe/pipe.h"
 #include "kernel/fs/fs.h"
 #include "kernel/mm/vmm/vmspace.h"
@@ -1001,7 +1007,7 @@ static int64_t sys_sethostname(uint64_t namep, uint64_t lenp) {
     char tmp[sizeof(sys_hostname)];
     if (!copyin(tmp, name, len)) return SYS_EFAULT;
     tmp[len] = 0;
-    for (size_t i = 0; i <= len; i++) sys_hostname[i] = tmp[i];
+    memcpy(sys_hostname, tmp, len + 1);
     return 0;
 }
 
@@ -1015,6 +1021,62 @@ static int64_t sys_gethostname(uint64_t namep, uint64_t lenp) {
     if (!copyout(name, sys_hostname, len)) return SYS_EFAULT;
     if (!copyout(name + len, "", 1)) return SYS_EFAULT;
     return 0;
+}
+
+
+static int64_t sys_eventfd2(uint32_t initval, unsigned flags) {
+    uint16_t fflags;
+    int r = eventfd_create(initval, flags, &fflags);
+    if (r < 0) return r;
+    return r;
+}
+
+static int64_t sys_memfd_create(uintptr_t name, unsigned flags) {
+    (void)name;
+    uint16_t fflags;
+    int r = memfd_create(flags, &fflags);
+    if (r < 0) return r;
+    return r;
+}
+
+static int64_t sys_timerfd_create(int clockid, unsigned flags) {
+    uint16_t fflags;
+    int r = timerfd_create(clockid, flags, &fflags);
+    if (r < 0) return r;
+    return r;
+}
+
+static int64_t sys_timerfd_settime(int fd, unsigned flags, uintptr_t newv, uintptr_t oldv) {
+    return timerfd_settime(fd, flags, (const void *)newv, (void *)oldv);
+}
+
+static int64_t sys_timerfd_gettime(int fd, uintptr_t val) {
+    return timerfd_gettime(fd, (void *)val);
+}
+
+static int64_t sys_signalfd(int fd, uintptr_t mask, unsigned flags) {
+    uint64_t m;
+    if (!copyin(&m, (const void *)mask, sizeof m)) return SYS_EFAULT;
+    if (fd >= 0) return signalfd_setmask(fd, m);
+    uint16_t fflags;
+    int r = signalfd_create(m, flags, &fflags);
+    if (r < 0) return r;
+    return r;
+}
+
+static int64_t sys_epoll_create1(unsigned flags) {
+    uint16_t fflags;
+    int r = epoll_create1(flags, &fflags);
+    if (r < 0) return r;
+    return r;
+}
+
+static int64_t sys_epoll_ctl(int epfd, int op, int fd, uintptr_t event) {
+    return epoll_ctl(epfd, op, fd, (const void *)event);
+}
+
+static int64_t sys_epoll_wait(int epfd, uintptr_t events, int maxevents, int timeout) {
+    return epoll_wait(epfd, (void *)events, maxevents, timeout);
 }
 
 static int64_t sys_sleep(unsigned ms) {

@@ -6,6 +6,11 @@
 #include "arch/x86_64/rtc/rtc.h"
 #include "arch/x86_64/cpu/cpu.h"
 
+#include <string.h>
+#include <strings.h>
+
+int toupper(int c);
+
 static void fat_stamp(int64_t unix_sec, uint16_t *out_time, uint16_t *out_date);
 
 static spinlock_t fs_lock = SPINLOCK_INIT;
@@ -68,6 +73,22 @@ static uint8_t fs_sectors[MAX_CPUS][FS_SECTOR_SIZE] __attribute__((aligned(4)));
 
 #define sec (fs_sectors[cpu_id()])
 
+#define FAT_RCACHE_SLOTS 8
+
+struct fat_read_cache {
+    const fs_node_t *node;
+    uint32_t dir_cluster;
+    uint32_t dir_index;
+    uint32_t first_cluster;
+    uint32_t size;
+    uint32_t cluster_index;
+    uint32_t cluster;
+    uint32_t generation;
+};
+
+static struct fat_read_cache fat_rcache[MAX_CPUS][FAT_RCACHE_SLOTS];
+static uint32_t fat_cache_generation;
+
 static uint16_t rd16(const uint8_t *p) {
     return (uint16_t)(p[0] | (p[1] << 8));
 }
@@ -96,7 +117,7 @@ static const uint8_t *dir_sector(uint32_t lba) {
     }
     if (lba != dir_sector_lba || fs.data_start != dir_sector_base) {
         if (!sector_read(lba)) return NULL;
-        for (size_t i = 0; i < FS_SECTOR_SIZE; i++) dir_sector_cache[i] = sec[i];
+        memcpy(dir_sector_cache, sec, FS_SECTOR_SIZE);
         dir_sector_lba = lba;
         dir_sector_base = fs.data_start;
     }
@@ -195,7 +216,7 @@ static const uint8_t *fat_sector(uint32_t lba) {
     }
     if (lba != fat_sector_lba || fs.fat_start != fat_sector_base) {
         if (!sector_read(lba)) return NULL;
-        for (size_t i = 0; i < FS_SECTOR_SIZE; i++) fat_sector_cache[i] = sec[i];
+        memcpy(fat_sector_cache, sec, FS_SECTOR_SIZE);
         fat_sector_lba = lba;
         fat_sector_base = fs.fat_start;
     }
@@ -243,7 +264,9 @@ static bool fat_set(uint32_t cluster, uint16_t value) {
     if (!block_read(fs.dev, lba, 1, buf)) return false;
     buf[off] = (uint8_t)(value & 0xFF);
     buf[off + 1] = (uint8_t)(value >> 8);
-    return sector_write(lba, buf);
+    if (!sector_write(lba, buf)) return false;
+    fat_cache_generation++;
+    return true;
 }
 
 static bool fat_alloc(uint32_t *out) {
@@ -285,6 +308,41 @@ static bool cluster_nth(uint32_t cluster, uint32_t skip, uint32_t *out) {
     return true;
 }
 
+static bool fat_read_cluster(const fs_node_t *node, uint32_t target, uint32_t *out) {
+    uint32_t slot = (node->dir_index * 2654435761u + node->dir_cluster + node->cluster) % FAT_RCACHE_SLOTS;
+    struct fat_read_cache *c = &fat_rcache[cpu_id()][slot];
+
+    bool match = c->generation == fat_cache_generation &&
+                 c->node == node && c->dir_cluster == node->dir_cluster &&
+                 c->dir_index == node->dir_index && c->first_cluster == node->cluster &&
+                 c->size == node->size && c->cluster_index <= target;
+    if (match) {
+        uint32_t cluster = c->cluster;
+        for (uint32_t i = c->cluster_index; i < target; i++) {
+            uint32_t nx;
+            if (!fat_next(cluster, &nx)) return false;
+            cluster = nx;
+        }
+        c->cluster_index = target;
+        c->cluster = cluster;
+        *out = cluster;
+        return true;
+    }
+
+    uint32_t cluster;
+    if (!cluster_nth(node->cluster, target, &cluster)) return false;
+    c->node = node;
+    c->dir_cluster = node->dir_cluster;
+    c->dir_index = node->dir_index;
+    c->first_cluster = node->cluster;
+    c->size = node->size;
+    c->cluster_index = target;
+    c->cluster = cluster;
+    c->generation = fat_cache_generation;
+    *out = cluster;
+    return true;
+}
+
 static bool dirent_locate(const fs_node_t *dir, uint32_t index, uint32_t *lba_out,
                            uint32_t *off_out) {
     if (!dir || !dir->is_dir) return false;
@@ -318,20 +376,20 @@ static bool dirent_raw(const fs_node_t *dir, uint32_t index, uint8_t *out) {
     if (!dirent_locate(dir, index, &lba, &off)) return false;
     const uint8_t *p = dir_sector(lba);
     if (!p) return false;
-    for (int i = 0; i < FS_DIRENT_SIZE; i++) out[i] = p[off + i];
+    memcpy(out, p + off, FS_DIRENT_SIZE);
     return true;
 }
 
 static bool dirent_store(uint32_t lba, uint32_t off, const uint8_t *e) {
     uint8_t buf[FS_SECTOR_SIZE];
     if (!block_read(fs.dev, lba, 1, buf)) return false;
-    for (int i = 0; i < FS_DIRENT_SIZE; i++) buf[off + i] = e[i];
+    memcpy(buf + off, e, FS_DIRENT_SIZE);
     return sector_write(lba, buf);
 }
 
 static void dirent_build(uint8_t *e, const char *name83, uint8_t attr, uint32_t cluster,
                          uint32_t size) {
-    for (int i = 0; i < FS_DIRENT_SIZE; i++) e[i] = 0;
+    memset(e, 0, FS_DIRENT_SIZE);
     for (int i = 0; i < 11; i++) e[i] = (uint8_t)(name83[i] ? name83[i] : ' ');
     e[11] = attr;
     uint16_t ft, fdt;
@@ -350,13 +408,20 @@ static void dirent_build(uint8_t *e, const char *name83, uint8_t attr, uint32_t 
 }
 
 static void trim83(const uint8_t *raw, char *out) {
-    int n = 0;
-    for (int i = 0; i < 8 && raw[i] != ' '; i++) out[n++] = (char)raw[i];
-    if (raw[8] != ' ') {
-        out[n++] = '.';
-        for (int i = 8; i < 11 && raw[i] != ' '; i++) out[n++] = (char)raw[i];
+    char tmp[12];
+    memcpy(tmp, raw, 11);
+    tmp[11] = 0;
+
+    const char *sp = memchr(tmp, ' ', 8);
+    int bn = sp ? (int)(sp - tmp) : 8;
+    int en = 0;
+    if (tmp[8] != ' ') {
+        const char *ep = memchr(tmp + 8, ' ', 3);
+        en = ep ? (int)(ep - (tmp + 8)) : 3;
     }
-    out[n] = 0;
+
+    if (en) snprintf(out, FS_MAX_NAME, "%.*s.%.*s", bn, tmp, en, tmp + 8);
+    else snprintf(out, FS_MAX_NAME, "%.*s", bn, tmp);
 }
 
 static bool parse_dirent(const uint8_t *e, fs_node_t *out) {
@@ -382,55 +447,92 @@ static bool parse_dirent(const uint8_t *e, fs_node_t *out) {
     return true;
 }
 
-#define FS_LFN_MAX 300
+#define FS_LFN_MAX FS_MAX_NAME
 
-static bool lfn_parse_entry(const uint8_t *e, char *lfn) {
+struct lfn_state {
+    char name[FS_LFN_MAX];
+    uint8_t checksum;
+    uint32_t seen;
+    uint8_t last;
+    bool active;
+};
+
+static void lfn_reset(struct lfn_state *st) {
+    memset(st, 0, sizeof(*st));
+}
+
+static uint8_t sfn_checksum(const uint8_t e[11]) {
+    uint8_t sum = 0;
+    for (int i = 0; i < 11; i++)
+        sum = (uint8_t)(((sum & 1) << 7) + (sum >> 1) + e[i]);
+    return sum;
+}
+
+static bool lfn_parse_entry(const uint8_t *e, struct lfn_state *st) {
     if (e[11] != FS_ATTR_LFN) return false;
     if (e[0] == 0x00 || e[0] == 0xE5) return false;
+
     uint32_t ord = (uint32_t)(e[0] & 0x1F);
+    if (ord < 1 || ord > 20) return false;
+
     if (e[0] & 0x40) {
-        for (uint32_t k = 0; k < FS_LFN_MAX; k++) lfn[k] = 0;
+        memset(st->name, 0, sizeof(st->name));
+        st->checksum = e[13];
+        st->seen = 0;
+        st->last = (uint8_t)ord;
+        st->active = true;
+    } else if (!st->active || st->checksum != e[13]) {
+        return false;
     }
-    if (ord >= 1 && ord <= 20) {
-        uint32_t base = (ord - 1) * 13;
-        for (int k = 0; k < 13; k++) {
-            int off = (k < 5) ? (1 + k * 2) : (k < 11 ? (14 + (k - 5) * 2) : (28 + (k - 11) * 2));
-            uint16_t u = (uint16_t)(e[off] | (e[off + 1] << 8));
-            if (u == 0 || u == 0xFFFF) break;
-            if (base + (uint32_t)k < FS_LFN_MAX - 1)
-                lfn[base + (uint32_t)k] = (u < 0x80) ? (char)u : '?';
-        }
+
+    st->seen |= 1u << (ord - 1);
+    uint32_t base = (ord - 1) * 13;
+    for (int k = 0; k < 13; k++) {
+        int off = (k < 5) ? (1 + k * 2) : (k < 11 ? (14 + (k - 5) * 2) : (28 + (k - 11) * 2));
+        uint16_t u = (uint16_t)(e[off] | (e[off + 1] << 8));
+        if (u == 0 || u == 0xFFFF) break;
+        if (base + (uint32_t)k < FS_LFN_MAX - 1)
+            st->name[base + (uint32_t)k] = (u < 0x80) ? (char)u : '?';
     }
     return true;
+}
+
+static bool lfn_valid(const struct lfn_state *st, const uint8_t *short_entry) {
+    if (!st->active || st->last == 0) return false;
+    if (sfn_checksum(short_entry) != st->checksum) return false;
+    uint32_t need = (1u << st->last) - 1u;
+    return (st->seen & need) == need;
+}
+
+static void lfn_apply(const struct lfn_state *st, fs_node_t *node, const uint8_t *short_entry) {
+    if (!lfn_valid(st, short_entry)) return;
+    memcpy(node->name, st->name, FS_MAX_NAME);
+    node->name[FS_MAX_NAME - 1] = 0;
 }
 
 static bool fat_iterate(const fs_node_t *dir, uint32_t index, fs_node_t *out) {
     if (!fs.mounted || !dir || !out) return false;
     if (!dir->is_dir) return false;
 
-    char lfn[FS_LFN_MAX];
-    bool have_lfn = false;
+    struct lfn_state lfn;
+    lfn_reset(&lfn);
     uint32_t live = 0;
     for (uint32_t i = 0; i < FS_SCAN_MAX; i++) {
         uint8_t e[FS_DIRENT_SIZE];
         if (!dirent_raw(dir, i, e)) return false;
         if (e[11] == FS_ATTR_LFN) {
-            if (lfn_parse_entry(e, lfn)) have_lfn = true;
+            lfn_parse_entry(e, &lfn);
             continue;
         }
         fs_node_t tmp;
-        if (!parse_dirent(e, &tmp)) { have_lfn = false; continue; }
-        if (have_lfn) {
-            uint32_t k = 0;
-            while (k < FS_MAX_NAME - 1 && lfn[k]) { tmp.name[k] = lfn[k]; k++; }
-            tmp.name[k] = 0;
-        }
+        if (!parse_dirent(e, &tmp)) { lfn_reset(&lfn); continue; }
+        lfn_apply(&lfn, &tmp, e);
         if (live == index) {
             *out = tmp;
             return true;
         }
         live++;
-        have_lfn = false;
+        lfn_reset(&lfn);
     }
     return false;
 }
@@ -451,16 +553,7 @@ static bool root_node(fs_node_t *out) {
 bool fs_name_eq(const char *a, const char *b);
 
 static bool name_eq(const char *a, const char *b) {
-    while (*a && *b) {
-        char ca = *a;
-        char cb = *b;
-        if (ca >= 'a' && ca <= 'z') ca = (char)(ca - 32);
-        if (cb >= 'a' && cb <= 'z') cb = (char)(cb - 32);
-        if (ca != cb) return false;
-        a++;
-        b++;
-    }
-    return *a == 0 && *b == 0;
+    return strcasecmp(a, b) == 0;
 }
 
 static bool fat_lookup(const char *path, fs_node_t *out);
@@ -469,23 +562,24 @@ static int fs_node_write_inner(fs_node_t *node, uint32_t offset, const void *buf
 
 static bool dir_find(const fs_node_t *dir, const char *name, uint32_t *raw_index,
                      fs_node_t *out) {
-    char lfn[FS_LFN_MAX];
-    bool have_lfn = false;
+    struct lfn_state lfn;
+    lfn_reset(&lfn);
     for (uint32_t i = 0; i < FS_SCAN_MAX; i++) {
         uint8_t e[FS_DIRENT_SIZE];
         if (!dirent_raw(dir, i, e)) break;
         if (e[11] == FS_ATTR_LFN) {
-            if (lfn_parse_entry(e, lfn)) have_lfn = true;
+            lfn_parse_entry(e, &lfn);
             continue;
         }
         fs_node_t tmp;
-        if (!parse_dirent(e, &tmp)) { have_lfn = false; continue; }
-        if (name_eq(tmp.name, name) || (have_lfn && name_eq(lfn, name))) {
+        if (!parse_dirent(e, &tmp)) { lfn_reset(&lfn); continue; }
+        lfn_apply(&lfn, &tmp, e);
+        if (name_eq(tmp.name, name)) {
             if (raw_index) *raw_index = i;
             if (out) *out = tmp;
             return true;
         }
-        have_lfn = false;
+        lfn_reset(&lfn);
     }
     return false;
 }
@@ -508,15 +602,12 @@ static int fs_resolve_parent(const char *path, fs_node_t *parent, char *name,
                               uint32_t name_max) {
     if (!path || !parent || !name) return ABI_EINVAL;
 
-    uint32_t n = 0;
-    for (const char *p = path; *p; p++) {
-        if (n >= FS_PATH_MAX - 1) return ABI_ENAMETOOLONG;
-        n++;
-    }
+    uint32_t n = (uint32_t)strnlen(path, FS_PATH_MAX);
+    if (n > FS_PATH_MAX - 1) return ABI_ENAMETOOLONG;
     if (n == 0) return ABI_EINVAL;
 
     char buf[FS_PATH_MAX];
-    for (uint32_t i = 0; i < n; i++) buf[i] = path[i];
+    memcpy(buf, path, n);
     buf[n] = 0;
 
     uint32_t cut = n;
@@ -525,7 +616,7 @@ static int fs_resolve_parent(const char *path, fs_node_t *parent, char *name,
     uint32_t name_len = n - cut;
     if (name_len == 0 || name_len >= name_max) return ABI_ENAMETOOLONG;
 
-    for (uint32_t i = 0; i < name_len; i++) name[i] = buf[cut + i];
+    memcpy(name, buf + cut, name_len);
     name[name_len] = 0;
 
     if (cut == 0) {
@@ -538,43 +629,126 @@ static int fs_resolve_parent(const char *path, fs_node_t *parent, char *name,
     return 0;
 }
 
-static int name_to_83(const char *name, char out[11]) {
-    char base[16];
-    char ext[8];
+static bool lfn_name_valid(const char *name) {
+    size_t n = strlen(name);
+    if (n == 0 || n >= FS_MAX_NAME) return false;
+    if (name[n - 1] == ' ' || name[n - 1] == '.') return false;
+    for (size_t i = 0; i < n; i++) {
+        unsigned char c = (unsigned char)name[i];
+        if (c < 0x20 || c == '/' || c == '\\' || c == ':' ||
+            c == '*' || c == '?' || c == '"' || c == '<' || c == '>' || c == '|')
+            return false;
+        if (c >= 0x80) return false;
+    }
+    return true;
+}
+
+static char sfn_char(char c) {
+    c = (char)toupper((unsigned char)c);
+    if ((c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')) return c;
+    if (c == '$' || c == '%' || c == '-' || c == '_' || c == '@' ||
+        c == '~' || c == '`' || c == '!' || c == '(' || c == ')' ||
+        c == '{' || c == '}' || c == '^' || c == '#' || c == '&')
+        return c;
+    return '_';
+}
+
+static bool sfn_exists(const fs_node_t *dir, const char n83[11]) {
+    for (uint32_t i = 0; i < FS_SCAN_MAX; i++) {
+        uint8_t e[FS_DIRENT_SIZE];
+        if (!dirent_raw(dir, i, e)) break;
+        if (e[0] == 0x00) break;
+        if (e[11] == FS_ATTR_LFN) continue;
+        if (memcmp(e, n83, 11) == 0) return true;
+    }
+    return false;
+}
+
+static int make_short_name(const fs_node_t *dir, const char *name, char out[11]) {
+    char base[FS_MAX_NAME];
+    char ext[4];
     uint32_t bn = 0, en = 0;
+    const char *dot = strrchr(name, '.');
+    const char *bend = dot ? dot : name + strlen(name);
 
-    const char *nend = name;
-    while (*nend) nend++;
-
-    const char *dot = NULL;
-    for (const char *p = name; p < nend; p++) {
-        if (*p == '.') dot = p;
+    for (const char *p = name; p < bend; p++) {
+        if (*p == ' ') continue;
+        if (*p == '.') return ABI_EINVAL;
+        if (bn >= FS_MAX_NAME - 1) break;
+        base[bn++] = sfn_char(*p);
     }
-
-    const char *eend = dot ? dot : nend;
-    for (const char *p = name; p < eend; p++) {
-        char c = *p;
-        if (c >= 'a' && c <= 'z') c = (char)(c - 32);
-        if (c == ' ' || c == '/') return ABI_EINVAL;
-        if (bn >= 8) return ABI_ENAMETOOLONG;
-        base[bn++] = c;
-    }
-
     if (dot) {
-        for (const char *p = dot + 1; *p; p++) {
-            char c = *p;
-            if (c >= 'a' && c <= 'z') c = (char)(c - 32);
-            if (c == ' ' || c == '/') return ABI_EINVAL;
-            if (en >= 3) return ABI_ENAMETOOLONG;
-            ext[en++] = c;
-        }
+        for (const char *p = dot + 1; *p && en < 3; p++)
+            ext[en++] = sfn_char(*p);
     }
-
     if (bn == 0) return ABI_EINVAL;
 
-    for (int i = 0; i < 8; i++) out[i] = (i < (int)bn) ? base[i] : ' ';
-    for (int i = 0; i < 3; i++) out[8 + i] = (i < (int)en) ? ext[i] : ' ';
-    return 0;
+    memset(out, ' ', 11);
+    memcpy(out, base, bn < 8 ? bn : 8);
+    memcpy(out + 8, ext, en);
+    if (bn <= 8 && !sfn_exists(dir, out)) return 0;
+    memset(out, ' ', 11);
+
+    for (uint32_t n = 1; n < 1000000; n++) {
+        char suffix[8];
+        int sl = snprintf(suffix, sizeof suffix, "~%u", n);
+        int keep = 8 - sl;
+        if (keep < 1) keep = 1;
+        if ((uint32_t)keep > bn) keep = (int)bn;
+        memset(out, ' ', 11);
+        memcpy(out, base, (size_t)keep);
+        memcpy(out + keep, suffix, (size_t)sl);
+        memcpy(out + 8, ext, en);
+        if (!sfn_exists(dir, out)) return 0;
+    }
+    return ABI_ENOSPC;
+}
+
+static uint32_t lfn_entry_count(const char *name) {
+    return (uint32_t)((strlen(name) + 12) / 13);
+}
+
+static void lfn_build_entry(uint8_t e[FS_DIRENT_SIZE], const char *name,
+                            uint32_t len, uint32_t ord, uint32_t total,
+                            uint8_t checksum) {
+    memset(e, 0xFF, FS_DIRENT_SIZE);
+    e[0] = (uint8_t)(ord | (ord == total ? 0x40 : 0));
+    e[11] = FS_ATTR_LFN;
+    e[12] = 0;
+    e[13] = checksum;
+    e[26] = 0;
+    e[27] = 0;
+
+    uint32_t base = (ord - 1) * 13;
+    for (int k = 0; k < 13; k++) {
+        int off = (k < 5) ? (1 + k * 2) : (k < 11 ? (14 + (k - 5) * 2) : (28 + (k - 11) * 2));
+        uint32_t idx = base + (uint32_t)k;
+        uint16_t u = (idx < len) ? (uint8_t)name[idx] : (idx == len ? 0x0000 : 0xFFFF);
+        e[off] = (uint8_t)u;
+        e[off + 1] = (uint8_t)(u >> 8);
+    }
+}
+
+static int dirent_store_at(const fs_node_t *dir, uint32_t index, const uint8_t *e) {
+    uint32_t lba, off;
+    if (!dirent_locate(dir, index, &lba, &off)) return ABI_EIO;
+    return dirent_store(lba, off, e) ? 0 : ABI_EIO;
+}
+
+static int write_named_entry(const fs_node_t *dir, uint32_t start, const char *name,
+                             const uint8_t short_entry[FS_DIRENT_SIZE]) {
+    uint32_t len = (uint32_t)strlen(name);
+    uint32_t count = lfn_entry_count(name);
+    uint8_t checksum = sfn_checksum(short_entry);
+
+    for (uint32_t i = 0; i < count; i++) {
+        uint32_t ord = count - i;
+        uint8_t e[FS_DIRENT_SIZE];
+        lfn_build_entry(e, name, len, ord, count, checksum);
+        int r = dirent_store_at(dir, start + i, e);
+        if (r) return r;
+    }
+    return dirent_store_at(dir, start + count, short_entry);
 }
 
 static bool fat_extend(uint32_t cluster, uint32_t *out) {
@@ -590,48 +764,60 @@ static bool fat_extend(uint32_t cluster, uint32_t *out) {
     return true;
 }
 
-static bool dirent_find_free(const fs_node_t *dir, uint32_t *lba_out, uint32_t *off_out,
-                              uint32_t *index_out) {
+static bool dirent_find_free_run(const fs_node_t *dir, uint32_t count,
+                                  uint32_t *lba_out, uint32_t *off_out,
+                                  uint32_t *index_out) {
+    if (!dir || !count) return false;
     uint32_t per_sector = fs.bytes_per_sector / FS_DIRENT_SIZE;
 
     if (dir->is_root) {
+        uint32_t run = 0, start_index = 0;
         for (uint32_t i = 0; i < fs.root_entry_count; i++) {
-            uint32_t lba, off;
-            if (!dirent_locate(dir, i, &lba, &off)) return false;
-            uint8_t buf[FS_SECTOR_SIZE];
-            if (!block_read(fs.dev, lba, 1, buf)) return false;
-            if (buf[off] == 0x00 || buf[off] == 0xE5) {
-                *lba_out = lba;
-                *off_out = off;
-                *index_out = i;
-                return true;
+            uint8_t e[FS_DIRENT_SIZE];
+            if (!dirent_raw(dir, i, e)) return false;
+            if (e[0] == 0x00 || e[0] == 0xE5) {
+                if (!run) start_index = i;
+                run++;
+                if (run == count) {
+                    if (!dirent_locate(dir, start_index, lba_out, off_out)) return false;
+                    *index_out = start_index;
+                    return true;
+                }
+            } else {
+                run = 0;
             }
         }
         return false;
     }
 
     uint8_t zero[FS_SECTOR_SIZE];
-    for (size_t i = 0; i < sizeof zero; i++) zero[i] = 0;
+    memset(zero, 0, sizeof zero);
 
     uint32_t cluster = dir->cluster;
     uint32_t index = 0;
+    uint32_t run = 0, start_index = 0;
 
     for (;;) {
         uint32_t base = cluster_lba(cluster);
-        for (uint32_t s = 0; s < fs.sectors_per_cluster; s++) {
-            uint32_t lba = base + s;
+        for (uint32_t sector = 0; sector < fs.sectors_per_cluster; sector++) {
+            uint32_t lba = base + sector;
             uint8_t buf[FS_SECTOR_SIZE];
             if (!block_read(fs.dev, lba, 1, buf)) return false;
             for (uint32_t i = 0; i < per_sector; i++) {
                 uint32_t off = i * FS_DIRENT_SIZE;
                 if (buf[off] == 0x00 || buf[off] == 0xE5) {
-                    *lba_out = lba;
-                    *off_out = off;
-                    *index_out = index + i;
-                    return true;
+                    if (!run) start_index = index;
+                    run++;
+                    if (run == count) {
+                        if (!dirent_locate(dir, start_index, lba_out, off_out)) return false;
+                        *index_out = start_index;
+                        return true;
+                    }
+                } else {
+                    run = 0;
                 }
+                index++;
             }
-            index += per_sector;
         }
 
         uint32_t nc;
@@ -789,7 +975,7 @@ static int fs_node_resize_inner(fs_node_t *node, uint32_t size) {
     }
 
     uint8_t zeros[512];
-    for (size_t i = 0; i < sizeof zeros; i++) zeros[i] = 0;
+    memset(zeros, 0, sizeof zeros);
     uint32_t pos = node->size;
     while (pos < size) {
         uint32_t chunk = size - pos;
@@ -810,7 +996,7 @@ static int fs_node_write_inner(fs_node_t *node, uint32_t offset, const void *buf
     if ((uint32_t)offset > node->size) {
         uint32_t gap = (uint32_t)offset - node->size;
         uint8_t zeros[512];
-        for (size_t i = 0; i < sizeof zeros; i++) zeros[i] = 0;
+        memset(zeros, 0, sizeof zeros);
         uint32_t pos = node->size;
         while (gap) {
             uint32_t chunk = gap > (uint32_t)sizeof zeros ? (uint32_t)sizeof zeros : gap;
@@ -851,10 +1037,10 @@ static int fs_node_write_inner(fs_node_t *node, uint32_t offset, const void *buf
 
         uint8_t sbuf[FS_SECTOR_SIZE];
         if (off == 0 && chunk == fs.bytes_per_sector) {
-            for (uint32_t i = 0; i < chunk; i++) sbuf[i] = src[i];
+            memcpy(sbuf, src, chunk);
         } else {
             if (!block_read(fs.dev, lba, 1, sbuf)) return ABI_EIO;
-            for (uint32_t i = 0; i < chunk; i++) sbuf[off + i] = src[i];
+            memcpy(sbuf + off, src, chunk);
         }
         if (!sector_write(lba, sbuf)) return ABI_EIO;
 
@@ -898,8 +1084,10 @@ static int fs_create_inner(const char *path, fs_node_t *out) {
     int r = fs_resolve_parent(path, &parent, name, sizeof name);
     if (r) return r;
 
+    if (!lfn_name_valid(name)) return ABI_EINVAL;
+
     char n83[11];
-    r = name_to_83(name, n83);
+    r = make_short_name(&parent, name, n83);
     if (r) return r;
 
     uint32_t index;
@@ -907,26 +1095,26 @@ static int fs_create_inner(const char *path, fs_node_t *out) {
     if (dir_find(&parent, name, &index, &found)) return ABI_EEXIST;
 
     uint32_t lba, off;
-    if (!dirent_find_free(&parent, &lba, &off, &index)) return ABI_ENOSPC;
+    uint32_t lfn_count = lfn_entry_count(name);
+    if (!dirent_find_free_run(&parent, lfn_count + 1, &lba, &off, &index)) return ABI_ENOSPC;
+    (void)lba;
+    (void)off;
 
     uint8_t e[FS_DIRENT_SIZE];
     dirent_build(e, n83, FS_ATTR_ARCHIVE, 0, 0);
-    if (!dirent_store(lba, off, e)) return ABI_EIO;
+    r = write_named_entry(&parent, index, name, e);
+    if (r) return r;
 
     if (out) {
-        out->name[0] = 0;
-        for (int i = 0; i < 11; i++) {
-            if (n83[i] == ' ') break;
-            out->name[i] = (char)n83[i];
-        }
-        out->name[11] = 0;
+        memset(out->name, 0, FS_MAX_NAME);
+        memcpy(out->name, name, strlen(name));
         out->attr = FS_ATTR_ARCHIVE;
         out->cluster = 0;
         out->size = 0;
         out->is_dir = false;
         out->is_root = false;
         out->dir_cluster = parent.cluster;
-        out->dir_index = index;
+        out->dir_index = index + lfn_count;
         out->ops = &fat_ops;
         out->dev_id = 0;
     }
@@ -939,8 +1127,10 @@ static int fs_mkdir_inner(const char *path, fs_node_t *out) {
     int r = fs_resolve_parent(path, &parent, name, sizeof name);
     if (r) return r;
 
+    if (!lfn_name_valid(name)) return ABI_EINVAL;
+
     char n83[11];
-    r = name_to_83(name, n83);
+    r = make_short_name(&parent, name, n83);
     if (r) return r;
 
     uint32_t index;
@@ -952,7 +1142,7 @@ static int fs_mkdir_inner(const char *path, fs_node_t *out) {
     if (!fat_set(cluster, FS_EOC_MIN)) return ABI_EIO;
 
     uint8_t zero[FS_SECTOR_SIZE];
-    for (size_t i = 0; i < sizeof zero; i++) zero[i] = 0;
+    memset(zero, 0, sizeof zero);
 
     uint32_t lba = cluster_lba(cluster);
     for (uint32_t s = 0; s < fs.sectors_per_cluster; s++) {
@@ -968,27 +1158,46 @@ static int fs_mkdir_inner(const char *path, fs_node_t *out) {
     if (!dirent_store(lba, FS_DIRENT_SIZE, e)) return ABI_EIO;
 
     uint32_t elba, eoff;
-    if (!dirent_find_free(&parent, &elba, &eoff, &index)) return ABI_ENOSPC;
+    uint32_t lfn_count = lfn_entry_count(name);
+    if (!dirent_find_free_run(&parent, lfn_count + 1, &elba, &eoff, &index)) return ABI_ENOSPC;
+    (void)elba;
+    (void)eoff;
 
     dirent_build(e, n83, FS_ATTR_DIRECTORY, cluster, 0);
-    if (!dirent_store(elba, eoff, e)) return ABI_EIO;
+    r = write_named_entry(&parent, index, name, e);
+    if (r) return r;
 
     if (out) {
-        out->name[0] = 0;
-        for (int i = 0; i < 11; i++) {
-            if (n83[i] == ' ') break;
-            out->name[i] = (char)n83[i];
-        }
-        out->name[11] = 0;
+        memset(out->name, 0, FS_MAX_NAME);
+        memcpy(out->name, name, strlen(name));
         out->attr = FS_ATTR_DIRECTORY;
         out->cluster = cluster;
         out->size = 0;
         out->is_dir = true;
         out->is_root = false;
         out->dir_cluster = parent.cluster;
-        out->dir_index = index;
+        out->dir_index = index + lfn_count;
         out->ops = &fat_ops;
         out->dev_id = 0;
+    }
+    return 0;
+}
+
+static int delete_lfn_group(const fs_node_t *parent, uint32_t short_index) {
+    uint8_t short_entry[FS_DIRENT_SIZE];
+    if (!dirent_raw(parent, short_index, short_entry)) return ABI_EIO;
+    uint8_t checksum = sfn_checksum(short_entry);
+
+    uint32_t j = short_index;
+    for (uint32_t depth = 0; depth < 20 && j > 0; depth++) {
+        j--;
+        uint8_t e[FS_DIRENT_SIZE];
+        if (!dirent_raw(parent, j, e)) break;
+        if (e[11] != FS_ATTR_LFN || e[13] != checksum) break;
+        uint32_t lba, off;
+        if (!dirent_locate(parent, j, &lba, &off)) return ABI_EIO;
+        e[0] = 0xE5;
+        if (!dirent_store(lba, off, e)) return ABI_EIO;
     }
     return 0;
 }
@@ -1018,6 +1227,9 @@ static int fs_unlink_inner(const char *path, bool want_dir) {
         if (!fat_free_chain(found.cluster)) return ABI_EIO;
     }
 
+    int dr = delete_lfn_group(&parent, index);
+    if (dr) return dr;
+
     uint32_t lba, off;
     if (!dirent_locate(&parent, index, &lba, &off)) return ABI_EIO;
 
@@ -1032,8 +1244,8 @@ static bool fat_lookup(const char *path, fs_node_t *out) {
     if (!fs.mounted || !path || !out) return false;
 
     char buf[FS_PATH_MAX];
-    uint32_t n = 0;
-    for (uint32_t i = 0; path[i] && n < FS_PATH_MAX - 1; i++) buf[n++] = path[i];
+    uint32_t n = (uint32_t)strnlen(path, FS_PATH_MAX - 1);
+    memcpy(buf, path, n);
     buf[n] = 0;
     if (n == 0) return root_node(out);
 
@@ -1042,8 +1254,8 @@ static bool fat_lookup(const char *path, fs_node_t *out) {
 
     uint32_t start = (buf[0] == '/') ? 1 : 0;
     while (start <= n) {
-        uint32_t end = start;
-        while (end < n && buf[end] != '/') end++;
+        const char *slash = strchr(buf + start, '/');
+        uint32_t end = slash ? (uint32_t)(slash - buf) : n;
 
         uint32_t len = end - start;
         if (len == 0) {
@@ -1053,7 +1265,7 @@ static bool fat_lookup(const char *path, fs_node_t *out) {
         if (len > FS_MAX_NAME + 1) return false;
 
         char comp[FS_MAX_NAME + 2];
-        for (uint32_t i = 0; i < len; i++) comp[i] = buf[start + i];
+        memcpy(comp, buf + start, len);
         comp[len] = 0;
 
         if (comp[0] == '.' && comp[1] == 0) {
@@ -1092,7 +1304,7 @@ static bool fat_read(const fs_node_t *node, uint32_t offset, void *buf, uint32_t
     uint32_t within = offset % cluster_size;
 
     uint32_t cluster;
-    if (!cluster_nth(node->cluster, cl_index, &cluster)) return false;
+    if (!fat_read_cluster(node, cl_index, &cluster)) return false;
 
     uint8_t *out = (uint8_t *)buf;
     while (len) {
@@ -1125,7 +1337,7 @@ static bool fat_read(const fs_node_t *node, uint32_t offset, void *buf, uint32_t
         if (chunk > len) chunk = len;
 
         if (!sector_read(lba)) return false;
-        for (uint32_t i = 0; i < chunk; i++) out[i] = sec[off + i];
+        memcpy(out, sec + off, chunk);
 
         out += chunk;
         len -= chunk;

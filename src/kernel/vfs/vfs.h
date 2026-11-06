@@ -5,8 +5,8 @@
 #include <stddef.h>
 #include <stdbool.h>
 
-#define FS_MAX_NAME  13
-#define FS_PATH_MAX  256
+#define FS_MAX_NAME  256
+#define FS_PATH_MAX  1024
 
 typedef struct {
     char name[FS_MAX_NAME];

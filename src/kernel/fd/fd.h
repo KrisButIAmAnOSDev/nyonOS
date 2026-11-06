@@ -10,7 +10,7 @@
 #define FD_INLINE      16
 #define FD_MAX_TOTAL   256
 #define FD_INDEX_MASK  0xFF
-#define FD_PATH_MAX    256
+#define FD_PATH_MAX    FS_PATH_MAX
 
 #define FD_RIGHT_READ     (1u << 0)
 #define FD_RIGHT_WRITE    (1u << 1)
@@ -61,6 +61,9 @@
 #define FD_ESRCH    ABI_ESRCH
 #define FD_EPIPE    ABI_EPIPE
 #define FD_ENAMETOOLONG ABI_ENAMETOOLONG
+#define FD_EINTR   ABI_EINTR
+#define FD_ENOMEM  ABI_ENOMEM
+#define FD_EEXIST  ABI_EEXIST
 
 #define KOBJ_TYPE_ANY 0
 #define KOBJ_FILE    1
@@ -70,6 +73,12 @@
 #define KOBJ_FB      5
 #define KOBJ_ZERO    6
 #define KOBJ_NULL    7
+#define KOBJ_EVENTFD  8
+#define KOBJ_TIMERFD  9
+#define KOBJ_SIGNALFD 10
+#define KOBJ_EPOLL   11
+#define KOBJ_RANDOM  12
+#define KOBJ_MEMFD   13
 
 struct task;
 struct kobject;
@@ -91,6 +100,7 @@ struct kobject {
     uint32_t refcount;
     uint32_t max_rights;
     bool user_bufs;
+    void *cache;
     const struct kobject_ops *ops;
 };
 
@@ -133,6 +143,7 @@ void kobject_init(struct kobject *o, uint32_t type, uint32_t max_rights,
 void kobject_get(struct kobject *o);
 void kobject_put(struct kobject *o);
 bool kobject_valid(const struct kobject *o);
+void kobject_free(struct kobject *o);
 
 void fd_table_init(struct task *t);
 void fd_table_clone(struct task *dst, struct task *src);
