@@ -1,4 +1,4 @@
-#include <string.h>
+#include "kernel/lib/string.h"
 #include "uaccess.h"
 #include "kernel/kprintf/kprintf.h"
 #include "kernel/mm/vmm/vmm.h"

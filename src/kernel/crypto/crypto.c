@@ -1,4 +1,4 @@
-#include <string.h>
+#include "kernel/lib/string.h"
 #include "crypto.h"
 #include "kernel/kprintf/kprintf.h"
 #include "kernel/sync/preempt.h"

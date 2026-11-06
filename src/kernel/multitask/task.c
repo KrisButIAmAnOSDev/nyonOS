@@ -1,5 +1,5 @@
 #include "task.h"
-#include <string.h>
+#include "kernel/lib/string.h"
 #include "kernel/kprintf/kprintf.h"
 #include "drivers/serial/serial.h"
 #include "kernel/sync/sync.h"

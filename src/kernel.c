@@ -1,5 +1,5 @@
 #include <stdint.h>
-#include <string.h>
+#include "kernel/lib/string.h"
 #include <stddef.h>
 #include <stdbool.h>
 #include "boot/limine/limine.h"

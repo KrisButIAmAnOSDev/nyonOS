@@ -1,8 +1,8 @@
 #include "kernel/vfs/vfs.h"
 #include "kernel/kprintf/kprintf.h"
 
-#include <string.h>
-#include <strings.h>
+#include "kernel/lib/string.h"
+#include "kernel/lib/string.h"
 
 #define VFS_MAX_MOUNTS 8
 

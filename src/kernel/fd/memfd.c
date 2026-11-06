@@ -1,4 +1,4 @@
-#include <string.h>
+#include "kernel/lib/string.h"
 #include "kernel/fd/fd.h"
 #include "kernel/fd/memfd.h"
 #include "kernel/mm/heap/heap.h"

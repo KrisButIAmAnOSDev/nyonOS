@@ -1,4 +1,4 @@
-#include <string.h>
+#include "kernel/lib/string.h"
 #include "ata.h"
 #include "kernel/kprintf/kprintf.h"
 #include "arch/x86_64/pic/pic.h"

@@ -1,5 +1,5 @@
 #include "kernel/mm/heap/heap.h"
-#include <string.h>
+#include "kernel/lib/string.h"
 #include "arch/x86_64/cpu/cpu.h"
 #include "kernel/mm/vmm/vmm.h"
 #include "kernel/tty/tty.h"

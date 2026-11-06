@@ -1,5 +1,5 @@
 #include "test.h"
-#include <string.h>
+#include "kernel/lib/string.h"
 
 #include "kernel/kprintf/kprintf.h"
 #include "kernel/fd/fd.h"

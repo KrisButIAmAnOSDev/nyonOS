@@ -1,5 +1,5 @@
-#include <string.h>
-#include <strings.h>
+#include "kernel/lib/string.h"
+#include "kernel/lib/string.h"
 #include <stddef.h>
 
 int tolower(int c);

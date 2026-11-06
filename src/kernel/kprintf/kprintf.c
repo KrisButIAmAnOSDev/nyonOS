@@ -1,4 +1,4 @@
-#include <string.h>
+#include "kernel/lib/string.h"
 #include "kprintf.h"
 #include <stdbool.h>
 #include "drivers/serial/serial.h"

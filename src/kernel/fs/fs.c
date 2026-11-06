@@ -6,8 +6,8 @@
 #include "arch/x86_64/rtc/rtc.h"
 #include "arch/x86_64/cpu/cpu.h"
 
-#include <string.h>
-#include <strings.h>
+#include "kernel/lib/string.h"
+#include "kernel/lib/string.h"
 
 int toupper(int c);
 

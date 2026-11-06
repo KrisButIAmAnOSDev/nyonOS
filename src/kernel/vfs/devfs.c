@@ -1,5 +1,5 @@
 #include "kernel/vfs/vfs.h"
-#include <string.h>
+#include "kernel/lib/string.h"
 #include "graphics/video/video.h"
 #include "kernel/mm/vmm/vmm.h"
 #include "kernel/uaccess/uaccess.h"

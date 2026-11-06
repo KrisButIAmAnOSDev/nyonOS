@@ -3,7 +3,7 @@
 #include "drivers/serial/serial.h"
 #include "kernel/sync/sync.h"
 
-#include <string.h>
+#include "kernel/lib/string.h"
 #include "arch/x86_64/cpu/cpu.h"
 
 #define MAX_REGIONS 128

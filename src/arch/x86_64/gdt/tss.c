@@ -1,4 +1,4 @@
-#include <string.h>
+#include "kernel/lib/string.h"
 #include "tss.h"
 #include "kernel/kprintf/kprintf.h"
 #include "drivers/serial/serial.h"

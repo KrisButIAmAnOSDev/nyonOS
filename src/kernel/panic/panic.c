@@ -1,4 +1,4 @@
-#include <string.h>
+#include "kernel/lib/string.h"
 #include "kernel/panic/panic.h"
 #include "kernel/multitask/task.h"
 #include "kernel/mm/vmm/vmm.h"
