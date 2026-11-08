@@ -171,6 +171,7 @@ int fd_console_set_dest(int fd, struct task *t, uint32_t dest);
 int fd_tty_get_fg(int fd, struct task *t, uint32_t *pid);
 int fd_tty_set_fg(int fd, struct task *t, uint32_t pid);
 void fd_tty_task_gone(uint32_t pid);
+void fd_tty_force_fg(uint32_t pgid);
 
 struct kobject *fd_get_checked(struct task *t, int fd, uint32_t type, uint32_t needed);
 void fd_put(struct kobject *o);

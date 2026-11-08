@@ -7,3 +7,4 @@ src/user/bin/
 src/user/*.o
 src/user/*.d
 toolchain16/
+build/

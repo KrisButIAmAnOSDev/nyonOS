@@ -9,6 +9,8 @@
 #include <stdbool.h>
 #include "kernel/sync/preempt.h"
 
+static void keyboard_deliver(char c);
+
 static char keyboard_buffer[256];
 static size_t buffer_head = 0;
 static size_t buffer_tail = 0;
@@ -255,18 +257,27 @@ void keyboard_handler(struct isr_frame *frame) {
         return;
     }
 
-    keyboard_buffer_push(c);
-
-    if (keyboard_owner() == 0 && !kprintf_busy()) {
-        if (c == '\b') kprintf(PRINT_SCREEN, " \b\b");
-        else kprintf(PRINT_SCREEN, "%c", c);
-    } else if (keyboard_owner() != 0 && tty_canonical() && tty_echo()) {
-        if (c == '\b') kprintf(PRINT_BOTH, " \b\b");
-        else kprintf(PRINT_BOTH, "%c", c);
-    }
+    keyboard_deliver(c);
 
     task_wake_chan(&tty_wait_chan);
     poll_notify();
+}
+
+static void keyboard_deliver(char c) {
+    char echo_c = 0;
+    int r = tty_canon_input((uint8_t)c, &echo_c);
+
+    if (r == 0) {
+        keyboard_buffer_push(c);
+        if (tty_echo() && keyboard_owner() == 0 && !kprintf_busy())
+            kprintf(PRINT_SCREEN, "%c", c);
+        return;
+    }
+    if (!tty_echo()) return;
+
+    uint32_t out = keyboard_owner() ? PRINT_BOTH : PRINT_SCREEN;
+    if (r == 1) kprintf(out, "%c", echo_c);
+    else if (r == 2) kprintf(out, "\b \b");
 }
 
 bool keyboard_try_pop(char *out) {
@@ -280,6 +291,10 @@ bool keyboard_try_pop(char *out) {
     return false;
 }
 
+void keyboard_unread(char c) {
+    keyboard_buffer_push(c);
+}
+
 void keyboard_flush_input(void) {
     size_t head = __atomic_load_n(&buffer_head, __ATOMIC_ACQUIRE);
     __atomic_store_n(&buffer_tail, head, __ATOMIC_RELEASE);
@@ -288,7 +303,8 @@ void keyboard_flush_input(void) {
 bool keyboard_inject_char(char c) {
     uint64_t rflags;
     __asm__ volatile("pushfq; pop %0; cli" : "=r"(rflags) :: "memory");
-    bool kept = keyboard_buffer_push(c);
+    bool kept = true;
+    keyboard_deliver(c);
     task_wake_chan(&tty_wait_chan);
     poll_notify();
     if (rflags & 0x200) __asm__ volatile("sti" ::: "memory");

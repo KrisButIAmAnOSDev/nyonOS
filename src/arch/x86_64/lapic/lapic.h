@@ -46,5 +46,6 @@ void lapic_eoi(uint64_t base);
 void lapic_ipi_wait_clear(uint64_t base);
 uint32_t lapic_ipi_send(uint64_t base, uint32_t vector, uint32_t target_lapic_id, bool init);
 void lapic_ipi_broadcast(uint64_t base, uint32_t vector);
+void lapic_ipi_target(uint64_t base, uint32_t vector, uint32_t lapic_id);
 
 #endif

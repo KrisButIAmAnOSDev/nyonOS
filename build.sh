@@ -95,18 +95,44 @@ for prog in $PROGRAMS; do
     mcopy -i fat16.img@@1M "src/user/bin/$prog" "::/BIN/$prog"
 done
 
-tools/build-busybox.sh || true
-BB=${BUSYBOX_SRC:-../busybox}/busybox
-if [ -f "$BB" ]; then
-    mcopy -i fat16.img@@1M "$BB" ::/BIN/busybox
+BB_BIN=$NYONOS_BUSYBOX
+if [ -z "$BB_BIN" ] && [ -f ../busybox/busybox ]; then
+    BB_BIN=../busybox/busybox
+fi
+
+if [ -n "$BB_BIN" ] && [ -f "$BB_BIN" ]; then
+    mcopy -i fat16.img@@1M "$BB_BIN" ::/BIN/busybox
     BB_APPLETS="basename cat clear cmp comm cp cut dirname du echo env expand expr false find grep head hexdump hostname id install ln ls md5sum mkdir mktemp mv nl od printf readlink rev rm rmdir seq sha256sum shred sleep sort split stat strings sync tac tail tee test touch tr true uname unexpand uniq wc which xargs yes"
     for applet in $BB_APPLETS; do
-        mcopy -i fat16.img@@1M "$BB" "::/BIN/$applet"
+        mcopy -i fat16.img@@1M "$BB_BIN" "::/BIN/$applet"
     done
 fi
 
 if [ -f ../bash/bash ]; then
     mcopy -i fat16.img@@1M ../bash/bash ::/BIN/BASH
+fi
+
+NANO_BIN=$NYONOS_NANO
+if [ -z "$NANO_BIN" ] && [ -f tools/nano.bin ]; then
+    NANO_BIN=tools/nano.bin
+fi
+
+if [ -n "$NANO_BIN" ] && [ -f "$NANO_BIN" ]; then
+    mcopy -i fat16.img@@1M "$NANO_BIN" ::/BIN/NANO
+fi
+
+TERMINFO_DIR=$NYONOS_TERMINFO
+if [ -z "$TERMINFO_DIR" ] && [ -d tools/terminfo ]; then
+    TERMINFO_DIR=tools/terminfo
+fi
+
+if [ -n "$TERMINFO_DIR" ] && [ -d "$TERMINFO_DIR" ]; then
+    mmd -i fat16.img@@1M ::/usr ::/usr/share ::/usr/share/terminfo 2>/dev/null || true
+    for d in "$TERMINFO_DIR"/*; do
+        if [ -d "$d" ]; then
+            mcopy -s -i fat16.img@@1M "$d" ::/usr/share/terminfo/
+        fi
+    done
 fi
 
 PATH=$PATH:/usr/sbin:/sbin sgdisk nyonOS.img -n 1:2048 -t 1:ef00 -m 1

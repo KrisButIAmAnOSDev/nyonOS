@@ -299,6 +299,11 @@ size_t cpu_current_slot_of(uint32_t id) {
     return percpu_table[id].current_slot;
 }
 
+uint32_t cpu_lapic_id(uint32_t id) {
+    if (id >= MAX_CPUS) return 0;
+    return percpu_table[id].lapic_id;
+}
+
 uint64_t cpu_resched_count(uint32_t id) {
     if (id >= MAX_CPUS) return 0;
     return percpu_table[id].resched_count;
@@ -364,16 +369,13 @@ void cpu_bootstrap_ap(uint32_t processor_id, uint32_t lapic_id, uint64_t hhdm_of
     cpu_enable_smep_smap();
     cpu_enable_pcid();
     cpu_enable_sse_user();
-
     idt_reload();
     syscall_msr_init();
-
     uint64_t lapic = hhdm_offset + LAPIC_DEFAULT_PHYS;
     percpu_table[processor_id].lapic_base = lapic;
     lapic_spurious_enable(lapic, 0xFF);
     lapic_mask_all_lvt(lapic);
     lapic_write_lvt_timer(lapic, LAPIC_RESCHED_VECTOR);
-
     percpu_table[processor_id].online = true;
 }
 

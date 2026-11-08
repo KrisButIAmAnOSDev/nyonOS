@@ -101,6 +101,7 @@ void cpu_set_detected(uint32_t n);
 struct percpu *cpu_self(void);
 size_t cpu_current_slot_of(uint32_t id);
 uint64_t cpu_resched_count(uint32_t id);
+uint32_t cpu_lapic_id(uint32_t id);
 bool cpu_online_by_id(uint32_t id);
 uint64_t cpu_switch_count(uint32_t id);
 void *percpu_self_addr(void);

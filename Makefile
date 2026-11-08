@@ -56,7 +56,14 @@ $(PERCPU_OFF): src/arch/x86_64/cpu/cpu.h scripts/gen_percpu_off.py
 
 .PHONY: all kernel image run clean run-kvm run-ihatedisplay run-ihatedisplay-kvm
 
-all: kernel
+all: kernel user $(ASM_ABI) $(PERCPU_OFF)
+	@NANO_BIN=$$(python3 tools/build_nano.py 2>/dev/null); \
+	if [ -n "$$NANO_BIN" ]; then \
+		NYONOS_NANO="$$NANO_BIN" NYONOS_TERMINFO="build/ports/terminfo" ./build.sh; \
+	else \
+		./build.sh; \
+	fi
+	qemu-system-x86_64 $(QEMU_KVM) -smp $(QEMU_SMP) -cpu $(QEMU_CPU) -drive format=raw,file=nyonOS.img -drive format=raw,file=fat16.img -d int,cpu_reset -D qemu.log -serial stdio -no-reboot -k en-us
 
 kernel: bin/$(OUTPUT)
 

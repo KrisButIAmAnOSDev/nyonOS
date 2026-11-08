@@ -11,7 +11,14 @@ A minimal x86_64 hobby OS kernel written from scratch. Boots via Limine on BIOS/
 - **elf loader (working!!!)** yea its working
 - **mlibc ruuning (mlibc port ig?)** its running 
 - **Working pmm and vmm** it works,at least (and 5lvl paging)
-- **"bash and busybox "** running
+- **"bash and (user-provided) busybox "** running
+
+## Credits
+
+- **kbd** — 8x16 font data (from the `kbd` package, GPL-2.0-or-later)
+- **bash** — the shell (GPL-3.0-or-later)
+- **busybox** — user-provided applets (GPL-2.0-only)
+- **nano** — user-provided text editor (GPL-3.0-or-later)
 
 ## Building
 

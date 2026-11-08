@@ -17,6 +17,8 @@
 #include "kernel/mm/vmm/vmspace.h"
 #include "arch/x86_64/cpu/cpu.h"
 #include "arch/x86_64/lapic/lapic.h"
+#include "kernel/fd/fd.h"
+#include "drivers/keyboard/keyboard.h"
 
 #define QW_RIP 17
 #define QW_CS 18
@@ -850,6 +852,7 @@ int task_wait_child(struct task *parent, int32_t want, int32_t *status_out, int3
         self->wait_chan = &self->child_chan;
         self->wake_tick = 0;
         self->blocked = true;
+        self->cpu = cpu_id();
         lock_release(LOCK_SCHED, &sched_lock);
 
         task_sleep_registered();
@@ -939,7 +942,14 @@ static void task_release_wait(struct task *t, size_t idx) {
     (void)idx;
     __atomic_add_fetch(&t->wake_gen, 1, __ATOMIC_RELEASE);
     __atomic_store_n(&t->blocked, false, __ATOMIC_RELEASE);
-    task_wake_broadcast();
+    if (cpu_count() > 1 && t->cpu != TASK_CPU_ANY &&
+        t->cpu < MAX_CPUS && cpu_online_by_id(t->cpu) &&
+        cpu_lapic_id(t->cpu) != 0) {
+        lapic_ipi_target(cpu_self()->lapic_base, LAPIC_RESCHED_VECTOR,
+                         cpu_lapic_id(t->cpu));
+    } else {
+        task_wake_broadcast();
+    }
 }
 
 static struct task *pick_next(uint32_t me) {
@@ -1182,6 +1192,7 @@ void task_block_current(uint64_t seen_seq) {
 
     lock_acquire(LOCK_SCHED, &sched_lock);
     tasks[current_slot()].blocked = true;
+    tasks[current_slot()].cpu = cpu_id();
     lock_release(LOCK_SCHED, &sched_lock);
 
     for (;;) {
@@ -1215,6 +1226,7 @@ bool task_wait_vfork_child(uint32_t child) {
         self->wait_chan = &self->vfork_chan;
         self->wake_tick = 0;
         self->blocked = true;
+        self->cpu = cpu_id();
     }
     lock_release(LOCK_SCHED, &sched_lock);
 
@@ -1238,6 +1250,7 @@ bool task_wait(void *chan, uint64_t deadline) {
     self->wake_tick = deadline;
     if (deadline && deadline < earliest_wake()) set_earliest_wake(deadline);
     self->blocked = true;
+    self->cpu = cpu_id();
     lock_release(LOCK_SCHED, &sched_lock);
 
     if (__atomic_load_n(&self->wake_gen, __ATOMIC_ACQUIRE) != seen) {
@@ -1278,6 +1291,7 @@ int task_futex_wait(void *chan, uintptr_t uaddr, uint32_t expected, uint64_t dea
     self->wake_tick = deadline;
     if (deadline && deadline < earliest_wake()) set_earliest_wake(deadline);
     self->blocked = true;
+    self->cpu = cpu_id();
     lock_release(LOCK_SCHED, &sched_lock);
 
     if (__atomic_load_n(&self->wake_gen, __ATOMIC_ACQUIRE) != seen) {
@@ -1434,7 +1448,14 @@ int task_set_pgid(uint32_t pid, uint32_t pgid) {
         if (!t) return -3;
     }
     if (t->sid != self->sid) return -1;
+    uint32_t old_pgid = t->pgid;
     task_pgrp_join(t, pgid ? pgid : t->pid, t->sid);
+    uint32_t owner = keyboard_owner();
+    uint32_t new_pgid = pgid ? pgid : t->pid;
+    if (t->pgid != old_pgid && owner != 0 &&
+        owner == t->parent_pid && new_pgid == t->pid) {
+        fd_tty_force_fg(t->pgid);
+    }
     return 0;
 }
 

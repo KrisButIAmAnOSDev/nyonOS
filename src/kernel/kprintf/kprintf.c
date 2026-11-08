@@ -12,14 +12,37 @@ static volatile uint32_t *fb;
 static uint32_t fb_w, fb_h, cur_x, cur_y, home_x;
 static uint32_t cur_fg = COLOR_WHITE;
 static uint32_t cur_bg = COLOR_BLACK;
+static bool cur_reverse;
 static int ansi_state;
 static char ansi_params[16];
 static size_t ansi_n;
+static uint32_t term_cols;
+static uint32_t term_rows;
+static uint8_t cell_ch[256 * 128];
+static uint32_t cell_fg[256 * 128];
+static uint32_t cell_bg[256 * 128];
+static uint32_t cur_col, cur_row;
+static uint32_t home_col;
+static uint32_t scroll_top;
+static uint32_t scroll_bot = UINT32_MAX;
+static uint32_t saved_col, saved_row;
+static uint8_t last_print;
 
 void kprintf_attach(volatile uint32_t *framebuffer, uint32_t width, uint32_t height) {
     fb = framebuffer;
     fb_w = width;
     fb_h = height;
+    term_cols = width / GLYPH_W;
+    if (term_cols > 256) term_cols = 256;
+    term_rows = height / GLYPH_H;
+    if (term_rows > 128) term_rows = 128;
+    home_col = 0;
+    cur_col = 0;
+    cur_row = 0;
+    scroll_top = 0;
+    scroll_bot = UINT32_MAX;
+    cur_reverse = false;
+    last_print = ' ';
     kprintf_home(0, 0);
 }
 
@@ -32,6 +55,7 @@ void kprintf_home(uint32_t x, uint32_t y) {
 void kprintf_reset_colors(void) {
     cur_fg = COLOR_WHITE;
     cur_bg = COLOR_BLACK;
+    cur_reverse = false;
     ansi_state = 0;
 }
 
@@ -43,24 +67,6 @@ void kprintf_clear(void) {
             fb[y * fb_w + x] = 0x000000;
         }
     }
-}
-
-static void screen_scroll(void) {
-    if (!fb || GLYPH_H >= fb_h) return;
-
-    uint32_t keep = fb_h - GLYPH_H;
-    for (uint32_t y = 0; y < keep; y++)
-        memcpy((void *)&fb[y * fb_w], (const void *)&fb[(y + GLYPH_H) * fb_w], fb_w * sizeof(fb[0]));
-    for (uint32_t y = keep; y < fb_h; y++)
-        memset((void *)&fb[y * fb_w], 0, fb_w * sizeof(fb[0]));
-
-    if (cur_y >= fb_h) cur_y = keep;
-}
-
-static void screen_newline(void) {
-    cur_x = home_x;
-    cur_y += GLYPH_H;
-    if (cur_y + GLYPH_H > fb_h) screen_scroll();
 }
 
 static uint32_t ansi_color(uint32_t idx) {
@@ -106,24 +112,96 @@ static size_t ansi_ints(int *v, size_t max) {
     return n;
 }
 
-static void ansi_erase_range(uint32_t x0, uint32_t x1) {
-    if (!fb) return;
-    for (uint32_t x = x0; x < x1 && x < fb_w; x++)
-        for (int row = 0; row < GLYPH_H && cur_y + (uint32_t)row < fb_h; row++)
-            fb[(cur_y + (uint32_t)row) * fb_w + x] = cur_bg;
+static void draw_cell(uint32_t col, uint32_t row, uint8_t c,
+                      uint32_t fg, uint32_t bg) {
+    if (col >= term_cols || row >= term_rows) return;
+    uint32_t idx = row * 256 + col;
+    cell_ch[idx] = c;
+    cell_fg[idx] = fg;
+    cell_bg[idx] = bg;
+    draw_char(fb, c, col * GLYPH_W, row * GLYPH_H, fg, bg, fb_w, fb_h);
+}
+
+static void vt_scroll_region(void) {
+    if (term_rows == 0) return;
+    uint32_t top = scroll_top;
+    uint32_t bot = (scroll_bot == UINT32_MAX) ? (term_rows - 1) : scroll_bot;
+    if (top >= bot) return;
+    for (uint32_t row = top; row < bot; row++) {
+        memcpy(&cell_ch[row * 256], &cell_ch[(row + 1) * 256], 256);
+        memcpy(&cell_fg[row * 256], &cell_fg[(row + 1) * 256], 256 * sizeof(uint32_t));
+        memcpy(&cell_bg[row * 256], &cell_bg[(row + 1) * 256], 256 * sizeof(uint32_t));
+        memcpy((void *)&fb[(row * GLYPH_H) * fb_w],
+               (const void *)&fb[((row + 1) * GLYPH_H) * fb_w],
+               GLYPH_H * fb_w * sizeof(fb[0]));
+    }
+    for (uint32_t col = 0; col < term_cols; col++)
+        draw_cell(col, bot, ' ', cur_fg, cur_bg);
+    if (cur_row > bot) cur_row = bot;
+}
+
+static void vt_newline(void) {
+    cur_col = home_col;
+    uint32_t bot = (scroll_bot == UINT32_MAX) ? (term_rows - 1) : scroll_bot;
+    if (cur_row < bot) cur_row++;
+    else vt_scroll_region();
+}
+
+static void vt_clear_screen(uint32_t mode) {
+    if (mode == 2) {
+        for (uint32_t row = 0; row < term_rows; row++)
+            for (uint32_t col = 0; col < term_cols; col++)
+                draw_cell(col, row, ' ', cur_fg, cur_bg);
+        cur_col = home_col;
+        cur_row = 0;
+        return;
+    }
+    if (mode == 1) {
+        for (uint32_t row = 0; row <= cur_row; row++) {
+            uint32_t e = (row == cur_row) ? cur_col : term_cols;
+            if (e > term_cols) e = term_cols;
+            for (uint32_t col = 0; col < e; col++)
+                draw_cell(col, row, ' ', cur_fg, cur_bg);
+        }
+        return;
+    }
+    for (uint32_t col = cur_col; col < term_cols; col++)
+        draw_cell(col, cur_row, ' ', cur_fg, cur_bg);
+    for (uint32_t row = cur_row + 1; row < term_rows; row++)
+        for (uint32_t col = 0; col < term_cols; col++)
+            draw_cell(col, row, ' ', cur_fg, cur_bg);
+}
+
+static void vt_erase_line(uint32_t mode) {
+    if (mode == 1) {
+        for (uint32_t col = 0; col <= cur_col && col < term_cols; col++)
+            draw_cell(col, cur_row, ' ', cur_fg, cur_bg);
+        return;
+    }
+    if (mode == 2) {
+        for (uint32_t col = 0; col < term_cols; col++)
+            draw_cell(col, cur_row, ' ', cur_fg, cur_bg);
+        return;
+    }
+    for (uint32_t col = cur_col; col < term_cols; col++)
+        draw_cell(col, cur_row, ' ', cur_fg, cur_bg);
 }
 
 static void ansi_run(char final) {
     int v[8];
     size_t n = ansi_ints(v, 8);
     int p0 = n > 0 ? v[0] : -1;
-    uint32_t step = (p0 > 1 ? (uint32_t)p0 : 1) * GLYPH_H;
+    uint32_t fg = cur_reverse ? cur_bg : cur_fg;
+    uint32_t bg = cur_reverse ? cur_fg : cur_bg;
 
     if (final == 'm') {
-        if (n == 0) { cur_fg = COLOR_WHITE; cur_bg = COLOR_BLACK; return; }
+        if (n == 0) { cur_fg = COLOR_WHITE; cur_bg = COLOR_BLACK; cur_reverse = false; return; }
         for (size_t i = 0; i < n; i++) {
             int p = v[i];
-            if (p == 0) { cur_fg = COLOR_WHITE; cur_bg = COLOR_BLACK; }
+            if (p == 0) { cur_fg = COLOR_WHITE; cur_bg = COLOR_BLACK; cur_reverse = false; }
+            else if (p == 1 || p == 22) { }
+            else if (p == 7) cur_reverse = true;
+            else if (p == 27) cur_reverse = false;
             else if (p == 39) cur_fg = COLOR_WHITE;
             else if (p == 49) cur_bg = COLOR_BLACK;
             else if (p >= 30 && p <= 37) cur_fg = ansi_color((uint32_t)(p - 30));
@@ -135,67 +213,90 @@ static void ansi_run(char final) {
         }
         return;
     }
-    if (final == 'J') {
-        if (!fb) return;
-        if (p0 == 2) {
-            kprintf_clear();
-            cur_x = home_x;
-            cur_y = 0;
-        } else if (p0 == 1) {
-            for (uint32_t y = 0; y < cur_y + GLYPH_H && y < fb_h; y++) {
-                uint32_t x1 = (y < cur_y) ? fb_w : (cur_x + GLYPH_W);
-                for (uint32_t x = 0; x < x1 && x < fb_w; x++)
-                    fb[y * fb_w + x] = cur_bg;
-            }
-        } else {
-            ansi_erase_range(cur_x, fb_w);
-            for (uint32_t y = cur_y + GLYPH_H; y < fb_h; y++)
-                for (uint32_t x = 0; x < fb_w; x++)
-                    fb[y * fb_w + x] = cur_bg;
-        }
-        return;
-    }
-    if (final == 'K') {
-        if (p0 == 1) ansi_erase_range(home_x, cur_x + GLYPH_W);
-        else if (p0 == 2) ansi_erase_range(home_x, fb_w);
-        else ansi_erase_range(cur_x, fb_w);
-        return;
-    }
+    if (final == 'J') { vt_clear_screen(p0 < 0 ? 0 : (uint32_t)p0); return; }
+    if (final == 'K') { vt_erase_line(p0 < 0 ? 0 : (uint32_t)p0); return; }
     if (final == 'A') {
-        if (cur_y >= step) cur_y -= step;
+        uint32_t step = (p0 > 1 ? (uint32_t)p0 : 1);
+        cur_row = (cur_row >= step) ? cur_row - step : 0;
         return;
     }
     if (final == 'B') {
-        cur_y += step;
-        if (cur_y + GLYPH_H > fb_h) cur_y = fb_h - GLYPH_H;
+        uint32_t step = (p0 > 1 ? (uint32_t)p0 : 1);
+        cur_row += step;
+        if (cur_row >= term_rows) cur_row = term_rows - 1;
         return;
     }
     if (final == 'C') {
-        uint32_t hstep = (p0 > 1 ? (uint32_t)p0 : 1) * GLYPH_W;
-        cur_x += hstep;
-        if (cur_x + GLYPH_W > fb_w) cur_x = fb_w - GLYPH_W;
+        uint32_t step = (p0 > 1 ? (uint32_t)p0 : 1);
+        cur_col += step;
+        if (cur_col >= term_cols) cur_col = term_cols - 1;
         return;
     }
     if (final == 'D') {
-        uint32_t hstep = (p0 > 1 ? (uint32_t)p0 : 1) * GLYPH_W;
-        if (cur_x >= home_x + hstep) cur_x -= hstep;
-        else cur_x = home_x;
+        uint32_t step = (p0 > 1 ? (uint32_t)p0 : 1);
+        cur_col = (cur_col >= step) ? cur_col - step : 0;
+        return;
+    }
+    if (final == 'E') {
+        uint32_t step = (p0 > 1 ? (uint32_t)p0 : 1);
+        cur_row += step;
+        if (cur_row >= term_rows) cur_row = term_rows - 1;
+        cur_col = home_col;
+        return;
+    }
+    if (final == 'F') {
+        uint32_t step = (p0 > 1 ? (uint32_t)p0 : 1);
+        cur_row = (cur_row >= step) ? cur_row - step : 0;
+        cur_col = home_col;
         return;
     }
     if (final == 'G') {
-        if (p0 >= 1) cur_x = home_x + (uint32_t)(p0 - 1) * GLYPH_W;
-        if (cur_x + GLYPH_W > fb_w) cur_x = fb_w - GLYPH_W;
+        uint32_t c = (p0 > 0) ? (uint32_t)(p0 - 1) : 0;
+        cur_col = (c < term_cols) ? c : term_cols - 1;
+        return;
+    }
+    if (final == 'd') {
+        uint32_t r = (p0 > 0) ? (uint32_t)(p0 - 1) : 0;
+        cur_row = (r < term_rows) ? r : term_rows - 1;
+        cur_col = home_col;
         return;
     }
     if (final == 'H' || final == 'f') {
-        cur_x = home_x;
-        cur_y = 0;
+        uint32_t r = (n > 0 && v[0] > 0) ? (uint32_t)(v[0] - 1) : 0;
+        uint32_t c = (n > 1 && v[1] > 0) ? (uint32_t)(v[1] - 1) : 0;
+        cur_row = (r < term_rows) ? r : term_rows - 1;
+        cur_col = (c < term_cols) ? c : term_cols - 1;
+        return;
+    }
+    if (final == 'r') {
+        scroll_top = (n > 0 && v[0] > 0) ? (uint32_t)(v[0] - 1) : 0;
+        scroll_bot = (n > 1 && v[1] > 0) ? (uint32_t)(v[1] - 1) : (term_rows - 1);
+        if (scroll_top >= term_rows) scroll_top = term_rows - 1;
+        if (scroll_bot >= term_rows) scroll_bot = term_rows - 1;
+        return;
+    }
+    if (final == 's') { saved_col = cur_col; saved_row = cur_row; return; }
+    if (final == 'u') { cur_col = saved_col; cur_row = saved_row; return; }
+    if (final == 'b') {
+        uint32_t rep = (p0 > 0) ? (uint32_t)p0 : 1;
+        for (uint32_t i = 0; i < rep; i++) {
+            if (cur_col >= term_cols) vt_newline();
+            draw_cell(cur_col++, cur_row, last_print, fg, bg);
+        }
+        return;
+    }
+    if (final == 'l' || final == 'h') {
+        if (v[0] == 1049) {
+            vt_clear_screen(2);
+            scroll_top = 0;
+            scroll_bot = term_rows - 1;
+        }
         return;
     }
 }
 
 static void screen_char(char c) {
-    if (!fb) return;
+    if (!fb || term_cols == 0 || term_rows == 0) return;
 
     if (ansi_state == 2) {
         if (c >= 0x40 && c <= 0x7e) {
@@ -209,40 +310,38 @@ static void screen_char(char c) {
         }
         return;
     }
+    if (ansi_state == 3) {
+        ansi_state = 0;
+        return;
+    }
     if (ansi_state == 1) {
         if (c == '[') { ansi_state = 2; ansi_n = 0; }
+        else if (c == '(' || c == ')' || c == '#') ansi_state = 3;
         else ansi_state = 0;
         return;
     }
     if (c == 27) { ansi_state = 1; return; }
 
-    if (c == '\n') { screen_newline(); return; }
-    if (c == '\r') { cur_x = home_x; return; }
+    if (c == '\n') { vt_newline(); return; }
+    if (c == '\r') { cur_col = home_col; return; }
     if (c == '\t') {
-        uint32_t col = (cur_x - home_x) / GLYPH_W;
-        col = (col + 8) & ~(uint32_t)7;
-        cur_x = home_x + col * GLYPH_W;
-        if (cur_x + GLYPH_W > fb_w) screen_newline();
+        cur_col = ((cur_col - home_col) / 8 + 1) * 8 + home_col;
+        if (cur_col >= term_cols) { cur_col = home_col; vt_newline(); }
         return;
     }
-
     if (c == '\b') {
-        if (cur_x >= home_x + GLYPH_W) {
-            cur_x -= GLYPH_W;
-            draw_char(fb, ' ', cur_x, cur_y, cur_bg, cur_bg, fb_w, fb_h);
-        }
+        if (cur_col > home_col) cur_col--;
         return;
     }
-
     if (c < 32 || c > 126) return;
 
-    if (cur_x + GLYPH_W > fb_w) screen_newline();
-    if (cur_y + GLYPH_H > fb_h) return;
-
-    draw_char(fb, (uint8_t)c, cur_x, cur_y, cur_fg, cur_bg, fb_w, fb_h);
-    cur_x += GLYPH_W;
+    uint32_t fg = cur_reverse ? cur_bg : cur_fg;
+    uint32_t bg = cur_reverse ? cur_fg : cur_bg;
+    draw_cell(cur_col, cur_row, (uint8_t)c, fg, bg);
+    last_print = (uint8_t)c;
+    cur_col++;
+    if (cur_col >= term_cols) vt_newline();
 }
-
 static uint8_t attr_flags(uint32_t attr) { return (uint8_t)(attr & 0xFF); }
 
 void kprintchar(char c, uint32_t attr) {

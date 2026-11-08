@@ -168,7 +168,9 @@ static void ap_entry(struct limine_mp_info *info) {
     vmm_switch_address_space(kernel_pml4);
 
     extern void isr_stub_resched(void);
+    extern void isr_stub_shootdown(void);
     idt_install(LAPIC_RESCHED_VECTOR, (void *)isr_stub_resched, 0x8E);
+    idt_install(LAPIC_SHOOTDOWN_VECTOR, (void *)isr_stub_shootdown, 0x8E);
     idt_reload();
     cpu_bootstrap_ap(id, info->lapic_id, smp_hhdm_offset);
 
@@ -285,6 +287,23 @@ static void task_seth(void) {
     task_exit();
 }
 
+static uint64_t test_time_start(void) {
+    return pit_get_ticks();
+}
+
+static void test_time_end(const char *name, uint64_t start) {
+    uint64_t now = pit_get_ticks();
+    uint64_t ticks = now - start;
+    kprintf(PRINT_SERIAL, "TIME %s: %llu ms (%llu ticks)\n", name,
+            (unsigned long long)pit_ticks_to_ms(ticks), (unsigned long long)ticks);
+}
+
+static void timed_test(const char *name, void (*fn)(void)) {
+    uint64_t start = test_time_start();
+    fn();
+    test_time_end(name, start);
+}
+
 void kmain(void) {
     serial_init();
 
@@ -306,7 +325,7 @@ void kmain(void) {
     }
 
     kprintf_attach((volatile uint32_t *)fb->address, fb->width, fb->height);
-    tty_set_display_size((uint16_t)fb->height, (uint16_t)fb->width);
+    tty_set_display_size((uint16_t)(fb->height / 16), (uint16_t)(fb->width / 8));
 
     if (memmap_request.response == NULL) {
         kprintf(PRINT_SERIAL, "nyonOS: No memmap response!\n");
@@ -409,6 +428,8 @@ void kmain(void) {
 
     crypto_init();
     syscall_init();
+    extern void isr_stub_shootdown(void);
+    idt_install(LAPIC_SHOOTDOWN_VECTOR, (void *)isr_stub_shootdown, 0x8E);
     irq_install(0, pit_handler);
     irq_install(1, keyboard_handler);
     keyboard_init();
@@ -507,35 +528,39 @@ void kmain(void) {
             extern uint8_t user_tty_a_entry[];
             extern uint8_t user_tty_b_entry[];
             extern uint8_t user_tty_c_entry[];
+            extern uint8_t user_wait_entry[];
+            uint64_t tt_start = test_time_start();
             tty_isolation_test(TASK_USER_CODE_VIRT + (size_t)(user_tty_a_entry - user_test_entry),
                                TASK_USER_CODE_VIRT + (size_t)(user_tty_b_entry - user_test_entry),
                                TASK_USER_CODE_VIRT + (size_t)(user_tty_c_entry - user_test_entry),
                                code_bytes, code_pages);
-            extern uint8_t user_wait_entry[];
+            test_time_end("tty", tt_start);
+            uint64_t wt_start = test_time_start();
             wait_test(TASK_USER_CODE_VIRT + (size_t)(user_wait_entry - user_test_entry), code_bytes, code_pages);
+            test_time_end("wait", wt_start);
         }
         {
-            fd_test();
-            mm_test();
-            pipe_test();
-            fswrite_test();
-            fd2_test();
-            futex_pair_test();
-            exectest_run();
-            mandel_run();
-            featuretest_run();
-            proctest_run();
-            clktest_run();
-            forktest_run();
-            sigtest_run();
-            ev_test();
-            fb_test();
-            dev_test();
-            tty_cc_test();
-            sys_test();
-            sysdep_test();
-            thread_test();
-            mlibc_hello_test();
+            timed_test("fd", fd_test);
+            timed_test("mm", mm_test);
+            timed_test("pipe", pipe_test);
+            timed_test("fsw", fswrite_test);
+            timed_test("fd2", fd2_test);
+            timed_test("futex", futex_pair_test);
+            timed_test("exec", exectest_run);
+            timed_test("mandel", mandel_run);
+            timed_test("features", featuretest_run);
+            timed_test("proc", proctest_run);
+            timed_test("clk", clktest_run);
+            timed_test("fork", forktest_run);
+            timed_test("sig", sigtest_run);
+            timed_test("ev", ev_test);
+            timed_test("fb", fb_test);
+            timed_test("dev", dev_test);
+            timed_test("ttycc", tty_cc_test);
+            timed_test("sys", sys_test);
+            timed_test("sysdep", sysdep_test);
+            timed_test("threads", thread_test);
+            timed_test("mlibc", mlibc_hello_test);
         }
 
         {
@@ -546,7 +571,9 @@ void kmain(void) {
             kprintchar('\n', PRINT_SERIAL);
         }
 
+        uint64_t er_start = test_time_start();
         elf_run_test();
+        test_time_end("elf_run", er_start);
     }
 
     {

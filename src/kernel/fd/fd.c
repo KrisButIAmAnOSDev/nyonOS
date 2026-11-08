@@ -663,8 +663,14 @@ static int64_t console_write_at(struct kobject *o, const void *ubuf, uint32_t le
     const struct console *c = (const struct console *)o;
     if (c->dest == PRINT_NONE) return (int64_t)len;
     const char *s = (const char *)ubuf;
+    uint32_t oflag = tty_oflag();
+    bool opost = (oflag & 1u) != 0;
+    bool onlcr = (oflag & 4u) != 0;
     kprintf_output_lock();
-    for (uint32_t i = 0; i < len; i++) kprintchar(s[i], c->dest);
+    for (uint32_t i = 0; i < len; i++) {
+        if (opost && onlcr && s[i] == '\n') kprintchar('\r', c->dest);
+        kprintchar(s[i], c->dest);
+    }
     kprintf_output_unlock();
     return (int64_t)len;
 }
@@ -725,11 +731,23 @@ int fd_tty_set_fg(int fd, struct task *t, uint32_t pid) {
     return r;
 }
 
+static void tty_serial_reset(void) {
+    static const char seq[] =
+        "\x1b[0m"
+        "\x1b[?7h"
+        "\x1b[?25h"
+        "\x1b[r"
+        "\x1b[?1049l";
+    for (size_t i = 0; i < sizeof seq - 1; i++) kprintchar(seq[i], PRINT_SERIAL);
+}
+
 void fd_tty_task_gone(uint32_t pid) {
     preempt_disable();
-    if (pid != 0 && keyboard_owner() == pid) keyboard_set_owner(0);
+    bool was_owner = (pid != 0 && keyboard_owner() == pid);
+    if (was_owner) keyboard_set_owner(0);
     if (pid != 0 && tty_fg() == pid) tty_set_fg(0);
     preempt_enable();
+    if (was_owner) tty_serial_reset();
     task_wake_chan(keyboard_wait_chan());
 }
 
@@ -747,7 +765,9 @@ static int64_t console_read_at(struct kobject *o, void *ubuf, uint32_t len, uint
         owner = me;
     }
     preempt_enable();
-    if (owner != me) return FD_EIO;
+    if (owner != me && !(owner && task_in_pgrp(owner))) {
+        return FD_EIO;
+    }
 
     char *s = (char *)ubuf;
     uint32_t i = 0;
@@ -757,6 +777,7 @@ static int64_t console_read_at(struct kobject *o, void *ubuf, uint32_t len, uint
         while (i < len) {
             char c;
             if (!keyboard_try_pop(&c)) break;
+            if (c == '\n') c = '\r';
             s[i++] = c;
         }
         preempt_enable();
@@ -764,28 +785,7 @@ static int64_t console_read_at(struct kobject *o, void *ubuf, uint32_t len, uint
         return (int64_t)i;
     }
 
-    if (!tty_input_ready()) return FD_EAGAIN;
-
-    char eof = tty_eof_char();
-
-    preempt_disable();
-    while (i < len) {
-        char c;
-        if (!keyboard_try_pop(&c)) break;
-        if (eof && c == eof) {
-            if (i == 0) {
-                preempt_enable();
-                return 0;
-            }
-            break;
-        }
-        s[i++] = c;
-        if (c == '\n') break;
-    }
-    preempt_enable();
-
-    if (i == 0) return FD_EAGAIN;
-    return (int64_t)i;
+    return (int64_t)tty_canon_read(ubuf, len);
 }
 
 static int console_wait_readable(struct kobject *o) {
@@ -798,7 +798,12 @@ static int console_wait_readable(struct kobject *o) {
 
     int r;
     for (;;) {
-        if (keyboard_owner() != me) { r = FD_EIO; break; }
+        uint32_t owner = keyboard_owner();
+        if (owner == 0 && me != 0) {
+            keyboard_set_owner(me);
+            owner = me;
+        }
+        if (owner != me && !(owner && task_in_pgrp(owner))) { r = FD_EIO; break; }
         if (tty_input_ready()) { r = 0; break; }
         task_wait(keyboard_wait_chan(), 0);
     }
@@ -818,6 +823,14 @@ static bool console_poll_write(struct kobject *o, uint16_t events, uint16_t *rev
     (void)o;
     if (events & ABI_POLLOUT) *revents |= ABI_POLLOUT;
     return *revents != 0;
+}
+
+void fd_tty_force_fg(uint32_t pgid) {
+    preempt_disable();
+    keyboard_set_owner(pgid);
+    tty_set_fg(pgid);
+    task_wake_chan(keyboard_wait_chan());
+    preempt_enable();
 }
 
 static int console_ioctl(struct kobject *o, unsigned req, uint64_t arg, struct task *t);
@@ -876,13 +889,14 @@ static int console_ioctl(struct kobject *o, unsigned req, uint64_t arg, struct t
             preempt_disable();
             uint32_t owner = keyboard_owner();
             uint32_t curfg = tty_fg();
-            if (owner != 0 && owner != t->pid) r = FD_EPERM;
+            bool child_claim = pid != 0 && pid == t->pgid && owner != 0 && owner == t->parent_pid;
+            if (owner != 0 && owner != t->pid && !child_claim) r = FD_EPERM;
             else if (pid != 0 && !task_find_pid(pid) && !task_pgrp_exists(pid)) r = FD_ESRCH;
             else {
                 bool is_fg = (curfg != 0 && curfg == t->pid) || (curfg == 0 && owner == t->pid);
                 bool ttou_ignored = (t->sig_act_handler[22] == ABI_SIG_IGN);
                 bool ttou_blocked = (t->sig_blocked & (1ULL << 21)) != 0;
-                if (pid != 0 && !is_fg && !ttou_ignored && !ttou_blocked && t->pgid != 0) {
+                if (pid != 0 && !is_fg && !child_claim && !ttou_ignored && !ttou_blocked && t->pgid != 0) {
                     if (task_pgrp_orphaned(t->pgid)) r = FD_EIO;
                 } else {
                     keyboard_set_owner(pid);

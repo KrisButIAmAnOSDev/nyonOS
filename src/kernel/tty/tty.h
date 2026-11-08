@@ -31,4 +31,8 @@ void tty_release_ctty(uint32_t session_id);
 bool tty_isig(void);
 int tty_cc_signal(char c);
 
+uint32_t tty_oflag(void);
+int tty_canon_input(uint8_t c, char *echo_out);
+int tty_canon_read(void *buf, uint32_t len);
+
 #endif
