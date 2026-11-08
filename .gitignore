@@ -8,3 +8,5 @@ src/user/*.o
 src/user/*.d
 toolchain16/
 build/
+tools/nano.bin
+__pycache__/

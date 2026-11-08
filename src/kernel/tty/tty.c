@@ -1,6 +1,6 @@
 #include "kernel/tty/tty.h"
 
-#include <string.h>
+#include "kernel/lib/string.h"
 
 #include "abi/abi.h"
 #include "drivers/keyboard/keyboard.h"
