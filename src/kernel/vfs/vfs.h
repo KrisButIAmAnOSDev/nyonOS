@@ -82,5 +82,7 @@ const struct fs_ops *devfs_ops(void);
 #define DEVFS_DEV_CONSOLE 5
 #define DEVFS_DEV_TTY0 6
 #define DEVFS_DEV_TTY 7
+#define DEVFS_DEV_RANDOM 8
+#define DEVFS_DEV_URANDOM 9
 
 #endif

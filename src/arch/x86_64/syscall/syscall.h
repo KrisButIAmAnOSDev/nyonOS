@@ -53,7 +53,7 @@
 #define C_MAX_CHECKS  (C_RES_GOT_BASE - C_RES_CHECK_BASE)
 #define C_RES_STDIN_REQ 448
 #define C_RES_STDIN_ACK 456
-#define C_CHECKS       119
+#define C_CHECKS       141
 
 void syscall_init(void);
 void syscall_dispatch(struct isr_frame *frame);

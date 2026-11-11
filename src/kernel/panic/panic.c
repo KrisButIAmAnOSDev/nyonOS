@@ -140,8 +140,10 @@ void panic_dump_regs(struct panic_context* ctx) {
     volatile uint32_t* fb = fb_ptr ? (volatile uint32_t*)fb_ptr->address : NULL;
     uint32_t width = fb_ptr ? fb_ptr->width : 0;
     uint32_t height = fb_ptr ? fb_ptr->height : 0;
+    uint32_t stride = fb_ptr ? fb_ptr->pitch / 4 : 0;
 
-    kprintf_attach(fb, width, height);
+    kprintf_attach(fb, width, height, stride);
+    kprintf_output_force();
     kprintf_clear();
 
     kprintf_home(0, 0);

@@ -14,7 +14,6 @@
 #define CPUID_STRUCTURE 0x00000007u
 
 #define MSR_EFER_NXE       (1ULL << 11)
-#define MSR_EFER_PCIDE     (1ULL << 17)
 
 #define CR4_LA57           (1ULL << 12)
 #define CR4_PCIDE          (1ULL << 17)
@@ -54,8 +53,8 @@ static void percpu_slot_init(uint32_t id) {
 static void percpu_gs_install(uint32_t id) {
     struct percpu *s = &percpu_table[id];
     msr_write(MSR_GS_BASE, (uint64_t)s);
-    __asm__ volatile("mov %0, %%gs:0xfffffffffffffff8"
-                     :: "r"((uint64_t)s) : "memory");
+    msr_write(MSR_KERNEL_GS_BASE, (uint64_t)s);
+    s->clac_ok = cpu_has_smap() ? 1 : 0;
 }
 
 static inline void do_cpuid(uint32_t leaf, uint32_t sub, uint32_t *a, uint32_t *b, uint32_t *c, uint32_t *d) {
@@ -67,6 +66,7 @@ static void detect_basic(void) {
     struct cpu_features *feat = &p->feat;
     uint32_t a, b, c, d;
     do_cpuid(0, 0, &a, &b, &c, &d);
+    uint32_t max_basic = a;
 
     do_cpuid(CPUID_FEATURES, 0, &a, &b, &c, &d);
     feat->tsc = (d >> 4) & 1;
@@ -76,18 +76,17 @@ static void detect_basic(void) {
     feat->sse2 = (d >> 26) & 1;
     feat->syscall = (d >> 11) & 1;
     feat->pcid = (c >> 22) & 1;
+    feat->rdrand = (c >> 30) & 1;
     p->pcid_bit_seen = feat->pcid;
 
-    if (a >= CPUID_STRUCTURE) {
-        uint32_t max = a;
+    if (max_basic >= CPUID_STRUCTURE) {
         do_cpuid(CPUID_STRUCTURE, 0, &a, &b, &c, &d);
         feat->smep = (b >> 7) & 1;
         feat->fsgsbase = (b >> 0) & 1;
         feat->invpcid = (b >> 10) & 1;
-        if (max >= 1) {
-            do_cpuid(CPUID_STRUCTURE, 1, &a, &b, &c, &d);
-            feat->smap = (c >> 20) & 1;
-        }
+        feat->smap = (b >> 20) & 1;
+        feat->rdseed = (b >> 18) & 1;
+        feat->la57 = (c >> 16) & 1;
     }
 }
 
@@ -97,16 +96,14 @@ static void detect_extended(void) {
 
     uint32_t a, b, c, d;
     do_cpuid(CPUID_MAX_EXTENDED, 0, &a, &b, &c, &d);
-    if (a < CPUID_EXTENDED_FEATURES) return;
+    uint32_t max_ext = a;
+    if (max_ext < CPUID_EXTENDED_FEATURES) return;
 
     do_cpuid(CPUID_EXTENDED_FEATURES, 0, &a, &b, &c, &d);
     feat->nx = (d >> 20) & 1;
-    feat->rdrand = (c >> 30) & 1;
-    feat->la57 = (c >> 16) & 1;
 
-    if (a < CPUID_EXTENDED_FEATURES2) return;
+    if (max_ext < CPUID_EXTENDED_FEATURES2) return;
     do_cpuid(CPUID_EXTENDED_FEATURES2, 0, &a, &b, &c, &d);
-    feat->rdseed = (c >> 18) & 1;
     feat->invariant_tsc = (d >> 8) & 1;
 }
 
@@ -242,7 +239,6 @@ bool cpu_enable_pcid(void) {
     if (feats()->pcid_enabled) return true;
 
     cpu_cr4_write(cpu_cr4_read() | CR4_PCIDE);
-    msr_write(MSR_EFER, msr_read(MSR_EFER) | MSR_EFER_PCIDE);
     feats()->pcid_enabled = true;
     return true;
 }
@@ -257,13 +253,10 @@ struct percpu *cpu_self(void) {
     if (!gs_ready) return &percpu_table[0];
 
     uint32_t low, high;
-    __asm__ volatile("rdmsr" : "=a"(low), "=d"(high) : "c"(MSR_GS_BASE));
-    if (((uint64_t)high << 32 | low) == 0) return &percpu_table[0];
-
-    struct percpu *p;
-    __asm__ volatile("mov %%gs:0xfffffffffffffff8, %0" : "=r"(p) : : "memory");
-    if (!p) return &percpu_table[0];
-    return p;
+    __asm__ volatile("rdmsr" : "=a"(low), "=d"(high) : "c"(MSR_KERNEL_GS_BASE));
+    uint64_t base = ((uint64_t)high << 32) | low;
+    if (!base) return &percpu_table[0];
+    return (struct percpu *)base;
 }
 
 uint32_t cpu_id(void) { return cpu_self()->processor_id; }
@@ -346,8 +339,8 @@ void cpu_bootstrap(void) {
     gs_ready = true;
     detected_cpus = 1;
 
-    kprintf(PRINT_SERIAL, "CPU: percpu at %p, gs slot %d, max %u\n",
-            (void *)percpu_table, -8, (unsigned)MAX_CPUS);
+    kprintf(PRINT_SERIAL, "CPU: percpu at %p, gs msr base, max %u\n",
+            (void *)percpu_table, (unsigned)MAX_CPUS);
 }
 
 void cpu_set_lapic_base(uint64_t virt) {

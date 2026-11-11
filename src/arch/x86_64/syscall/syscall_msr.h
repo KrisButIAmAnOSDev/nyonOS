@@ -12,7 +12,8 @@
 
 #define MSR_EFER_SCE          (1ULL << 0)
 
-#define SYSCALL_SFMASK_VALUE  0x300
+#define SYSCALL_SFMASK_VALUE  0x700
+#define SYSCALL_SFMASK_AC     0x40000
 
 static inline uint64_t msr_read(uint32_t msr) {
     uint32_t low, high;

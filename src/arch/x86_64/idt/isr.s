@@ -37,6 +37,7 @@ isr_stub_shootdown:
 
 .global isr_common
 isr_common:
+    cld
     push rax
     push rbx
     push rcx

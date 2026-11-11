@@ -103,7 +103,6 @@ int memfd_create(uint32_t flags, uint16_t *out_flags) {
     int fd = fd_alloc(t, &mf->obj,
                       FD_RIGHT_READ | FD_RIGHT_WRITE | FD_RIGHT_DUP, fflags);
     kobject_put(&mf->obj);
-    if (fd < 0) kobject_free(&mf->obj);
     return fd;
 }
 

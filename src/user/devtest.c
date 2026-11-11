@@ -68,8 +68,24 @@ int main(void) {
             entries++;
             if (de.name[0] == 'I' || de.name[0] == 'i') found_input = 1;
         }
-        ck(entries, 7);
+        ck(entries, 9);
         ck_true(found_input);
+        ck(sys_close((int)fd), 0);
+    }
+
+    fd = sys_open("/DEV/URANDOM", O_RDONLY);
+    ck_true(fd >= 0);
+    if (fd >= 0) {
+        unsigned char rb[16];
+        ck(sys_read((int)fd, rb, sizeof rb), 16);
+        ck(sys_close((int)fd), 0);
+    }
+
+    fd = sys_open("/DEV/RANDOM", O_RDONLY);
+    ck_true(fd >= 0);
+    if (fd >= 0) {
+        unsigned char rb[16];
+        ck(sys_read((int)fd, rb, sizeof rb), 16);
         ck(sys_close((int)fd), 0);
     }
 

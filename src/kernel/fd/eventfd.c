@@ -94,6 +94,5 @@ int eventfd_create(uint32_t initval, uint32_t flags, uint16_t *out_flags) {
     int fd = fd_alloc(t, &ef->obj,
                       FD_RIGHT_READ | FD_RIGHT_WRITE | FD_RIGHT_DUP, fflags);
     kobject_put(&ef->obj);
-    if (fd < 0) kobject_free(&ef->obj);
     return fd;
 }

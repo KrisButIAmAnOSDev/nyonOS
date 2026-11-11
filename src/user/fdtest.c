@@ -312,6 +312,67 @@ int main(void) {
     ck(sys_read(0, (void *)0, 4), EFAULT);
     ck(sys_write(2, (void *)0xffffffff80000000UL, 4), EFAULT);
 
+    {
+        uint64_t smask = 1ULL << (ABI_SIGUSR1 - 1);
+        int sfd = sys_signalfd(-1, &smask, 0);
+        ck(sfd >= 0, 1);
+        if (sfd >= 0) {
+            uint64_t set = smask;
+            ck(sys_sigprocmask(ABI_SIG_BLOCK, &set, 0), 0);
+            ck(sys_kill(sys_getpid(), ABI_SIGUSR1), 0);
+            struct sys_signalfd_siginfo si;
+            for (int i = 0; i < (int)sizeof si; i++) ((unsigned char *)&si)[i] = 0;
+            ck(sys_read(sfd, &si, sizeof si), (slong)sizeof si);
+            ck(si.ssi_signo == ABI_SIGUSR1, 1);
+            uint64_t unblock = smask;
+            ck(sys_sigprocmask(ABI_SIG_UNBLOCK, &unblock, 0), 0);
+            ck(sys_close(sfd), 0);
+        }
+    }
+
+    {
+        int tf = sys_timerfd_create(1, 0);
+        ck(tf >= 0, 1);
+        if (tf >= 0) {
+            struct sys_itimerspec its;
+            for (int i = 0; i < (int)sizeof its; i++) ((unsigned char *)&its)[i] = 0;
+            its.it_value.nsec = 120 * 1000000L;
+            ck(sys_timerfd_settime(tf, 0, &its, 0), 0);
+            sys_sleep(400);
+            unsigned long long ticks = 0;
+            ck(sys_read(tf, &ticks, 8), 8);
+            ck(ticks >= 1, 1);
+            ck(sys_close(tf), 0);
+        }
+    }
+
+    {
+        char hb[8];
+        for (int i = 0; i < 8; i++) hb[i] = 'X';
+        ck(sys_gethostname(hb, 8), 0);
+        int terminated = 0;
+        for (int i = 0; i < 8; i++) if (hb[i] == 0) terminated = 1;
+        ck(terminated, 1);
+    }
+
+    {
+        slong mf = sys_memfd_create(0, 0);
+        ck(mf >= 0, 1);
+        if (mf >= 0) {
+            ck(sys_write((int)mf, "memfddata", 8), 8);
+            ck(sys_lseek((int)mf, 0, SEEK_SET), 0);
+            char mb[16];
+            for (int i = 0; i < 16; i++) mb[i] = 0;
+            ck(sys_read((int)mf, mb, 8), 8);
+            int same = 1;
+            for (int i = 0; i < 8; i++) if (mb[i] != "memfddata"[i]) same = 0;
+            ck(same, 1);
+            ck(sys_ftruncate((int)mf, 4), 0);
+            ck(sys_lseek((int)mf, 0, SEEK_END), 4);
+            ck(sys_close((int)mf), 0);
+        }
+    }
+
     slong cf = sys_open("/TEST.TXT", O_RDONLY | O_CLOEXEC);
     ck(cf >= 0, 1);
     ck(sys_fcntl((int)cf, F_GETFD, 0), 1);

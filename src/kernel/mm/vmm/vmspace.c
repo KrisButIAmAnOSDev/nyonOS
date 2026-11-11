@@ -74,8 +74,13 @@ void vm_free_range(struct vmspace *vs, vaddr_t start, vaddr_t end) {
 
     for (size_t i = 0; i < pages; i++) {
         uint64_t entry = vmm_query_in(vs->pml4, a + i * PAGE_SIZE);
-        if ((entry & PAGE_PRESENT) && (entry & PAGE_OWNED))
-            pmm_free(entry & VMM_PT_ADDR_MASK, 1);
+        if (!(entry & PAGE_PRESENT)) continue;
+        paddr_t phys = entry & VMM_PT_ADDR_MASK;
+        if (entry & PAGE_SHAREDREF) {
+            if (pmm_unshare_ref(phys)) pmm_free(phys, 1);
+        } else if (entry & PAGE_OWNED) {
+            pmm_free(phys, 1);
+        }
     }
 
     vmm_unmap_keep(vs->pml4, a, pages);
@@ -228,12 +233,22 @@ bool vm_setup_stack(struct vmspace *vs) {
     return true;
 }
 
-static uint8_t *stack_page(struct vmspace *vs, uint64_t *vbase_out) {
-    uint64_t entry = vmm_query_in(vs->pml4, (vs->stack_top - 1) & ~(PAGE_SIZE - 1));
-    if (!(entry & PAGE_PRESENT)) return NULL;
-    uint8_t *base = (uint8_t *)(vmm_hhdm_offset + (entry & VMM_PT_ADDR_MASK));
-    *vbase_out = (vs->stack_top - 1) & ~(uint64_t)(PAGE_SIZE - 1);
-    return base;
+static bool stack_copy_in(struct vmspace *vs, uint64_t dst_va, const void *src, size_t n) {
+    const uint8_t *s = (const uint8_t *)src;
+    while (n) {
+        uint64_t pg = dst_va & ~(uint64_t)(PAGE_SIZE - 1);
+        uint64_t e = vmm_query_in(vs->pml4, pg);
+        if (!(e & PAGE_PRESENT)) return false;
+        uint8_t *k = (uint8_t *)(vmm_hhdm_offset + (e & VMM_PT_ADDR_MASK));
+        size_t off = (size_t)(dst_va - pg);
+        size_t chunk = PAGE_SIZE - off;
+        if (chunk > n) chunk = n;
+        memcpy(k + off, s, chunk);
+        s += chunk;
+        dst_va += chunk;
+        n -= chunk;
+    }
+    return true;
 }
 
 bool vm_stack_push_strings(struct vmspace *vs, const char **strs, size_t count,
@@ -242,76 +257,58 @@ bool vm_stack_push_strings(struct vmspace *vs, const char **strs, size_t count,
     if (!vs || !vs->pml4 || !vs->has_stack) return false;
     if (count > 128 || envc > 128 || auxc > 128) return false;
 
-    uint64_t vbase = 0;
-    uint8_t *base = stack_page(vs, &vbase);
-    if (!base) return false;
-
-    size_t room = (size_t)(vs->stack_top - vs->stack_base);
-    if (room < 1024) return false;
-
-    uint8_t *top = base + (vs->stack_top - vbase);
-    uint8_t *floor = base + (vs->stack_base - vbase);
-
-    if (floor < base) {
-        size_t back = (size_t)(base - floor);
-        size_t extra = (back / PAGE_SIZE) * PAGE_SIZE;
-        floor = base - extra;
-    }
+    uint64_t top_va = vs->stack_top;
+    uint64_t floor_va = vs->stack_base;
+    if (top_va - floor_va < 1024) return false;
 
     uint64_t argv_ptr[128];
     uint64_t envp_ptr[128];
 
     for (size_t i = 0; i < count; i++) {
         size_t sl = strlen(strs[i]);
-
-        if ((size_t)(top - floor) < sl + 16) return false;
-
-        uint8_t *dst = top - sl - 1;
-        memcpy(dst, strs[i], sl + 1);
-
-        argv_ptr[i] = vbase + (uint64_t)(dst - base);
-        top = (uint8_t *)((uintptr_t)dst & ~0x7ULL);
+        if (top_va - floor_va < sl + 16) return false;
+        uint64_t dst = top_va - sl - 1;
+        if (!stack_copy_in(vs, dst, strs[i], sl + 1)) return false;
+        argv_ptr[i] = dst;
+        top_va = dst & ~0x7ULL;
     }
 
     for (size_t i = 0; i < envc; i++) {
         size_t sl = strlen(envp[i]);
-
-        if ((size_t)(top - floor) < sl + 16) return false;
-
-        uint8_t *dst = top - sl - 1;
-        memcpy(dst, envp[i], sl + 1);
-
-        envp_ptr[i] = vbase + (uint64_t)(dst - base);
-        top = (uint8_t *)((uintptr_t)dst & ~0x7ULL);
+        if (top_va - floor_va < sl + 16) return false;
+        uint64_t dst = top_va - sl - 1;
+        if (!stack_copy_in(vs, dst, envp[i], sl + 1)) return false;
+        envp_ptr[i] = dst;
+        top_va = dst & ~0x7ULL;
     }
 
-    top = (uint8_t *)((uintptr_t)top & ~0xFULL);
+    top_va &= ~0xFULL;
 
     size_t words = 1 + count + 1 + envc + 1 + auxc * 2 + 2;
     if (words & 1) words++;
-    if ((size_t)(top - floor) < words * 8 + 16) return false;
+    if (top_va - floor_va < words * 8 + 16) return false;
 
-    uint64_t *sp = (uint64_t *)top - words;
+    uint64_t sp_va = top_va - words * 8;
+    uint64_t stack[256];
     size_t w = 0;
-    sp[w++] = count;
-    memcpy(&sp[w], argv_ptr, count * sizeof(uint64_t));
+    stack[w++] = count;
+    memcpy(&stack[w], argv_ptr, count * sizeof(uint64_t));
     w += count;
-    sp[w++] = 0;
-    memcpy(&sp[w], envp_ptr, envc * sizeof(uint64_t));
+    stack[w++] = 0;
+    memcpy(&stack[w], envp_ptr, envc * sizeof(uint64_t));
     w += envc;
-    sp[w++] = 0;
+    stack[w++] = 0;
     for (size_t i = 0; i < auxc; i++) {
-        sp[w++] = aux[i].type;
-        sp[w++] = aux[i].value;
+        stack[w++] = aux[i].type;
+        stack[w++] = aux[i].value;
     }
-    sp[w++] = 0;
-    sp[w++] = 0;
-
-    uint64_t sp_virt = vbase + (uint64_t)((uint8_t *)sp - base);
+    stack[w++] = 0;
+    stack[w++] = 0;
+    if (!stack_copy_in(vs, sp_va, stack, words * 8)) return false;
 
     if (argc_out) *argc_out = count;
-    if (stack_out) *stack_out = sp_virt;
-    if (argv_out) *argv_out = sp_virt + 8;
-    if (auxv_out) *auxv_out = sp_virt + (uint64_t)(1 + count + 1 + envc + 1) * 8;
+    if (stack_out) *stack_out = sp_va;
+    if (argv_out) *argv_out = sp_va + 8;
+    if (auxv_out) *auxv_out = sp_va + (uint64_t)(1 + count + 1 + envc + 1) * 8;
     return true;
 }

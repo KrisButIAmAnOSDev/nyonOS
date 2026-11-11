@@ -84,7 +84,7 @@ static int rtc_read_fields(struct rtc_fields *out) {
             if (!binary) {
                 a.sec = from_bcd(a.sec);
                 a.min = from_bcd(a.min);
-                a.hour = from_bcd(a.hour);
+                a.hour = from_bcd((uint8_t)(a.hour & 0x7F));
                 a.day = from_bcd(a.day);
                 a.month = from_bcd(a.month);
                 a.year = from_bcd(a.year);

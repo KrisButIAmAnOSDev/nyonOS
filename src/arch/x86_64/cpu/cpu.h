@@ -10,6 +10,7 @@
 #define CPU_CACHELINE 64
 
 #define MSR_GS_BASE 0xC0000101
+#define MSR_KERNEL_GS_BASE 0xC0000102
 
 struct cpu_features {
     bool nx;
@@ -54,6 +55,8 @@ struct percpu {
     volatile uint64_t wake_seq;
     uint64_t earliest_wake;
     uint64_t syscall_kstack_top;
+    uint64_t syscall_user_rsp;
+    uint8_t clac_ok;
 
     uint32_t held_mask;
     uint32_t lock_depth;

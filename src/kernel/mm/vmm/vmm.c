@@ -295,11 +295,13 @@ static bool share_user_level(struct page_table *src, struct page_table *dst,
                 continue;
             }
 
+            bool was_shared = (e & PAGE_SHAREDREF) != 0;
+
             se = (e & ~PAGE_WRITE) | PAGE_COW;
             nf = (se & (PAGE_PRESENT | PAGE_USER | PAGE_WRITE |
                         PAGE_PWT | PAGE_PCD | PAGE_NX)) | PAGE_COW;
-            bool was_shared = (e & PAGE_SHAREDREF) != 0;
-            if (owned) {
+
+            if (owned || was_shared) {
                 se |= PAGE_SHAREDREF;
                 nf |= PAGE_SHAREDREF;
             }
@@ -307,8 +309,10 @@ static bool share_user_level(struct page_table *src, struct page_table *dst,
             invlpg(v);
             if (!vmm_map_frames(dst, v, phys, 1, nf, !(se & PAGE_NX), false))
                 return false;
-            if (owned) {
-                if (!was_shared) pmm_share_ref(phys);
+            if (owned && !was_shared) {
+                pmm_share_ref(phys);
+                pmm_share_ref(phys);
+            } else if (owned || was_shared) {
                 pmm_share_ref(phys);
             }
             (*shared)++;
@@ -381,23 +385,20 @@ bool vmm_user_page_exec(struct page_table *root, vaddr_t vaddr) {
     return true;
 }
 
-bool vmm_cow_resolve(struct page_table *root, vaddr_t vaddr) {
-    if (!root) return false;
-
+static bool cow_resolve_locked(struct page_table *root, vaddr_t vaddr) {
     int levels = vmm_5level ? 5 : 4;
     uint64_t *entry;
 
-    lock_acquire(LOCK_VMM, &vmm_lock);
     entry = walk_page_table(root, vaddr, levels, false, 0);
-    if (!entry || !(*entry & PAGE_PRESENT)) { lock_release(LOCK_VMM, &vmm_lock); return false; }
-    if (!(*entry & PAGE_COW)) { lock_release(LOCK_VMM, &vmm_lock); return false; }
-    if (*entry & PAGE_PINNED) { lock_release(LOCK_VMM, &vmm_lock); return false; }
-    if (*entry & PAGE_WRITE) { lock_release(LOCK_VMM, &vmm_lock); return false; }
+    if (!entry || !(*entry & PAGE_PRESENT)) return false;
+    if (!(*entry & PAGE_COW)) return false;
+    if (*entry & PAGE_PINNED) return false;
+    if (*entry & PAGE_WRITE) return false;
 
     paddr_t old = *entry & VMM_PT_ADDR_MASK;
     paddr_t np;
 
-    if (!pmm_alloc(&np, 1)) { lock_release(LOCK_VMM, &vmm_lock); return false; }
+    if (!pmm_alloc(&np, 1)) return false;
 
     const uint8_t *src = (const uint8_t *)(vmm_hhdm_offset + old);
     uint8_t *dst = (uint8_t *)(vmm_hhdm_offset + np);
@@ -414,9 +415,17 @@ bool vmm_cow_resolve(struct page_table *root, vaddr_t vaddr) {
     nf |= PAGE_OWNED;
     *entry = nf | np;
     invlpg(vaddr);
-    lock_release(LOCK_VMM, &vmm_lock);
-    vmm_tlb_shootdown();
     return true;
+}
+
+bool vmm_cow_resolve(struct page_table *root, vaddr_t vaddr) {
+    if (!root) return false;
+
+    lock_acquire(LOCK_VMM, &vmm_lock);
+    bool ok = cow_resolve_locked(root, vaddr);
+    lock_release(LOCK_VMM, &vmm_lock);
+    if (ok) vmm_tlb_shootdown();
+    return ok;
 }
 
 bool vmm_clone_user_space(struct page_table *src, struct page_table *dst, size_t *copied) {
@@ -537,6 +546,13 @@ bool vmm_protect(struct page_table *root, vaddr_t addr, size_t pages, uint8_t pr
         if (!entry || !(*entry & PAGE_PRESENT)) {
             lock_release(LOCK_VMM, &vmm_lock);
             return false;
+        }
+
+        if ((prot & VM_PROT_WRITE) && (*entry & PAGE_COW)) {
+            if (!cow_resolve_locked(root, addr + i * PAGE_SIZE)) {
+                lock_release(LOCK_VMM, &vmm_lock);
+                return false;
+            }
         }
 
         uint64_t f = *entry;

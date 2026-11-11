@@ -67,7 +67,11 @@ static bool do_copy(void *dst, const void *src, size_t len, bool src_is_user) {
         return false;
     }
 
-    if (to < USER_MAX && !user_range_ok(to, len)) return false;
+    if (src_is_user) {
+        if (to < USER_MAX && !user_range_ok(to, len)) return false;
+    } else if (!user_range_ok(to, len)) {
+        return false;
+    }
 
     stac_if_needed();
     __asm__ volatile("sti" ::: "memory");

@@ -59,7 +59,6 @@ int epoll_create1(uint32_t flags, uint16_t *out_flags) {
 
     int fd = fd_alloc(t, &ep->obj, FD_RIGHT_READ | FD_RIGHT_DUP, fflags);
     kobject_put(&ep->obj);
-    if (fd < 0) kobject_free(&ep->obj);
     return fd;
 }
 
@@ -154,12 +153,15 @@ int epoll_wait(int epfd, void *events, int maxevents, int timeout_ms) {
     if (!epo) return FD_EBADF;
     struct epoll *ep = (struct epoll *)epo;
 
+    if (maxevents > 64) maxevents = 64;
+
     uint64_t deadline = 0;
     if (timeout_ms > 0) deadline = pit_get_ticks() + pit_ms_to_ticks((uint64_t)timeout_ms);
 
+    struct sys_epoll_event kbuf[64];
+
     for (;;) {
         int ready = 0;
-        struct sys_epoll_event *out = (struct sys_epoll_event *)events;
 
         spin_lock(&ep->lock);
         for (struct epoll_item *it = ep->items; it && ready < maxevents; it = it->next) {
@@ -171,8 +173,8 @@ int epoll_wait(int epfd, void *events, int maxevents, int timeout_ms) {
 
             uint16_t ev = revents & (uint16_t)(it->events | ABI_EPOLLERR | ABI_EPOLLHUP);
             if (ev) {
-                out[ready].events = ev;
-                out[ready].data = it->data;
+                kbuf[ready].events = ev;
+                kbuf[ready].data = it->data;
                 ready++;
             }
         }
@@ -180,6 +182,7 @@ int epoll_wait(int epfd, void *events, int maxevents, int timeout_ms) {
 
         if (ready) {
             kobject_put(epo);
+            if (!copyout(events, kbuf, (size_t)ready * sizeof(kbuf[0]))) return FD_EFAULT;
             return ready;
         }
         if (timeout_ms == 0) {

@@ -38,6 +38,18 @@ void spin_unlock(spinlock_t *l) {
     preempt_enable();
 }
 
+void spin_lock_irqsave(spinlock_t *l, uint64_t *flags) {
+    uint64_t f;
+    __asm__ volatile("pushfq; pop %0; cli" : "=r"(f) :: "memory");
+    if (flags) *flags = f;
+    spin_lock(l);
+}
+
+void spin_unlock_irqrestore(spinlock_t *l, uint64_t flags) {
+    spin_unlock(l);
+    if (!(flags & 0x200)) __asm__ volatile("sti" ::: "memory");
+}
+
 static void lock_panic(const char *what, lock_id_t a, lock_id_t b) {
     kprintf(PRINT_SERIAL, "lock ");
     kprintf(PRINT_SERIAL, "%s", lock_name(a));

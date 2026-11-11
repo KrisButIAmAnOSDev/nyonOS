@@ -21,7 +21,7 @@ bool task_signalfd_suppress(struct task *t, int sig) {
     if (!t || sig <= 0 || sig >= 65) return false;
     if (sig == ABI_SIGKILL || sig == ABI_SIGSTOP) return false;
     uint64_t bit = 1ULL << (sig - 1);
-    if (t->sig_blocked & bit) return false;
+    if (!(t->sig_blocked & bit)) return false;
 
     struct fd_table *ft = &t->fds;
     for (uint32_t i = 0; i < ft->capacity; i++) {
@@ -37,9 +37,23 @@ bool task_signalfd_suppress(struct task *t, int sig) {
     return false;
 }
 
+void task_signalfd_notify(struct task *t) {
+    if (!t) return;
+    struct fd_table *ft = &t->fds;
+    bool any = false;
+    for (uint32_t i = 0; i < ft->capacity; i++) {
+        struct fd_entry *e = signalfd_slot(ft, i);
+        if (!e->obj || e->obj->type != KOBJ_SIGNALFD) continue;
+        struct signalfd *sf = (struct signalfd *)e->obj;
+        if ((t->sig_pending & sf->mask) == 0) continue;
+        task_wake_chan(&sf->chan);
+        any = true;
+    }
+    if (any) poll_notify();
+}
+
 static uint64_t signalfd_match(struct signalfd *sf, struct task *t) {
-    uint64_t pend = t->sig_pending & ~t->sig_blocked;
-    return pend & sf->mask;
+    return t->sig_pending & sf->mask;
 }
 
 static int64_t signalfd_read_at(struct kobject *o, void *ubuf, uint32_t len, uint64_t off) {
@@ -111,7 +125,6 @@ int signalfd_create(uint64_t mask, uint32_t flags, uint16_t *out_flags) {
     int fd = fd_alloc(t, &sf->obj,
                       FD_RIGHT_READ | FD_RIGHT_DUP, fflags);
     kobject_put(&sf->obj);
-    if (fd < 0) kobject_free(&sf->obj);
     return fd;
 }
 

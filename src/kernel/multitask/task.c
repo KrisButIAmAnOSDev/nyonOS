@@ -18,17 +18,19 @@
 #include "arch/x86_64/cpu/cpu.h"
 #include "arch/x86_64/lapic/lapic.h"
 #include "kernel/fd/fd.h"
+#include "kernel/fd/signalfd.h"
 #include "drivers/keyboard/keyboard.h"
 
 #define QW_RIP 17
 #define QW_CS 18
 #define QW_RFLAGS 19
-#define QW_RAX 16
+#define QW_RAX 14
 #define QW_RSP 20
 #define QW_SS 21
 
 extern void task_return_stub(void);
 
+_Static_assert(offsetof(struct isr_frame, rax) == QW_RAX * 8, "frame layout");
 _Static_assert(offsetof(struct isr_frame, interrupt_number) == 120, "frame layout");
 _Static_assert(offsetof(struct isr_frame, error_code) == 128, "frame layout");
 _Static_assert(offsetof(struct isr_frame, rip) == 136, "frame layout");
@@ -587,7 +589,7 @@ struct task *task_spawn_thread(struct task *parent, const char *name,
     t->sig_terminate = false;
     t->cpu = TASK_CPU_ANY;
     t->pid = __atomic_add_fetch(&next_pid, 1, __ATOMIC_RELAXED);
-    task_pgrp_join(t, 0, 0);
+    /* group inherited above */
     t->name = name;
 
     for (size_t i = 0; i < FD_PATH_MAX; i++) t->cwd[i] = parent->cwd[i];
@@ -769,7 +771,7 @@ struct task *task_spawn_fork(struct task *parent, const char *name,
     t->sig_terminate = false;
     t->cpu = TASK_CPU_ANY;
     t->pid = __atomic_add_fetch(&next_pid, 1, __ATOMIC_RELAXED);
-    task_pgrp_join(t, 0, 0);
+    /* group inherited above */
     t->name = name;
 
     if (clone_fds) {
@@ -813,9 +815,13 @@ int task_wait_child(struct task *parent, int32_t want, int32_t *status_out, int3
 
         size_t slot = 0;
         int32_t code = 0;
+        bool has_child = false;
         for (size_t i = 1; i < TASK_MAX; i++) {
-            if (!tasks[i].zombie || tasks[i].parent_pid != parent->pid) continue;
+            if (tasks[i].parent_pid != parent->pid) continue;
             if (want > 0 && (int32_t)tasks[i].pid != want) continue;
+            if (!tasks[i].in_use && !tasks[i].zombie) continue;
+            has_child = true;
+            if (!tasks[i].zombie) continue;
             slot = i;
             code = (int32_t)tasks[i].exit_code;
             break;
@@ -845,6 +851,11 @@ int task_wait_child(struct task *parent, int32_t want, int32_t *status_out, int3
         }
 
         if (wnohang) {
+            lock_release(LOCK_SCHED, &sched_lock);
+            return has_child ? 0 : SYS_ECHILD;
+        }
+
+        if (!has_child) {
             lock_release(LOCK_SCHED, &sched_lock);
             return SYS_ECHILD;
         }
@@ -975,7 +986,12 @@ static void task_zombify_locked(struct task *t) {
     for (size_t i = 1; i < TASK_MAX; i++) {
         if (tasks[i].in_use && tasks[i].pid == t->parent_pid &&
             tasks[i].wait_chan == tasks[i].child_chan) {
-            __atomic_store_n(&tasks[i].blocked, false, __ATOMIC_RELEASE);
+            task_release_wait(&tasks[i], i);
+        }
+        if (tasks[i].in_use && tasks[i].vfork_child == t->pid &&
+            tasks[i].wait_chan == tasks[i].vfork_chan) {
+            __atomic_store_n(&tasks[i].vfork_child, 0, __ATOMIC_RELEASE);
+            task_release_wait(&tasks[i], i);
         }
     }
     pgroup_unlink(t);
@@ -1411,6 +1427,7 @@ void task_kill_pgrp(uint32_t pgid, int sig) {
             struct task *t = &tasks[i];
             if (!t->in_use || t->zombie) continue;
             __atomic_or_fetch(&t->sig_pending, 1ULL << (sig - 1), __ATOMIC_RELAXED);
+            task_signalfd_notify(t);
         }
         return;
     }
@@ -1422,6 +1439,7 @@ void task_kill_pgrp(uint32_t pgid, int sig) {
             m = t->pg_next;
             if (!t->in_use || t->zombie) continue;
             __atomic_or_fetch(&t->sig_pending, 1ULL << (sig - 1), __ATOMIC_RELAXED);
+            task_signalfd_notify(t);
         }
     }
 }

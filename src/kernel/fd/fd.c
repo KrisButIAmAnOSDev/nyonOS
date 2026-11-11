@@ -3,6 +3,10 @@
 #include "kernel/kprintf/kprintf.h"
 #include "kernel/panic/panic.h"
 #include "kernel/mm/heap/heap.h"
+#include "kernel/mm/slab/slab.h"
+#include "kernel/crypto/random.h"
+#include "kernel/fd/memfd.h"
+#include "kernel/fd/epoll.h"
 #include "kernel/sync/sync.h"
 #include "kernel/sync/preempt.h"
 #include "kernel/multitask/task.h"
@@ -23,12 +27,19 @@ void kobject_init(struct kobject *o, uint32_t type, uint32_t max_rights,
     o->refcount = 1;
     o->max_rights = max_rights;
     o->user_bufs = false;
+    o->cache = NULL;
     o->ops = ops;
+}
+
+void kobject_release_mem(struct kobject *o) {
+    if (!o) return;
+    if (o->cache) kmem_cache_free(o->cache, o);
+    else kfree(o);
 }
 
 void kobject_free(struct kobject *o) {
     if (!o) return;
-    kfree(o);
+    kobject_release_mem(o);
 }
 
 bool kobject_valid(const struct kobject *o) {
@@ -63,7 +74,7 @@ void kobject_put(struct kobject *o) {
 
     o->magic = KOBJ_MAGIC_FREE;
     o->type = 0;
-    kfree(o);
+    kobject_release_mem(o);
 }
 
 static struct fd_entry *slot(struct fd_table *ft, uint32_t i) {
@@ -262,6 +273,7 @@ int fd_close(struct task *t, int fd) {
     preempt_enable();
 
     if (!o) return FD_EBADF;
+    if (o->type != KOBJ_EPOLL) epoll_remove_fd(t, fd);
     kobject_put(o);
     return 0;
 }
@@ -306,10 +318,17 @@ void fd_close_cloexec(struct task *t) {
 }
 
 int fd_truncate(struct task *t, int fd, uint64_t len) {
-    struct kobject *o = fd_get_checked(t, fd, KOBJ_FILE, FD_RIGHT_WRITE);
+    struct kobject *o = fd_get_checked(t, fd, KOBJ_TYPE_ANY, FD_RIGHT_WRITE);
     if (!o) return FD_EBADF;
-    struct file *f = (struct file *)o;
-    int r = fs_node_resize(f->node, (uint32_t)len);
+    int r;
+    if (o->type == KOBJ_FILE) {
+        struct file *f = (struct file *)o;
+        r = fs_node_resize(f->node, (uint32_t)len);
+    } else if (o->type == KOBJ_MEMFD) {
+        r = memfd_truncate(o, len);
+    } else {
+        r = FD_EINVAL;
+    }
     kobject_put(o);
     return r;
 }
@@ -448,12 +467,14 @@ int fd_dup2(struct task *t, int oldfd, int newfd, uint32_t flags) {
     }
 
     struct fd_entry *target = slot(ft, nidx);
+    bool replaced = false;
     if (target->obj) {
         struct kobject *old = target->obj;
         target->obj = NULL;
         target->rights = 0;
         target->flags = 0;
         mark_free(ft, nidx);
+        if (old->type != KOBJ_EPOLL) replaced = true;
         kobject_put(old);
     }
 
@@ -464,6 +485,7 @@ int fd_dup2(struct task *t, int oldfd, int newfd, uint32_t flags) {
     target->flags = (uint16_t)flags;
 
     preempt_enable();
+    if (replaced) epoll_remove_fd(t, (int)nidx);
     return (int)nidx;
 }
 
@@ -551,8 +573,10 @@ int64_t fd_write(struct task *t, int fd, const void *ubuf, uint32_t len) {
 
     int64_t total = 0;
     for (;;) {
-        int64_t r = o->ops->write_at(o, (const char *)ubuf + total,
-                                     len - (uint32_t)total, pos + total);
+        if ((uint64_t)total >= len) break;
+        uint32_t chunk = len - (uint32_t)total;
+        if (chunk > 65536) chunk = 65536;
+        int64_t r = o->ops->write_at(o, (const char *)ubuf + total, chunk, pos + total);
         if (r < 0) {
             if (r == FD_EAGAIN && !(fl & FD_FLAG_NONBLOCK) && o->ops->wait_writable) {
                 int w = o->ops->wait_writable(o);
@@ -604,16 +628,16 @@ int64_t fd_lseek(struct task *t, int fd, int64_t off, int whence) {
     struct kobject *o = fd_get_checked(t, fd, KOBJ_TYPE_ANY, 0);
     if (!o) return FD_EBADF;
 
-    if (o->type != KOBJ_FILE) {
+    if (!o->ops || !o->ops->lseek) {
         kobject_put(o);
         return FD_ESPIPE;
     }
 
-    struct file *f = (struct file *)o;
-    int64_t r = -1;
-
-    if (o->ops && o->ops->lseek) r = o->ops->lseek(o, off, whence);
-    if (r >= 0) f->pos = (uint64_t)r;
+    int64_t r = o->ops->lseek(o, off, whence);
+    if (r >= 0 && o->type == KOBJ_FILE) {
+        struct file *f = (struct file *)o;
+        f->pos = (uint64_t)r;
+    }
 
     kobject_put(o);
     return r;
@@ -957,7 +981,7 @@ static int64_t input_read_at(struct kobject *o, void *ubuf, uint32_t len, uint64
         if (ev.sec == 0) continue;
         break;
     }
-    if (!copyout(ubuf, &ev, sizeof ev)) return -ABI_EFAULT;
+    if (!copyout(ubuf, &ev, sizeof ev)) return FD_EFAULT;
     return (int64_t)sizeof ev;
 }
 
@@ -975,43 +999,38 @@ static bool input_poll_read(struct kobject *o, uint16_t events, uint16_t *revent
     return *revents != 0;
 }
 
-static int input_close(struct kobject *o) {
-    kfree((struct input_file *)o);
-    return 0;
-}
-
 static const struct kobject_ops input_ops = {
     .wait_readable = input_wait_readable,
     .read_at = input_read_at,
     .write_at = NULL,
     .lseek = NULL,
-    .close = input_close,
+    .close = NULL,
     .poll_ready = input_poll_read,
 };
 
 static int64_t fb_read_at(struct kobject *o, void *ubuf, uint32_t len, uint64_t off) {
     (void)o;
     struct sys_fb info;
-    if (!video_query(&info)) return -ABI_EIO;
+    if (!video_query(&info)) return FD_EIO;
     uint64_t total = (uint64_t)info.pitch * info.height;
     if (off >= total) return 0;
     if ((uint64_t)len > total - off) len = (uint32_t)(total - off);
     const uint8_t *src = (const uint8_t *)(vmm_hhdm_offset +
                         (info.phys & ~(uint64_t)(PAGE_SIZE - 1)));
-    if (!copyout(ubuf, src + off, len)) return -ABI_EFAULT;
+    if (!copyout(ubuf, src + off, len)) return FD_EFAULT;
     return (int64_t)len;
 }
 
 static int64_t fb_write_at(struct kobject *o, const void *ubuf, uint32_t len, uint64_t off) {
     (void)o;
     struct sys_fb info;
-    if (!video_query(&info)) return -ABI_EIO;
+    if (!video_query(&info)) return FD_EIO;
     uint64_t total = (uint64_t)info.pitch * info.height;
-    if (off >= total) return -ABI_ENOSPC;
+    if (off >= total) return FD_ENOSPC;
     if ((uint64_t)len > total - off) len = (uint32_t)(total - off);
     uint8_t *dst = (uint8_t *)(vmm_hhdm_offset +
                    (info.phys & ~(uint64_t)(PAGE_SIZE - 1)));
-    if (!copyin(dst + off, ubuf, len)) return -ABI_EFAULT;
+    if (!copyin(dst + off, ubuf, len)) return FD_EFAULT;
     return (int64_t)len;
 }
 
@@ -1071,21 +1090,21 @@ int fd_open_dev(struct task *t, uint32_t dev_id, uint32_t oflags, fs_node_t *nod
             struct input_file *in = (struct input_file *)kmalloc(sizeof(struct input_file));
             if (!in) return FD_ENOSPC;
             kobject_init(&in->obj, KOBJ_INPUT, FD_RIGHT_READ | FD_RIGHT_DUP, &input_ops);
+            in->obj.user_bufs = true;
             in->seq = keyboard_event_seq();
             uint16_t fflags = 0;
             if (oflags & FD_OPEN_NONBLOCK) fflags |= FD_FLAG_NONBLOCK;
             int fd = fd_alloc(t, &in->obj, FD_RIGHT_READ, fflags);
             kobject_put(&in->obj);
-            if (fd < 0) kfree(in);
             return fd;
         }
         case DEVFS_DEV_FB0: {
             struct kobject *fb = kmalloc(sizeof(struct kobject));
             if (!fb) return FD_ENOSPC;
             kobject_init(fb, KOBJ_FB, FD_RIGHT_READ | FD_RIGHT_WRITE, &fb_ops);
+            fb->user_bufs = true;
             int fd = fd_alloc(t, fb, FD_RIGHT_READ | FD_RIGHT_WRITE, 0);
             kobject_put(fb);
-            if (fd < 0) kfree(fb);
             return fd;
         }
         case DEVFS_DEV_CONSOLE:
@@ -1101,8 +1120,14 @@ int fd_open_dev(struct task *t, uint32_t dev_id, uint32_t oflags, fs_node_t *nod
             c->dest = PRINT_BOTH;
             int fd = fd_alloc(t, &c->obj, FD_RIGHT_READ | FD_RIGHT_WRITE, 0);
             kobject_put(&c->obj);
-            if (fd < 0) kfree(c);
             return fd;
+        }
+        case DEVFS_DEV_RANDOM:
+        case DEVFS_DEV_URANDOM: {
+            uint16_t fflags = 0;
+            int r = random_create(&fflags);
+            if (r < 0) return r;
+            return r;
         }
         case DEVFS_DEV_ZERO:
         case DEVFS_DEV_NULL: {
@@ -1113,7 +1138,6 @@ int fd_open_dev(struct task *t, uint32_t dev_id, uint32_t oflags, fs_node_t *nod
                          dev_id == DEVFS_DEV_ZERO ? &zero_ops : &null_ops);
             int fd = fd_alloc(t, zv, FD_RIGHT_READ | FD_RIGHT_WRITE, 0);
             kobject_put(zv);
-            if (fd < 0) kfree(zv);
             return fd;
         }
         default:

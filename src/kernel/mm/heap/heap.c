@@ -32,7 +32,10 @@ struct block_header {
     struct block_header *prev;
     struct block_header *fnext;
     struct block_header *fprev;
+    uint64_t align_pad;
 };
+
+_Static_assert(sizeof(struct block_header) % 16 == 0, "heap header must keep 16-byte alignment");
 
 struct heap_segment {
     vaddr_t vaddr;
@@ -201,8 +204,9 @@ void heap_init(void) {
 }
 
 static void split_block(struct block_header *b, size_t size) {
+    if (b->size < size) return;
     size_t remaining = b->size - size;
-    if (remaining <= sizeof(struct block_header)) return;
+    if (remaining < sizeof(struct block_header) + 16) return;
 
     uint8_t *data = (uint8_t *)(b + 1);
     struct block_header *new_block = (struct block_header *)(data + size);
@@ -222,12 +226,12 @@ static void split_block(struct block_header *b, size_t size) {
 }
 
 static void *kmalloc_locked(size_t size) {
-    unsigned start = 0;
-    for (size_t v = size - 1; v; v >>= 1) start++;
+    unsigned start = bin_for(size);
 
     for (;;) {
         for (unsigned i = start; i < HEAP_BINS; i++) {
             struct block_header *b = heap_bins[i];
+            while (b && b->size < size) b = b->fnext;
             if (!b) continue;
             bin_remove(b);
             split_block(b, size);

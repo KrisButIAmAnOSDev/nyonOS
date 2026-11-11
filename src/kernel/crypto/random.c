@@ -60,6 +60,5 @@ int random_create(uint16_t *out_flags) {
     int fd = fd_alloc(t, o,
                       FD_RIGHT_READ | FD_RIGHT_WRITE | FD_RIGHT_DUP, 0);
     kobject_put(o);
-    if (fd < 0) kobject_free(o);
     return fd;
 }

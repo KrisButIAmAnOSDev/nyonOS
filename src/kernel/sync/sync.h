@@ -32,6 +32,8 @@ typedef struct {
 
 void spin_lock(spinlock_t *l);
 void spin_unlock(spinlock_t *l);
+void spin_lock_irqsave(spinlock_t *l, uint64_t *flags);
+void spin_unlock_irqrestore(spinlock_t *l, uint64_t flags);
 
 void lock_acquire(lock_id_t id, spinlock_t *l);
 void lock_release(lock_id_t id, spinlock_t *l);

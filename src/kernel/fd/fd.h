@@ -144,6 +144,7 @@ void kobject_get(struct kobject *o);
 void kobject_put(struct kobject *o);
 bool kobject_valid(const struct kobject *o);
 void kobject_free(struct kobject *o);
+void kobject_release_mem(struct kobject *o);
 
 void fd_table_init(struct task *t);
 void fd_table_clone(struct task *dst, struct task *src);

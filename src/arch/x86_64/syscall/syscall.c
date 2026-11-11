@@ -161,8 +161,8 @@ static int64_t sys_newthread(uintptr_t pid_out, uint64_t entry, uint64_t stack) 
     if (entry >= VMM_HIGHER_HALF || stack >= VMM_HIGHER_HALF) return SYS_EINVAL;
     if (stack & 7) return SYS_EINVAL;
 
-    uint64_t zero = 0;
-    if (!copyout(&zero, (void *)pid_out, sizeof(zero))) return SYS_EFAULT;
+    uint32_t zero = 0;
+    if (!copyout((void *)pid_out, &zero, sizeof(zero))) return SYS_EFAULT;
 
     struct task *child = task_spawn_thread(t, "thread", entry, stack, t->fs_base);
     if (!child) return SYS_ENOMEM;
@@ -252,6 +252,7 @@ static char **exec_copy_vec(uintptr_t user_vec, size_t *out_n) {
 }
 
 static int64_t sys_execve(uintptr_t path, uintptr_t uargv, uintptr_t uenvp) {
+    kprintf(PRINT_SERIAL, "EVDBG path=%llx\n", (unsigned long long)path);
     struct task *t = task_current();
     struct isr_frame *frame = current_frame;
 
@@ -291,6 +292,10 @@ static int64_t sys_execve(uintptr_t path, uintptr_t uargv, uintptr_t uenvp) {
 
     exec_free_vec(argv);
     exec_free_vec(envp);
+
+    kprintf(PRINT_SERIAL, "EXECDBG %s entry=%llx sp=%llx argc=%u\n", kpath,
+            (unsigned long long)img.entry, (unsigned long long)img.stack_top,
+            (unsigned)argc);
 
     struct vmspace *old_vs = t->vs;
     struct page_table *old_pml4 = t->pml4;
@@ -1017,9 +1022,13 @@ static int64_t sys_gethostname(uint64_t namep, uint64_t lenp) {
     struct task *t = task_current();
     if (!t || !in_user()) return SYS_EINVAL;
     if (!name) return SYS_EFAULT;
-    if (len >= sizeof(sys_hostname)) len = sizeof(sys_hostname) - 1;
-    if (!copyout(name, sys_hostname, len)) return SYS_EFAULT;
-    if (!copyout(name + len, "", 1)) return SYS_EFAULT;
+    if (len == 0) return SYS_EINVAL;
+    if (len > sizeof(sys_hostname)) len = sizeof(sys_hostname);
+    size_t n = 0;
+    while (n < len && sys_hostname[n]) n++;
+    if (n >= len) n = len - 1;
+    if (!copyout(name, sys_hostname, n)) return SYS_EFAULT;
+    if (!copyout(name + n, "", 1)) return SYS_EFAULT;
     return 0;
 }
 
@@ -1176,6 +1185,7 @@ static int64_t sys_kill(int32_t pid, int sig) {
                 struct task *t = task_at(i);
                 if (!t || !t->in_use || t->zombie || t->pgid != pgid) continue;
                 __atomic_or_fetch(&t->sig_pending, 1ULL << (sig - 1), __ATOMIC_RELAXED);
+                task_signalfd_notify(t);
             }
         }
         return 0;
@@ -1184,6 +1194,7 @@ static int64_t sys_kill(int32_t pid, int sig) {
     if (!t) return SYS_ESRCH;
     if (sig == 0) return 0;
     __atomic_or_fetch(&t->sig_pending, 1ULL << (sig - 1), __ATOMIC_RELAXED);
+    task_signalfd_notify(t);
     return 0;
 }
 
@@ -1217,6 +1228,7 @@ static int64_t sys_setpgid(int32_t pid, int32_t pgid) {
 
 static int64_t sys_sigaction(int sig, uintptr_t act_ptr, uintptr_t old_ptr) {
     if (sig <= 0 || sig >= 65) return SYS_EINVAL;
+    if (sig == ABI_SIGKILL || sig == ABI_SIGSTOP) return SYS_EINVAL;
     struct task *t = task_current();
     if (!t) return SYS_ENOSYS;
 
@@ -1261,6 +1273,8 @@ static int64_t sys_sigprocmask(int how, uintptr_t set_ptr, uintptr_t old_ptr) {
         case ABI_SIG_SETMASK: t->sig_blocked = set; break;
         default: return SYS_EINVAL;
     }
+
+    t->sig_blocked &= ~((1ULL << (ABI_SIGKILL - 1)) | (1ULL << (ABI_SIGSTOP - 1)));
 
     return 0;
 }
@@ -1339,6 +1353,18 @@ static void sig_return(struct isr_frame *frame) {
         return;
     }
 
+    saved.cs = GDT_USER_CODE_RPL3;
+    saved.ss = GDT_USER_DATA_RPL3;
+    saved.rflags = (saved.rflags & 0x3C0CD5ULL) | 0x202ULL;
+    if (saved.rip >= USER_MAX || saved.rsp >= USER_MAX) {
+        t->sig_in_handler = false;
+        t->sig_frame_user = 0;
+        t->sig_blocked = t->sig_saved_blocked;
+        t->exit_code = 128 + ABI_SIGSEGV;
+        t->sig_terminate = true;
+        return;
+    }
+
     t->sig_blocked = t->sig_saved_blocked;
     t->sig_in_handler = false;
     t->sig_frame_user = 0;
@@ -1389,20 +1415,27 @@ static void deliver_signals(struct task *t, struct isr_frame *frame, bool allow_
         for (;;) __asm__ volatile("hlt");
     }
 
-    uint64_t rsp0 = frame->rsp;
-    uint64_t base = (rsp0 - 208) & ~0xFULL;
-    uint64_t stub = base + 192;
+    uint64_t rsp0 = frame->rsp - 128;
+    uint64_t top = rsp0 & ~0xFULL;
+    uint64_t stub = top;
+    uint64_t saved_at = top - sizeof(struct isr_frame);
+    uint64_t slot = saved_at - 8;
+
+    if (slot < 0x4000) return;
 
     struct task *sig_t = t;
     struct page_table *sig_root = sig_t->pml4 ? sig_t->pml4 :
                                   (sig_t->vs ? sig_t->vs->pml4 : NULL);
-    if (sig_root) vmm_user_page_exec(sig_root, rsp0 & ~(vaddr_t)(PAGE_SIZE - 1));
+    if (sig_root) {
+        vmm_user_page_exec(sig_root, stub & ~(vaddr_t)(PAGE_SIZE - 1));
+        vmm_user_page_exec(sig_root, slot & ~(vaddr_t)(PAGE_SIZE - 1));
+    }
 
     struct isr_frame saved = *frame;
-    if (!copyout((void *)base, &saved, sizeof saved)) return;
+    if (!copyout((void *)saved_at, &saved, sizeof saved)) return;
 
     uint64_t stub_addr = stub;
-    if (!copyout((void *)(base + 184), &stub_addr, sizeof stub_addr)) return;
+    if (!copyout((void *)slot, &stub_addr, sizeof stub_addr)) return;
 
     uint8_t code[16];
     for (int i = 0; i < 16; i++) code[i] = 0x90;
@@ -1418,12 +1451,12 @@ static void deliver_signals(struct task *t, struct isr_frame *frame, bool allow_
 
     t->sig_saved_blocked = t->sig_blocked;
     t->sig_blocked |= bit | t->sig_act_mask[s];
-    t->sig_frame_user = base;
+    t->sig_frame_user = saved_at;
     t->sig_in_handler = true;
 
     frame->rip = h;
     frame->rdi = (uint64_t)s;
-    frame->rsp = base + 184;
+    frame->rsp = slot;
 }
 
 #define X(name, num, ...) [SYS_##name] = sys_##name,

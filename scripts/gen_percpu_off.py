@@ -15,7 +15,7 @@ PROBE = '''
 #include <stddef.h>
 #include "arch/x86_64/cpu/cpu.h"
 int main(void) {{
-    printf("%zu %zu %zu\\n", offsetof(struct percpu, syscall_kstack_top), offsetof(struct percpu, copy_abort), sizeof(struct percpu));
+    printf("%zu %zu %zu %zu %zu\\n", offsetof(struct percpu, syscall_kstack_top), offsetof(struct percpu, copy_abort), sizeof(struct percpu), offsetof(struct percpu, syscall_user_rsp), offsetof(struct percpu, clac_ok));
     return 0;
 }}
 '''
@@ -32,7 +32,7 @@ def main():
         subprocess.run(['gcc', '-I' + root, '-o', exe, src], check=True)
         out = subprocess.check_output([exe]).decode().split()
 
-    off, coff, size = int(out[0]), int(out[1]), int(out[2])
+    off, coff, size, uoff, clacoff = int(out[0]), int(out[1]), int(out[2]), int(out[3]), int(out[4])
 
     if size % 64 != 0:
         sys.exit('gen_percpu_off: sizeof(struct percpu)=%d is not a cache line '
@@ -43,6 +43,8 @@ def main():
         f.write('.set PERCPU_SYSCALL_KSTACK_OFF, %d\n' % off)
         f.write('.set PERCPU_COPY_ABORT_OFF, %d\n' % coff)
         f.write('.set PERCPU_STRUCT_SIZE, %d\n' % size)
+        f.write('.set PERCPU_SYSCALL_USER_RSP_OFF, %d\n' % uoff)
+        f.write('.set PERCPU_CLAC_OK_OFF, %d\n' % clacoff)
 
 
 main()

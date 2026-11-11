@@ -3,6 +3,7 @@
 #include "arch/x86_64/idt/idt.h"
 #include "kernel/multitask/task.h"
 #include "kernel/sync/preempt.h"
+#include "kernel/fd/timerfd.h"
 #include "arch/x86_64/pic/pic.h"
 #include "drivers/serial/serial.h"
 
@@ -22,6 +23,7 @@ static inline uint8_t inb(uint16_t port) {
 void pit_handler(struct isr_frame *frame) {
     pit_ticks++;
     task_tick(pit_ticks);
+    timerfd_tick(pit_ticks);
 
     if (preempt_count() != 0) return;
 

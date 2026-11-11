@@ -14,7 +14,9 @@ bool syscall_msr_init(void) {
 
     msr_write(MSR_STAR, ((uint64_t)(GDT_USER_DATA - 8) << 48) | ((uint64_t)GDT_KERNEL_CODE << 32));
     msr_write(MSR_LSTAR, (uint64_t)syscall_entry);
-    msr_write(MSR_SYSCALL_SFMASK, SYSCALL_SFMASK_VALUE);
+    uint64_t fmask = SYSCALL_SFMASK_VALUE;
+    if (cpu_has_smap()) fmask |= SYSCALL_SFMASK_AC;
+    msr_write(MSR_SYSCALL_SFMASK, fmask);
     msr_write(MSR_EFER, msr_read(MSR_EFER) | MSR_EFER_SCE);
 
     kprintf(PRINT_SERIAL, "SYSCALL msr: lstar=0x%llx star=0x%llx sfmask=0x%llx\n",

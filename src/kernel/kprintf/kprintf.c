@@ -9,7 +9,7 @@
 #define GLYPH_H 16
 
 static volatile uint32_t *fb;
-static uint32_t fb_w, fb_h, cur_x, cur_y, home_x;
+static uint32_t fb_w, fb_h, fb_stride, cur_x, cur_y, home_x;
 static uint32_t cur_fg = COLOR_WHITE;
 static uint32_t cur_bg = COLOR_BLACK;
 static bool cur_reverse;
@@ -28,10 +28,12 @@ static uint32_t scroll_bot = UINT32_MAX;
 static uint32_t saved_col, saved_row;
 static uint8_t last_print;
 
-void kprintf_attach(volatile uint32_t *framebuffer, uint32_t width, uint32_t height) {
+void kprintf_attach(volatile uint32_t *framebuffer, uint32_t width, uint32_t height,
+                    uint32_t stride) {
     fb = framebuffer;
     fb_w = width;
     fb_h = height;
+    fb_stride = stride ? stride : width;
     term_cols = width / GLYPH_W;
     if (term_cols > 256) term_cols = 256;
     term_rows = height / GLYPH_H;
@@ -64,7 +66,7 @@ void kprintf_clear(void) {
     if (!fb) return;
     for (uint32_t y = 0; y < fb_h; y++) {
         for (uint32_t x = 0; x < fb_w; x++) {
-            fb[y * fb_w + x] = 0x000000;
+            fb[y * fb_stride + x] = 0x000000;
         }
     }
 }
@@ -119,7 +121,7 @@ static void draw_cell(uint32_t col, uint32_t row, uint8_t c,
     cell_ch[idx] = c;
     cell_fg[idx] = fg;
     cell_bg[idx] = bg;
-    draw_char(fb, c, col * GLYPH_W, row * GLYPH_H, fg, bg, fb_w, fb_h);
+    draw_char(fb, c, col * GLYPH_W, row * GLYPH_H, fg, bg, fb_stride, fb_h);
 }
 
 static void vt_scroll_region(void) {
@@ -131,9 +133,9 @@ static void vt_scroll_region(void) {
         memcpy(&cell_ch[row * 256], &cell_ch[(row + 1) * 256], 256);
         memcpy(&cell_fg[row * 256], &cell_fg[(row + 1) * 256], 256 * sizeof(uint32_t));
         memcpy(&cell_bg[row * 256], &cell_bg[(row + 1) * 256], 256 * sizeof(uint32_t));
-        memcpy((void *)&fb[(row * GLYPH_H) * fb_w],
-               (const void *)&fb[((row + 1) * GLYPH_H) * fb_w],
-               GLYPH_H * fb_w * sizeof(fb[0]));
+        memcpy((void *)&fb[(row * GLYPH_H) * fb_stride],
+               (const void *)&fb[((row + 1) * GLYPH_H) * fb_stride],
+               GLYPH_H * fb_stride * sizeof(fb[0]));
     }
     for (uint32_t col = 0; col < term_cols; col++)
         draw_cell(col, bot, ' ', cur_fg, cur_bg);
@@ -381,11 +383,6 @@ static void put_unsigned(struct fmt_sink *s, uint64_t v, unsigned base, bool upp
     char buf[24];
     int i = 0;
 
-    if (v == 0) {
-        sink_putc(s, '0');
-        return;
-    }
-
     do {
         if (i < 24) buf[i++] = digits[v % base];
         v /= base;
@@ -550,6 +547,12 @@ void kprintf_output_lock(void) {
 void kprintf_output_unlock(void) {
     __atomic_clear(&printing, __ATOMIC_RELEASE);
     preempt_enable();
+}
+
+void kprintf_output_force(void) {
+    __atomic_store_n(&printing, 0, __ATOMIC_RELEASE);
+    preempt_disable();
+    __atomic_test_and_set(&printing, __ATOMIC_ACQ_REL);
 }
 
 void kprintf(uint32_t attr, const char *fmt, ...) {

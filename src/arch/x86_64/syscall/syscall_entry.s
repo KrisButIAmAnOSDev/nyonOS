@@ -8,12 +8,16 @@
 .global syscall_entry
 .type syscall_entry,@function
 syscall_entry:
-    mov  r11, rsp
+    cmp  byte ptr gs:PERCPU_CLAC_OK_OFF, 0
+    je   .skip_clac
+    clac
+.skip_clac:
+    mov  gs:PERCPU_SYSCALL_USER_RSP_OFF, rsp
     mov  rsp, gs:PERCPU_SYSCALL_KSTACK_OFF
 
     push 0x1b
+    push gs:PERCPU_SYSCALL_USER_RSP_OFF
     push r11
-    pushfq
     or  qword ptr [rsp], 0x200
     push 0x23
     push rcx

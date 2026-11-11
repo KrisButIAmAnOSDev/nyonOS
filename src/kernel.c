@@ -222,7 +222,6 @@ static void heap_alloc_test(void) {
 
     void *null_a = krealloc(NULL, 64);
     if (!null_a) bad++;
-    kfree(null_a);
     void *zero_r = krealloc(null_a, 0);
     if (zero_r) bad++;
 
@@ -324,7 +323,7 @@ void kmain(void) {
         for (;;) __asm__ volatile("hlt");
     }
 
-    kprintf_attach((volatile uint32_t *)fb->address, fb->width, fb->height);
+    kprintf_attach((volatile uint32_t *)fb->address, fb->width, fb->height, fb->pitch / 4);
     tty_set_display_size((uint16_t)(fb->height / 16), (uint16_t)(fb->width / 8));
 
     if (memmap_request.response == NULL) {

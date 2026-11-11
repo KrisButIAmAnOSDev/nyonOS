@@ -258,13 +258,17 @@ static bool fat_next(uint32_t cluster, uint32_t *out) {
 static bool fat_set(uint32_t cluster, uint16_t value) {
     if (cluster < FS_FIRST_CLUSTER || cluster >= FS_BAD_CLUSTER) return false;
     uint32_t byte = cluster * 2;
-    uint32_t lba = fs.fat_start + byte / fs.bytes_per_sector;
     uint32_t off = byte % fs.bytes_per_sector;
     uint8_t buf[FS_SECTOR_SIZE];
-    if (!block_read(fs.dev, lba, 1, buf)) return false;
-    buf[off] = (uint8_t)(value & 0xFF);
+
+    for (uint8_t f = 0; f < fs.fat_count; f++) {
+        uint32_t lba = fs.fat_start + (uint32_t)f * fs.sectors_per_fat +
+                       byte / fs.bytes_per_sector;
+        if (!block_read(fs.dev, lba, 1, buf)) return false;
+        buf[off] = (uint8_t)(value & 0xFF);
     buf[off + 1] = (uint8_t)(value >> 8);
-    if (!sector_write(lba, buf)) return false;
+        if (!sector_write(lba, buf)) return false;
+    }
     fat_cache_generation++;
     return true;
 }
@@ -437,7 +441,8 @@ static bool parse_dirent(const uint8_t *e, fs_node_t *out) {
 
     out->attr = attr;
     out->is_dir = (attr & FS_ATTR_DIRECTORY) != 0;
-    out->cluster = (uint32_t)rd16(e + 26) | ((uint32_t)rd16(e + 20) << 16);
+    out->cluster = (uint32_t)rd16(e + 26);
+    if (fs.cluster_count >= 65525) out->cluster |= (uint32_t)rd16(e + 20) << 16;
     out->size = out->is_dir ? 0 : rd32(e + 28);
     out->is_root = false;
     out->ops = &fat_ops;
@@ -1223,7 +1228,7 @@ static int fs_unlink_inner(const char *path, bool want_dir) {
         }
     }
 
-    if (!found.is_dir && found.cluster) {
+    if (found.cluster) {
         if (!fat_free_chain(found.cluster)) return ABI_EIO;
     }
 

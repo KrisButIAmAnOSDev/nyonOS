@@ -34,11 +34,17 @@ void serial_putchar(char c) {
     preempt_disable();
 
     if (c == '\n') {
-        if (!serial_wait_tx()) return;
+        if (!serial_wait_tx()) {
+            preempt_enable();
+            return;
+        }
         outb(0x3F8, '\r');
     }
 
-    if (!serial_wait_tx()) return;
+    if (!serial_wait_tx()) {
+        preempt_enable();
+        return;
+    }
     outb(0x3F8, (uint8_t)c);
 
     preempt_enable();

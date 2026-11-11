@@ -78,9 +78,10 @@ static bool timerfd_poll_read(struct kobject *o, uint16_t events, uint16_t *reve
 
 static int timerfd_close(struct kobject *o) {
     struct timerfd *tf = (struct timerfd *)o;
-    spin_lock(&timerfd_lock);
+    uint64_t tf_flags = 0;
+    spin_lock_irqsave(&timerfd_lock, &tf_flags);
     timerfd_list_del(tf);
-    spin_unlock(&timerfd_lock);
+    spin_unlock_irqrestore(&timerfd_lock, tf_flags);
     return 0;
 }
 
@@ -94,7 +95,8 @@ static const struct kobject_ops timerfd_ops = {
 void timerfd_tick(uint64_t now) {
     bool any = false;
 
-    spin_lock(&timerfd_lock);
+    uint64_t tf_flags = 0;
+    spin_lock_irqsave(&timerfd_lock, &tf_flags);
     for (struct timerfd *tf = timerfd_active; tf; ) {
         struct timerfd *nxt = tf->tnext;
         if (tf->next_tick && now >= tf->next_tick) {
@@ -113,7 +115,7 @@ void timerfd_tick(uint64_t now) {
         }
         tf = nxt;
     }
-    spin_unlock(&timerfd_lock);
+    spin_unlock_irqrestore(&timerfd_lock, tf_flags);
 
     if (any) poll_notify();
 }
@@ -140,7 +142,6 @@ int timerfd_create(int clockid, uint32_t flags, uint16_t *out_flags) {
     int fd = fd_alloc(t, &tf->obj,
                       FD_RIGHT_READ | FD_RIGHT_WRITE | FD_RIGHT_DUP, fflags);
     kobject_put(&tf->obj);
-    if (fd < 0) kobject_free(&tf->obj);
     return fd;
 }
 
@@ -156,7 +157,8 @@ int timerfd_settime(int fd, unsigned flags, const void *newv, void *oldv) {
     if (newv && !copyin(&nv, newv, sizeof nv)) { kobject_put(o); return FD_EFAULT; }
 
     uint64_t now = pit_get_ticks();
-    spin_lock(&timerfd_lock);
+    uint64_t tf_flags = 0;
+    spin_lock_irqsave(&timerfd_lock, &tf_flags);
 
     uint64_t period_ms = pit_ticks_to_ms(tf->period_ticks);
     ov.it_interval.sec = (int64_t)(period_ms / 1000);
@@ -171,7 +173,7 @@ int timerfd_settime(int fd, unsigned flags, const void *newv, void *oldv) {
     }
 
     if (oldv && !copyout(oldv, &ov, sizeof ov)) {
-        spin_unlock(&timerfd_lock);
+        spin_unlock_irqrestore(&timerfd_lock, tf_flags);
         kobject_put(o);
         return FD_EFAULT;
     }
@@ -196,7 +198,7 @@ int timerfd_settime(int fd, unsigned flags, const void *newv, void *oldv) {
     if (armed && !was_armed) timerfd_list_add(tf);
     else if (!armed && was_armed) timerfd_list_del(tf);
 
-    spin_unlock(&timerfd_lock);
+    spin_unlock_irqrestore(&timerfd_lock, tf_flags);
     kobject_put(o);
     return 0;
 }
@@ -212,7 +214,8 @@ int timerfd_gettime(int fd, void *val) {
     struct sys_itimerspec v;
     uint64_t now = pit_get_ticks();
 
-    spin_lock(&timerfd_lock);
+    uint64_t tf_flags = 0;
+    spin_lock_irqsave(&timerfd_lock, &tf_flags);
     uint64_t period_ms = pit_ticks_to_ms(tf->period_ticks);
     v.it_interval.sec = (int64_t)(period_ms / 1000);
     v.it_interval.nsec = (int64_t)(ms_to_ns(period_ms % 1000));
@@ -224,7 +227,7 @@ int timerfd_gettime(int fd, void *val) {
         v.it_value.sec = 0;
         v.it_value.nsec = 0;
     }
-    spin_unlock(&timerfd_lock);
+    spin_unlock_irqrestore(&timerfd_lock, tf_flags);
 
     int r = copyout(val, &v, sizeof v) ? 0 : FD_EFAULT;
     kobject_put(o);

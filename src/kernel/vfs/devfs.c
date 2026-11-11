@@ -20,6 +20,8 @@ static const devfs_entry_t devfs_root_entries[] = {
     { "CONSOLE", DEVFS_DEV_CONSOLE, false, 0 },
     { "TTY0", DEVFS_DEV_TTY0, false, 0 },
     { "TTY", DEVFS_DEV_TTY, false, 0 },
+    { "RANDOM", DEVFS_DEV_RANDOM, false, 0 },
+    { "URANDOM", DEVFS_DEV_URANDOM, false, 0 },
     { "INPUT", 0, true, 0 },
 };
 
@@ -44,7 +46,7 @@ static void devfs_fill(fs_node_t *out, const devfs_entry_t *e) {
 static const devfs_entry_t *devfs_table(const fs_node_t *dir, uint32_t *n_out) {
     if (!dir || !dir->is_dir) return NULL;
     if (dir->is_root) {
-        *n_out = 7;
+        *n_out = 9;
         return devfs_root_entries;
     }
     *n_out = 1;

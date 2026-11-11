@@ -20,7 +20,7 @@ struct pmm_free_block {
 static spinlock_t pmm_lock = SPINLOCK_INIT;
 
 static uint8_t *pmm_state = NULL;
-static uint8_t *pmm_share = NULL;
+static uint32_t *pmm_share = NULL;
 static struct pmm_free_block *pmm_free_lists[PMM_MAX_ORDER + 1];
 static size_t total_pages = 0;
 static size_t free_pages = 0;
@@ -86,7 +86,7 @@ void pmm_share_ref(paddr_t addr) {
     size_t page = addr / PAGE_SIZE;
     if (page >= total_pages) return;
     lock_acquire(LOCK_PMM, &pmm_lock);
-    if (pmm_share[page] != 0xFF) pmm_share[page]++;
+    if (pmm_share[page] != UINT32_MAX) pmm_share[page]++;
     lock_release(LOCK_PMM, &pmm_lock);
 }
 
@@ -163,14 +163,14 @@ void pmm_init(struct limine_memmap_response *memmap, uint64_t hhdm_offset) {
 
     total_pages = (size_t)((max_addr + PAGE_SIZE - 1) / PAGE_SIZE);
 
-    paddr_t share_phys = memmap_carve(memmap, total_pages);
+    paddr_t share_phys = memmap_carve(memmap, (size_t)total_pages * 4);
     paddr_t state_phys = memmap_carve(memmap, total_pages);
     if (!share_phys || !state_phys) {
         kprintf(PRINT_SERIAL, "PMM: no space for metadata\n");
         for (;;) __asm__ volatile("hlt");
     }
 
-    pmm_share = (uint8_t *)(pmm_hhdm_offset + share_phys);
+    pmm_share = (uint32_t *)(pmm_hhdm_offset + share_phys);
     pmm_state = (uint8_t *)(pmm_hhdm_offset + state_phys);
     memset(pmm_share, 0, total_pages);
     memset(pmm_state, PMM_RESERVED, total_pages);

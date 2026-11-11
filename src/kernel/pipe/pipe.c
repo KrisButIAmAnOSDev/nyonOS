@@ -273,8 +273,6 @@ int pipe_create(struct task *t, int fds[2]) {
         return -1;
     }
 
-    r->obj.cache = pipe_end_cache;
-    w->obj.cache = pipe_end_cache;
     r->pair = p;
     r->is_read = true;
     w->pair = p;
@@ -282,6 +280,8 @@ int pipe_create(struct task *t, int fds[2]) {
 
     kobject_init(&r->obj, KOBJ_PIPE, FD_RIGHT_READ | FD_RIGHT_DUP, &pipe_read_ops);
     kobject_init(&w->obj, KOBJ_PIPE, FD_RIGHT_WRITE | FD_RIGHT_DUP, &pipe_write_ops);
+    r->obj.cache = pipe_end_cache;
+    w->obj.cache = pipe_end_cache;
     r->obj.user_bufs = true;
     w->obj.user_bufs = true;
 
