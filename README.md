@@ -1,12 +1,12 @@
 # nyonOS
 
-A minimal x86_64 hobby OS kernel written from scratch. Boots via Limine on BIOS/UEFI with idk
+A unstable x86_64 hobby OS kernel written from scratch. Boots via Limine on BIOS/UEFI with idk
 
 ## Features
 
 - **Limine boot protocol** (revision 6) - works on BIOS and UEFI
 - **Mutitasking (premitive)** with synchronization too
-- **Fat 16 filesystem** read only for now
+- **Fat 16 and ext2 filesystem** both read and witre works
 - **VGA framebuffer rendering** with 8x16 font (from `kbd` package, GPL-3.0)
 - **elf loader (working!!!)** yea its working
 - **mlibc ruuning (mlibc port ig?)** its running 
