@@ -47,8 +47,11 @@ int main(void) {
     ck(errno == EINVAL, 1);
 
     errno = 0;
-    ck(symlink("/TEST.TXT", "/S2.TXT"), -1);
-    ck(errno == EOPNOTSUPP, 1);
+    ck(symlink("/TEST.TXT", "/S2.TXT"), 0);
+    char sbuf[64];
+    slong sl = readlink("/S2.TXT", sbuf, sizeof sbuf);
+    ck_true(sl == 9 && memcmp(sbuf, "/TEST.TXT", 9) == 0);
+    ck(unlink("/S2.TXT"), 0);
 
     errno = 0;
     ck(link("/TEST.TXT", "/S3.TXT"), -1);
@@ -65,6 +68,28 @@ int main(void) {
         ck(fchmod(fd, 0400), 0);
         ck(fchmod(fd, 0600), 0);
         ck(close(fd), 0);
+    }
+
+    {
+        char ebuf[64];
+        int efd = open("/USER.TXT", O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        if (efd >= 0) {
+            const char *msg = "userland ext2\n";
+            ck(write(efd, msg, 15), 15);
+            ck(close(efd), 0);
+            efd = open("/USER.TXT", O_RDONLY);
+            ck_true(efd >= 0);
+            if (efd >= 0) {
+                char rb[64];
+                ssize_t n = read(efd, rb, sizeof rb);
+                ck(n >= 15 && memcmp(rb, "userland ext2\n", 15) == 0, 1);
+                ck(close(efd), 0);
+            }
+            ck(unlink("/USER.TXT"), 0);
+            ck_true(access("/USER.TXT", F_OK) != 0);
+        } else {
+            ck(1, 1);
+        }
     }
 
     res[RES_DONE] = failed ? RES_FAILED : RES_ALLPASS;

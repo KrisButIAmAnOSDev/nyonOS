@@ -8,6 +8,7 @@
 typedef uint64_t vaddr_t;
 
 bool mount_first_fat(int *out_drive);
+bool mount_primary_ext2(void);
 void tty_inject(const char *s);
 void tty_drain(void);
 
@@ -22,6 +23,7 @@ void sysdep_test(void);
 void exectest_run(void);
 void mandel_run(void);
 void featuretest_run(void);
+void tlstest_run(void);
 void proctest_run(void);
 void clktest_run(void);
 void forktest_run(void);

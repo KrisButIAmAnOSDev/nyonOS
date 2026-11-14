@@ -523,6 +523,7 @@ static int64_t sys_poll(uintptr_t fds_ptr, uint32_t nfds, int32_t timeout,
 
     int32_t ready = 0;
     for (;;) {
+        if (task_sig_pending()) return SYS_EINTR;
         ready = 0;
         for (uint32_t i = 0; i < n; i++) {
             uint16_t rev = 0;
@@ -1184,8 +1185,7 @@ static int64_t sys_kill(int32_t pid, int sig) {
             for (size_t i = 1; i < TASK_MAX; i++) {
                 struct task *t = task_at(i);
                 if (!t || !t->in_use || t->zombie || t->pgid != pgid) continue;
-                __atomic_or_fetch(&t->sig_pending, 1ULL << (sig - 1), __ATOMIC_RELAXED);
-                task_signalfd_notify(t);
+                task_signal_post(t, sig);
             }
         }
         return 0;
@@ -1193,8 +1193,7 @@ static int64_t sys_kill(int32_t pid, int sig) {
     struct task *t = task_find_pid((uint32_t)pid);
     if (!t) return SYS_ESRCH;
     if (sig == 0) return 0;
-    __atomic_or_fetch(&t->sig_pending, 1ULL << (sig - 1), __ATOMIC_RELAXED);
-    task_signalfd_notify(t);
+    task_signal_post(t, sig);
     return 0;
 }
 
@@ -1299,13 +1298,31 @@ static int64_t sys_fstatat(int dirfd, uintptr_t path, uintptr_t st, int flags) {
 }
 
 static int64_t sys_readlink(uintptr_t path, uintptr_t buf, uint64_t size) {
-    (void)path; (void)buf; (void)size;
-    return SYS_EINVAL;
+    char kpath[256];
+    int cp_err = copy_path_resolved(path, kpath, sizeof kpath);
+    if (cp_err < 0) return cp_err;
+
+    char target[512];
+    int r = fs_readlink(kpath, target, sizeof target);
+    if (r < 0) return r;
+    if (!size) return r;
+
+    uint32_t n = (uint32_t)r;
+    if (n > size) n = (uint32_t)size;
+    if (!copyout((void *)buf, target, n)) return SYS_EFAULT;
+    return n;
 }
 
 static int64_t sys_symlink(uintptr_t target, uintptr_t path) {
-    (void)target; (void)path;
-    return SYS_EOPNOTSUPP;
+    char ktarget[256];
+    char kpath[256];
+
+    int cp_err = copy_path((const char *)target, ktarget, sizeof ktarget);
+    if (cp_err < 0) return cp_err;
+    cp_err = copy_path_resolved(path, kpath, sizeof kpath);
+    if (cp_err < 0) return cp_err;
+
+    return (int64_t)fs_symlink(ktarget, kpath);
 }
 
 static int64_t sys_link(uintptr_t oldp, uintptr_t newp) {
@@ -1321,9 +1338,7 @@ static int64_t sys_chmod(uintptr_t path, unsigned mode) {
     fs_node_t node;
     if (!fs_lookup(kpath, &node)) return SYS_ENOENT;
 
-    uint8_t attr = node.attr & ~(FS_ATTR_READ_ONLY);
-    if (!(mode & 0200)) attr |= FS_ATTR_READ_ONLY;
-    return (int64_t)fs_node_chattr(&node, attr);
+    return (int64_t)fs_node_chattr(&node, mode);
 }
 
 static int64_t sys_fchmod(int fd, unsigned mode) {
@@ -1373,8 +1388,39 @@ static void sig_return(struct isr_frame *frame) {
 
 static void deliver_signals(struct task *t, struct isr_frame *frame, bool allow_term);
 
+static bool sig_stop_continue(struct task *t, int s, uint64_t h, uint64_t bit) {
+    if (s == ABI_SIGSTOP || s == ABI_SIGTSTP) {
+        if (h == ABI_SIG_IGN) {
+            t->sig_pending &= ~bit;
+            return true;
+        }
+        if (h == ABI_SIG_DFL) {
+            t->sig_pending &= ~bit;
+            return true;
+        }
+        return false;
+    }
+
+    if (s == ABI_SIGCONT) {
+        t->stopped = false;
+        t->sig_pending &= ~((1ULL << (ABI_SIGSTOP - 1)) | (1ULL << (ABI_SIGTSTP - 1)));
+        if (h == ABI_SIG_IGN) {
+            t->sig_pending &= ~bit;
+            return true;
+        }
+        if (h == ABI_SIG_DFL) {
+            t->sig_pending &= ~bit;
+            task_signal_wake(t);
+            return true;
+        }
+    }
+
+    return false;
+}
+
 void task_sig_check(struct task *t, struct isr_frame *frame) {
     if (!t || !frame || t->sig_in_handler) return;
+    if ((frame->cs & 3) != 3) return;
     uint64_t pending = t->sig_pending & ~t->sig_blocked;
     if (!pending) return;
     int s = __builtin_ctzll(pending) + 1;
@@ -1383,6 +1429,7 @@ void task_sig_check(struct task *t, struct isr_frame *frame) {
         t->sig_pending &= ~(1ULL << (s - 1));
         return;
     }
+    if (sig_stop_continue(t, s, h, 1ULL << (s - 1))) return;
     if (h == ABI_SIG_DFL) {
         t->sig_pending &= ~(1ULL << (s - 1));
         t->exit_code = 128 + s;
@@ -1404,6 +1451,8 @@ static void deliver_signals(struct task *t, struct isr_frame *frame, bool allow_
 
     uint64_t h = t->sig_act_handler[s];
     if (h == ABI_SIG_IGN) return;
+
+    if (sig_stop_continue(t, s, h, bit)) return;
 
     if (h == ABI_SIG_DFL) {
         kprintf(PRINT_SERIAL, "SIG DFL pid %u sig %d\n", t->pid, s);

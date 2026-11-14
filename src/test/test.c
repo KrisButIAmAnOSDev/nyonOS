@@ -4,6 +4,7 @@
 #include "kernel/kprintf/kprintf.h"
 #include "kernel/fd/fd.h"
 #include "kernel/fs/fs.h"
+#include "kernel/fs/ext2.h"
 #include "kernel/mm/pmm/pmm.h"
 #include "kernel/mm/vmm/vmm.h"
 #include "kernel/multitask/task.h"
@@ -23,6 +24,24 @@ extern uint8_t user_tty_a_entry[];
 extern uint8_t user_tty_b_entry[];
 extern uint8_t user_tty_c_entry[];
 extern uint8_t user_wait_entry[];
+
+bool mount_primary_ext2(void) {
+    static block_device_t whole;
+
+    for (int i = 0; i < ATA_MAX_DRIVES; i++) {
+        ata_drive_t *d = ata_get_drive(i);
+        if (!d || !d->present || d->atapi) continue;
+        if (!block_bind_ata(&whole, i)) continue;
+
+        if (!ext2_mount(&whole)) continue;
+
+        vfs_set_default(&ext2_ops);
+        kprintf(PRINT_SERIAL, "  drive %d: ext2 volume mounted as the primary filesystem\n", i);
+        return true;
+    }
+
+    return false;
+}
 
 bool mount_first_fat(int *out_drive) {
     static block_device_t whole;
@@ -64,7 +83,7 @@ static char txt_byte(uint32_t i) {
     return '.';
 }
 
-void fs_test(void) {
+static void fat_selftest(void) {
     static char buf[4096] __attribute__((aligned(4)));
     static uint8_t bigbuf[4096] __attribute__((aligned(4)));
     static const char inner_expect[] = "inner payload\n";
@@ -76,6 +95,8 @@ void fs_test(void) {
         kprintf(PRINT_SERIAL, "  no FAT volume found\n");
         return;
     }
+
+    vfs_set_default(&fat_ops);
 
     bool m = true;
     kprintf(PRINT_SERIAL, "  mounted: ");
@@ -143,12 +164,19 @@ void fs_test(void) {
     kprintchar('\n', PRINT_SERIAL);
 
     uint32_t clus_size = (uint32_t)fs_get()->sectors_per_cluster * fs_get()->bytes_per_sector;
+    fs_node_t big;
+    bool big_got = fs_lookup("/BIG.TXT", &big);
+    bool edge_ok = big_got && big.size > clus_size;
     char edge[16];
-    bool edge_ok = fs_node_read(&file, clus_size - 4, edge, 16);
-    for (int i = 0; edge_ok && i < 16; i++) {
-        if ((uint8_t)edge[i] != (uint8_t)txt_byte(clus_size - 4 + (uint32_t)i)) edge_ok = false;
+    if (edge_ok) {
+        uint32_t at = clus_size - 4;
+        edge_ok = fs_node_read(&big, at, edge, 16);
+        for (int i = 0; edge_ok && i < 16; i++) {
+            if ((uint8_t)edge[i] != (uint8_t)txt_byte(at + (uint32_t)i)) edge_ok = false;
+        }
     }
-    kprintf(PRINT_SERIAL, "  spans %u clusters, boundary read: ", (read + clus_size - 1) / clus_size);
+    kprintf(PRINT_SERIAL, "  cluster-crossing read (%u-byte clusters, %u-byte file): ",
+            clus_size, big_got ? big.size : 0);
     kprintchar(edge_ok ? 'Y' : 'N', PRINT_SERIAL);
     kprintchar('\n', PRINT_SERIAL);
 
@@ -224,10 +252,116 @@ void fs_test(void) {
     kprintchar(lfn_ok ? 'Y' : 'N', PRINT_SERIAL);
     kprintf(PRINT_SERIAL, " (create=%d write=%d lookup=%d content=%d unlink=%d)\n",
             lfn_create, lfn_write, lfn_lookup ? 1 : 0, lfn_content ? 1 : 0, lfn_unlink ? 1 : 0);
+
     kprintf(PRINT_SERIAL, "FS test: usable: ");
     kprintchar((fixtures && size_ok && content_ok && edge_ok && p2 && oob && missing &&
                 got_sub && sub_count == 1 && inner_ok && bad_path && dir_read_refused && lfn_ok) ? 'Y' : 'N', PRINT_SERIAL);
     kprintchar('\n', PRINT_SERIAL);
+}
+
+static void ext2_selftest(void) {
+    vfs_set_default(&ext2_ops);
+
+    {
+        static char e2buf[4096];
+        fs_node_t node;
+        bool e2_root = fs_lookup("/", &node) && node.is_dir;
+
+        uint32_t e2_entries = 0;
+        fs_node_t ent;
+        while (e2_root && fs_iterate(&node, e2_entries, &ent)) e2_entries++;
+
+        bool e2_file = false;
+        uint32_t n = 0;
+        if (fs_lookup("/hello.txt", &node)) {
+            n = fs_node_read_all(&node, e2buf, sizeof e2buf);
+            e2_file = n == 28 && memcmp(e2buf, "hello from ext2\nsecond line\n", 28) == 0;
+        }
+
+        bool e2_nested = false;
+        if (fs_lookup("/docs/nested.txt", &node)) {
+            n = fs_node_read_all(&node, e2buf, sizeof e2buf);
+            e2_nested = n == 20 && memcmp(e2buf, "nested file content\n", 20) == 0;
+        }
+
+        bool e2_big = false;
+        if (fs_lookup("/big.bin", &node)) {
+            n = fs_node_read_all(&node, e2buf, sizeof e2buf);
+            e2_big = n == sizeof e2buf;
+        }
+
+        char link[64];
+        bool e2_link = false;
+        if (fs_lookup("/link.txt", &node)) {
+            e2_link = fs_readlink("/link.txt", link, sizeof link) >= 0;
+            if (e2_link) e2_link = strcmp(link, "hello.txt") == 0;
+        }
+
+        bool e2_ro = false;
+        bool e2_grow = false;
+        if (fs_lookup("/hello.txt", &node)) {
+            const char *msg = "written by nyonOS\n";
+            uint32_t mlen = (uint32_t)strlen(msg);
+            int w = fs_node_write(&node, 0, msg, mlen);
+            char rb[64];
+            uint32_t rn = fs_node_read_all(&node, rb, sizeof rb);
+            e2_ro = w == (int)mlen && rn >= mlen && memcmp(rb, msg, mlen) == 0;
+
+            uint32_t before = node.size;
+            int g = fs_node_write(&node, 8192, "x", 1);
+            e2_grow = g == 1 && node.size == 8193;
+            (void)before;
+        }
+
+        bool e2_dir_ok = false;
+        {
+            fs_node_t n2;
+            bool c = fs_create("/NEW.TXT", &n2) == 0;
+            bool w = false;
+            if (c) {
+                const char *msg = "brand new file\n";
+                w = fs_node_write(&n2, 0, msg, 15) == 15;
+            }
+            bool r = false;
+            bool found = fs_lookup("/NEW.TXT", &n2) != 0;
+            uint32_t rn = 0;
+            if (found) {
+                char rb[64];
+                rn = fs_node_read_all(&n2, rb, sizeof rb);
+                r = rn == 15 && memcmp(rb, "brand new file\n", 15) == 0;
+            }
+            bool u = fs_unlink("/NEW.TXT") == 0;
+            bool gone = !fs_lookup("/NEW.TXT", &n2);
+            e2_dir_ok = c && w && r && u && gone;
+        }
+
+        bool e2_mkdir_ok = false;
+        {
+            fs_node_t n2;
+            bool c = fs_mkdir("/NEWDIR", &n2) == 0;
+            bool isdir = fs_lookup("/NEWDIR", &n2) && n2.is_dir;
+            bool r = fs_rmdir("/NEWDIR") == 0;
+            bool gone = !fs_lookup("/NEWDIR", &n2);
+            e2_mkdir_ok = c && isdir && r && gone;
+        }
+
+        bool e2_chmod_ok = false;
+        if (fs_lookup("/hello.txt", &node))
+            e2_chmod_ok = fs_node_chattr(&node, 0600) == 0;
+
+        kprintf(PRINT_SERIAL, "  ext2 root: %s, entries: %u\n", e2_root ? "Y" : "N", e2_entries);
+        kprintf(PRINT_SERIAL, "  ext2 read: %s, nested: %s, indirect: %s, symlink: %s, write: %s, grow: %s\n",
+                e2_file ? "Y" : "N", e2_nested ? "Y" : "N", e2_big ? "Y" : "N",
+                e2_link ? "Y" : "N", e2_ro ? "Y" : "N", e2_grow ? "Y" : "N");
+        kprintf(PRINT_SERIAL, "  ext2 create/write/unlink: %s, mkdir/rmdir: %s, chmod: %s\n",
+                e2_dir_ok ? "Y" : "N", e2_mkdir_ok ? "Y" : "N", e2_chmod_ok ? "Y" : "N");
+    }
+}
+
+void fs_test(void) {
+    fat_selftest();
+    ext2_selftest();
+    vfs_set_default(&ext2_ops);
 }
 
 #define TTY_RES_DONE  16
@@ -983,6 +1117,52 @@ void featuretest_run(void) {
     kprintchar('\n', PRINT_SERIAL);
 }
 
+void tlstest_run(void) {
+    fs_node_t node;
+    if (!fs_lookup("/BIN/TLSTEST", &node) && !fs_lookup("/BIN/tlstest", &node)) {
+        kprintf(PRINT_SERIAL, "TLS: /BIN/tlstest not found\n");
+        return;
+    }
+
+    struct elf_image img;
+    const char *err = NULL;
+    if (elf_load(&node, &img, &err)) {
+        kprintf(PRINT_SERIAL, "TLS: load refused: %s\n", err ? err : "?");
+        return;
+    }
+
+    struct task *t = task_spawn_vmspace("tlstest", img.vs, img.entry, img.stack_top);
+    elf_destroy(&img);
+    if (!t) {
+        kprintf(PRINT_SERIAL, "TLS: spawn failed\n");
+        return;
+    }
+
+    uint32_t pid = t->pid;
+    for (int i = 0; i < 6000 && task_find_pid(pid); i++) pit_sleep(5);
+    struct task *z = task_find_pid(pid);
+    bool alive = z != NULL;
+    task_reap_now();
+
+    kprintf(PRINT_SERIAL, "TLS: program exited: ");
+    kprintchar(!alive ? 'Y' : 'N', PRINT_SERIAL);
+    kprintchar('\n', PRINT_SERIAL);
+
+    fs_node_t res;
+    char verdict[8] = { 0 };
+    size_t n = 0;
+    if (fs_lookup("/TLSRESULT", &res)) {
+        n = fs_node_read_all(&res, verdict, sizeof verdict - 1);
+    }
+    if (n >= 2 && verdict[0] == 'O' && verdict[1] == 'K') n = 2;
+    else if (n >= 2 && verdict[0] == 'N' && verdict[1] == 'O') n = 2;
+    else n = 0;
+
+    kprintf(PRINT_SERIAL, "TLS: thread-local storage works: ");
+    kprintchar(n == 2 && verdict[0] == 'O' ? 'Y' : 'N', PRINT_SERIAL);
+    kprintchar('\n', PRINT_SERIAL);
+}
+
 void proctest_run(void) {
     fs_node_t node;
     if (!fs_lookup("/BIN/PROCTEST", &node) && !fs_lookup("/BIN/proctest", &node)) {
@@ -1628,9 +1808,12 @@ void sys_test(void) {
     static const char *labels[C_MAX_CHECKS] = {
         "fstatat TEST.TXT ok", "size 3000", "regular file",
         "fstatat missing is ENOENT",
-        "readlink EINVAL", "symlink EOPNOTSUPP", "link EOPNOTSUPP",
+        "readlink EINVAL", "symlink ok", "symlink readlink ok", "symlink unlink ok",
+        "link EOPNOTSUPP",
         "chmod 0400 ok", "write access denied", "chmod 0600 ok", "write access ok",
         "open TEST.TXT", "fchmod 0400", "fchmod 0600", "close",
+        "read ext2 hello.txt", "ext2 write", "ext2 close write",
+        "ext2 reopen", "ext2 read back", "ext2 close",
     };
 
     int checks = 0, bad = 0;

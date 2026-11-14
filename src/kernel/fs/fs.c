@@ -24,6 +24,7 @@ static struct {
 } fs_inodes[FS_INODE_CACHE];
 
 static bool fs_inode_same(const fs_node_t *a, const fs_node_t *b) {
+    if (a->ops != b->ops) return false;
     if (a->is_root || b->is_root) return a->is_root == b->is_root;
     return a->dir_cluster == b->dir_cluster && a->dir_index == b->dir_index;
 }
@@ -196,9 +197,7 @@ bool fs_mount_inner(block_device_t *dev) {
 bool fs_mount(block_device_t *dev) {
     lock_acquire(LOCK_FS, &fs_lock);
     bool r = fs_mount_inner(dev);
-    if (r) vfs_set_default(&fat_ops);
     lock_release(LOCK_FS, &fs_lock);
-    if (r) devfs_init();
     return r;
 }
 
@@ -860,9 +859,11 @@ static int fs_node_sync_entry(fs_node_t *node) {
     return sector_write(lba, buf) ? 0 : ABI_EIO;
 }
 
-int fs_node_chattr(fs_node_t *node, uint8_t attr) {
+static int fat_chmod(fs_node_t *node, uint32_t mode) {
     if (!node || node->is_root) return ABI_EIO;
 
+    uint8_t attr = node->attr & ~(uint8_t)FS_ATTR_READ_ONLY;
+    if (!(mode & 0200)) attr |= FS_ATTR_READ_ONLY;
     node->attr = attr;
 
     fs_node_t parent;
@@ -880,6 +881,12 @@ int fs_node_chattr(fs_node_t *node, uint8_t attr) {
 
     buf[off + 11] = attr;
     return sector_write(lba, buf) ? 0 : ABI_EIO;
+}
+
+int fs_node_chattr(fs_node_t *node, uint32_t mode) {
+    if (!node || node->is_root) return ABI_EIO;
+    if (node->ops && node->ops->chmod) return node->ops->chmod(node, mode);
+    return ABI_ENOSYS;
 }
 
 static void fat_stamp(int64_t unix_sec, uint16_t *out_time, uint16_t *out_date) {
@@ -1033,6 +1040,8 @@ static int fs_node_write_inner(fs_node_t *node, uint32_t offset, const void *buf
 
     const uint8_t *src = (const uint8_t *)buf;
     uint32_t done = 0;
+
+    fat_cache_generation++;
 
     while (len) {
         uint32_t lba = cluster_lba(cluster) + within / fs.bytes_per_sector;
@@ -1358,6 +1367,11 @@ static bool fat_read(const fs_node_t *node, uint32_t offset, void *buf, uint32_t
     return true;
 }
 
+static int fat_symlink(const char *target, const char *path, fs_node_t *out) {
+    (void)target; (void)path; (void)out;
+    return ABI_EOPNOTSUPP;
+}
+
 static int fat_unlink(const char *path) {
     return fs_unlink_inner(path, false);
 }
@@ -1389,4 +1403,6 @@ const struct fs_ops fat_ops = {
     .utimens = fat_utimens,
     .node_utimens = fat_node_utimens,
     .sync = fat_sync,
+    .chmod = fat_chmod,
+    .symlink = fat_symlink,
 };

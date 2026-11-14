@@ -36,9 +36,14 @@ QEMU_CPU = qemu64,+nx,+smep,+smap,+pcid,+rdrand,+rdseed,+fsgsbase,+invpcid
 QEMU_SMP ?= 1
 QEMU_KVM ?=
 
+QEMU_EXT2 = build/ext2.img
+QEMU_FAT ?=
+QEMU_FAT_DRIVE = -drive format=raw,file=$(QEMU_FAT)
+
 QEMU = qemu-system-x86_64 -cpu $(QEMU_CPU) \
        -drive format=raw,file=nyonOS.img \
-       -drive format=raw,file=fat16.img \
+       -drive format=raw,file=$(QEMU_EXT2) \
+       $(if $(QEMU_FAT),$(QEMU_FAT_DRIVE)) \
        -d int,cpu_reset -D qemu.log -serial stdio -no-reboot -k en-us
 
 EXCLUDE = $(shell find -L src/user -type f 2>/dev/null)
@@ -57,7 +62,7 @@ $(PERCPU_OFF): src/arch/x86_64/cpu/cpu.h scripts/gen_percpu_off.py
 .PHONY: all imageall kernel image run clean run-kvm run-ihatedisplay run-ihatedisplay-kvm
 
 all: imageall
-	qemu-system-x86_64 $(QEMU_KVM) -smp $(QEMU_SMP) -cpu $(QEMU_CPU) -drive format=raw,file=nyonOS.img -drive format=raw,file=fat16.img -d int,cpu_reset -D qemu.log -serial stdio -no-reboot -k en-us
+	qemu-system-x86_64 $(QEMU_KVM) -smp $(QEMU_SMP) -cpu $(QEMU_CPU) -drive format=raw,file=nyonOS.img -drive format=raw,file=$(QEMU_EXT2) $(if $(QEMU_FAT),$(QEMU_FAT_DRIVE)) -d int,cpu_reset -D qemu.log -serial stdio -no-reboot -k en-us
 
 imageall: kernel user $(ASM_ABI) $(PERCPU_OFF)
 	@NANO_BIN=$$(python3 tools/build_nano.py 2>/dev/null); \
@@ -95,13 +100,13 @@ run:
 	$(MAKE) clean
 	$(MAKE) kernel
 	./build.sh
-	qemu-system-x86_64 $(QEMU_KVM) -smp $(QEMU_SMP) -cpu $(QEMU_CPU) -drive format=raw,file=nyonOS.img -drive format=raw,file=fat16.img -d int,cpu_reset -D qemu.log -serial stdio -no-reboot -k en-us
+	qemu-system-x86_64 $(QEMU_KVM) -smp $(QEMU_SMP) -cpu $(QEMU_CPU) -drive format=raw,file=nyonOS.img -drive format=raw,file=$(QEMU_EXT2) $(if $(QEMU_FAT),$(QEMU_FAT_DRIVE)) -d int,cpu_reset -D qemu.log -serial stdio -no-reboot -k en-us
 
 run-kvm:
 	$(MAKE) run QEMU_KVM=-enable-kvm
 
 run-ihatedisplay: image
-	qemu-system-x86_64 $(QEMU_KVM) -smp $(QEMU_SMP) -cpu $(QEMU_CPU) -drive format=raw,file=nyonOS.img -drive format=raw,file=fat16.img -d int,cpu_reset -D qemu.log -serial stdio -no-reboot -k en-us -display none
+	qemu-system-x86_64 $(QEMU_KVM) -smp $(QEMU_SMP) -cpu $(QEMU_CPU) -drive format=raw,file=nyonOS.img -drive format=raw,file=$(QEMU_EXT2) $(if $(QEMU_FAT),$(QEMU_FAT_DRIVE)) -d int,cpu_reset -D qemu.log -serial stdio -no-reboot -k en-us -display none
 
 run-ihatedisplay-kvm:
 	$(MAKE) run-ihatedisplay QEMU_KVM=-enable-kvm

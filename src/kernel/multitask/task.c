@@ -1,4 +1,5 @@
 #include "task.h"
+#include "abi/abi.h"
 #include "kernel/lib/string.h"
 #include "kernel/kprintf/kprintf.h"
 #include "drivers/serial/serial.h"
@@ -1253,6 +1254,16 @@ bool task_wait_vfork_child(uint32_t child) {
     return true;
 }
 
+uint64_t task_wait_gen(void) {
+    return __atomic_load_n(&tasks[current_slot()].wake_gen, __ATOMIC_ACQUIRE);
+}
+
+bool task_wait_since(void *chan, uint64_t seen) {
+    if (__atomic_load_n(&tasks[current_slot()].wake_gen, __ATOMIC_ACQUIRE) != seen) return false;
+    task_wait(chan, 0);
+    return true;
+}
+
 bool task_wait(void *chan, uint64_t deadline) {
     uint64_t rflags;
     __asm__ volatile("pushfq; pop %0; cli" : "=r"(rflags) :: "memory");
@@ -1361,10 +1372,9 @@ void task_tick(uint64_t now) {
         if (now >= t->wake_tick) task_release_wait(t, i);
         else if (t->wake_tick < next) next = t->wake_tick;
     }
+    set_earliest_wake(next);
     atomic_flag_clear_explicit(&sched_lock.f, memory_order_release);
     preempt_enable();
-
-    set_earliest_wake(next);
 }
 
 bool task_current_blocked(void) {
@@ -1420,14 +1430,33 @@ struct task *task_at(size_t i) {
     return &tasks[i];
 }
 
+void task_signal_wake(struct task *t) {
+    if (!t) return;
+    task_release_wait(t, (size_t)(t - tasks));
+}
+
+void task_signal_post(struct task *t, int sig) {
+    if (!t || sig <= 0 || sig >= 65) return;
+    uint64_t bit = 1ULL << (sig - 1);
+    if (sig == ABI_SIGCONT || sig == ABI_SIGKILL) {
+        __atomic_and_fetch(&t->sig_pending, ~((1ULL << (ABI_SIGSTOP - 1)) | (1ULL << (ABI_SIGTSTP - 1))), __ATOMIC_ACQ_REL);
+        t->stopped = false;
+    } else if (sig == ABI_SIGSTOP || sig == ABI_SIGTSTP) {
+        if (t->sig_act_handler[sig] == ABI_SIG_IGN) return;
+        if (t->sig_act_handler[sig] == ABI_SIG_DFL) t->stopped = true;
+    }
+    __atomic_or_fetch(&t->sig_pending, bit, __ATOMIC_RELAXED);
+    task_signalfd_notify(t);
+    task_signal_wake(t);
+}
+
 void task_kill_pgrp(uint32_t pgid, int sig) {
     if (sig < 0 || sig >= 65) return;
     if (!pgid) {
         for (size_t i = 1; i < TASK_MAX; i++) {
             struct task *t = &tasks[i];
             if (!t->in_use || t->zombie) continue;
-            __atomic_or_fetch(&t->sig_pending, 1ULL << (sig - 1), __ATOMIC_RELAXED);
-            task_signalfd_notify(t);
+            task_signal_post(t, sig);
         }
         return;
     }
@@ -1438,8 +1467,7 @@ void task_kill_pgrp(uint32_t pgid, int sig) {
             struct task *t = &tasks[m - 1];
             m = t->pg_next;
             if (!t->in_use || t->zombie) continue;
-            __atomic_or_fetch(&t->sig_pending, 1ULL << (sig - 1), __ATOMIC_RELAXED);
-            task_signalfd_notify(t);
+            task_signal_post(t, sig);
         }
     }
 }

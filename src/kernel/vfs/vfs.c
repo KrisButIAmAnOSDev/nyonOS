@@ -1,5 +1,6 @@
 #include "kernel/vfs/vfs.h"
 #include "kernel/kprintf/kprintf.h"
+#include "abi/abi.h"
 
 #include "kernel/lib/string.h"
 #include "kernel/lib/string.h"
@@ -133,28 +134,57 @@ int vfs_resize(fs_node_t *node, uint32_t size) {
     return node->ops->resize(node, size);
 }
 
-int vfs_create(const char *path, fs_node_t *out) {
-    if (vfs_default_ops && vfs_default_ops->create)
-        return vfs_default_ops->create(path, out);
+static int vfs_mount_for(const char *path, const struct fs_ops **ops_out) {
+    size_t best = 0;
+    int best_i = -1;
+    for (uint32_t i = 0; i < mount_count; i++) {
+        size_t L = mounts[i].plen;
+        if (path_has_prefix(path, mounts[i].prefix, L)) {
+            if (L > best) {
+                best = L;
+                best_i = (int)i;
+            }
+        }
+    }
+
+    if (best_i >= 0) {
+        *ops_out = mounts[best_i].ops;
+        return (int)best;
+    }
+
+    if (vfs_default_ops) {
+        *ops_out = vfs_default_ops;
+        return 0;
+    }
     return -1;
+}
+
+int vfs_create(const char *path, fs_node_t *out) {
+    const struct fs_ops *ops = NULL;
+    int strip = vfs_mount_for(path, &ops);
+    if (strip < 0 || !ops || !ops->create) return -ABI_ENOENT;
+    return ops->create(path + strip, out);
 }
 
 int vfs_mkdir(const char *path, fs_node_t *out) {
-    if (vfs_default_ops && vfs_default_ops->mkdir)
-        return vfs_default_ops->mkdir(path, out);
-    return -1;
+    const struct fs_ops *ops = NULL;
+    int strip = vfs_mount_for(path, &ops);
+    if (strip < 0 || !ops || !ops->mkdir) return -ABI_ENOENT;
+    return ops->mkdir(path + strip, out);
 }
 
 int vfs_unlink(const char *path) {
-    if (vfs_default_ops && vfs_default_ops->unlink)
-        return vfs_default_ops->unlink(path);
-    return -1;
+    const struct fs_ops *ops = NULL;
+    int strip = vfs_mount_for(path, &ops);
+    if (strip < 0 || !ops || !ops->unlink) return -ABI_ENOENT;
+    return ops->unlink(path + strip);
 }
 
 int vfs_rmdir(const char *path) {
-    if (vfs_default_ops && vfs_default_ops->rmdir)
-        return vfs_default_ops->rmdir(path);
-    return -1;
+    const struct fs_ops *ops = NULL;
+    int strip = vfs_mount_for(path, &ops);
+    if (strip < 0 || !ops || !ops->rmdir) return -ABI_ENOENT;
+    return ops->rmdir(path + strip);
 }
 
 int vfs_utimens(const char *path, int64_t mtime) {
@@ -233,4 +263,33 @@ int fs_node_utimens(fs_node_t *node, int64_t mtime) {
 
 bool fs_sync(void) {
     return vfs_sync();
+}
+
+
+bool vfs_readlink(const char *path, char *buf, uint32_t size) {
+    if (!path || !buf || !size) return false;
+
+    const struct fs_ops *ops = NULL;
+    int strip = vfs_mount_for(path, &ops);
+    if (strip < 0 || !ops || !ops->readlink) return false;
+
+    return ops->readlink(path + strip, buf, size);
+}
+
+int vfs_symlink(const char *target, const char *path) {
+    const struct fs_ops *ops = NULL;
+    int strip = vfs_mount_for(path, &ops);
+    if (strip < 0 || !ops || !ops->symlink) return -ABI_EOPNOTSUPP;
+    return ops->symlink(target, path + strip, NULL);
+}
+
+int fs_symlink(const char *target, const char *path) {
+    if (!target || !path) return -ABI_EINVAL;
+    return vfs_symlink(target, path);
+}
+
+int fs_readlink(const char *path, char *buf, uint32_t size) {
+    if (!path || !buf || !size) return ABI_EINVAL;
+    if (!vfs_readlink(path, buf, size)) return ABI_EINVAL;
+    return (int)strnlen(buf, size);
 }

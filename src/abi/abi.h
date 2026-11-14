@@ -34,6 +34,7 @@
 #define ABI_EOPNOTSUPP (-95)
 #define ABI_ENXIO (-6)
 #define ABI_ENOTTY (-25)
+#define ABI_EROFS (-30)
 
 #define ABI_SIG_DFL 0
 #define ABI_SIG_IGN 1

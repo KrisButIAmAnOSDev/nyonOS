@@ -139,6 +139,7 @@ static int pipe_wait_readable(struct kobject *o) {
     __asm__ volatile("pushfq; pop %0; cli" : "=r"(rflags) :: "memory");
 
     for (;;) {
+        uint64_t seen = task_wait_gen();
         if (task_sig_pending()) {
             if (rflags & 0x200) __asm__ volatile("sti" ::: "memory");
             return FD_EINTR;
@@ -147,7 +148,7 @@ static int pipe_wait_readable(struct kobject *o) {
         bool ready = p->count > 0 || p->write_ends == 0;
         lock_release(LOCK_PIPE, &pipe_lock);
         if (ready) break;
-        task_wait(&p->chan, 0);
+        task_wait_since(&p->chan, seen);
     }
 
     if (rflags & 0x200) __asm__ volatile("sti" ::: "memory");
@@ -162,6 +163,7 @@ static int pipe_wait_writable(struct kobject *o) {
     __asm__ volatile("pushfq; pop %0; cli" : "=r"(rflags) :: "memory");
 
     for (;;) {
+        uint64_t seen = task_wait_gen();
         if (task_sig_pending()) {
             if (rflags & 0x200) __asm__ volatile("sti" ::: "memory");
             return FD_EINTR;
@@ -170,7 +172,7 @@ static int pipe_wait_writable(struct kobject *o) {
         bool ready = (p->cap - p->count) > 0 || p->read_ends == 0;
         lock_release(LOCK_PIPE, &pipe_lock);
         if (ready) break;
-        task_wait(&p->chan, 0);
+        task_wait_since(&p->chan, seen);
     }
 
     if (rflags & 0x200) __asm__ volatile("sti" ::: "memory");

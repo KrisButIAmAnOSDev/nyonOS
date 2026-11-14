@@ -453,6 +453,10 @@ void kmain(void) {
     task_spawn("aqua", task_aqua);
     task_spawn("seth", task_seth);
 
+    if (!mount_primary_ext2())
+        kprintf(PRINT_SERIAL, "  no ext2 volume found\n");
+    devfs_init();
+
     fs_test();
 
     kprintf_clear();
@@ -548,6 +552,7 @@ void kmain(void) {
             timed_test("exec", exectest_run);
             timed_test("mandel", mandel_run);
             timed_test("features", featuretest_run);
+            timed_test("tls", tlstest_run);
             timed_test("proc", proctest_run);
             timed_test("clk", clktest_run);
             timed_test("fork", forktest_run);

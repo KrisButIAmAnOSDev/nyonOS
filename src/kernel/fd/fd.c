@@ -353,9 +353,7 @@ int fd_chmod(struct task *t, int fd, unsigned mode) {
     struct kobject *o = fd_get_checked(t, fd, KOBJ_FILE, 0);
     if (!o) return FD_EBADF;
     struct file *f = (struct file *)o;
-    uint8_t attr = f->node->attr & ~(uint8_t)0x01;
-    if (!(mode & 0200)) attr |= 0x01;
-    int r = fs_node_chattr(f->node, attr);
+    int r = fs_node_chattr(f->node, mode);
     kobject_put(o);
     return r;
 }
@@ -822,6 +820,10 @@ static int console_wait_readable(struct kobject *o) {
 
     int r;
     for (;;) {
+        if (task_sig_pending()) {
+            if (rflags & 0x200) __asm__ volatile("sti" ::: "memory");
+            return FD_EINTR;
+        }
         uint32_t owner = keyboard_owner();
         if (owner == 0 && me != 0) {
             keyboard_set_owner(me);

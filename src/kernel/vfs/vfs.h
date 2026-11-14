@@ -35,6 +35,9 @@ struct fs_ops {
     int (*utimens)(const char *path, int64_t mtime);
     int (*node_utimens)(fs_node_t *node, int64_t mtime);
     bool (*sync)(void);
+    bool (*readlink)(const char *path, char *buf, uint32_t size);
+    int (*chmod)(fs_node_t *node, uint32_t mode);
+    int (*symlink)(const char *target, const char *path, fs_node_t *out);
 };
 
 bool vfs_mount(const char *prefix, const struct fs_ops *ops);
@@ -55,7 +58,9 @@ int fs_utimens(const char *path, int64_t mtime);
 int fs_node_utimens(fs_node_t *node, int64_t mtime);
 bool fs_sync(void);
 
-int fs_node_chattr(fs_node_t *node, uint8_t attr);
+int fs_node_chattr(fs_node_t *node, uint32_t mode);
+int fs_symlink(const char *target, const char *path);
+int fs_readlink(const char *path, char *buf, uint32_t size);
 fs_node_t *fs_node_ref(const fs_node_t *n);
 void fs_node_unref(fs_node_t *n);
 bool vfs_lookup(const char *path, fs_node_t *out);
@@ -71,6 +76,8 @@ int vfs_rmdir(const char *path);
 int vfs_utimens(const char *path, int64_t mtime);
 int vfs_node_utimens(fs_node_t *node, int64_t mtime);
 bool vfs_sync(void);
+bool vfs_readlink(const char *path, char *buf, uint32_t size);
+int vfs_symlink(const char *target, const char *path);
 
 bool devfs_init(void);
 const struct fs_ops *devfs_ops(void);

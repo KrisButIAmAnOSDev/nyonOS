@@ -16,27 +16,25 @@ fi
 echo "Creating bootable disk image..."
 dd if=/dev/zero bs=1M count=64 of=nyonOS.img
 
-FAT_MB=${FAT_MB:-256}
-FAT_SECTORS=$((FAT_MB * 2048 - 2048))
+awk 'BEGIN{printf "that my jarona"; for(i=0;i<2986;i++) printf "."}' > /tmp/nyonos-fs-test.txt
+printf 'inner payload\n' > /tmp/nyonos-fs-inner.txt
 
-rm -f fat16.img
+EXT2_MB=${EXT2_MB:-64}
+EXT2_STAGE=build/ext2-stage
 
-if [ ! -f fat16.img ]; then
-    dd if=/dev/zero bs=1M count=$FAT_MB of=fat16.img
-    printf 'label: dos\nunit: sectors\n\nstart=2048, type=0e, bootable\n' | sfdisk --no-reread --no-tell-kernel fat16.img >/dev/null
-    mformat -i fat16.img@@1M -T $FAT_SECTORS -h 64 -s 32 -c 64 ::
-    awk 'BEGIN{printf "that my jarona"; for(i=0;i<2986;i++) printf "."}' > /tmp/nyonos-fs-test.txt
-    mcopy -i fat16.img@@1M /tmp/nyonos-fs-test.txt ::/TEST.TXT
-    mmd -i fat16.img@@1M ::/SUB
-    printf 'inner payload\n' > /tmp/nyonos-fs-inner.txt
-    mcopy -i fat16.img@@1M /tmp/nyonos-fs-inner.txt ::/SUB/INNER.TXT
-fi
+rm -rf "$EXT2_STAGE" build/ext2.img
+mkdir -p "$EXT2_STAGE/BIN" "$EXT2_STAGE/usr/share/terminfo" "$EXT2_STAGE/SUB" "$EXT2_STAGE/docs" "$EXT2_STAGE/empty"
+
+cp /tmp/nyonos-fs-test.txt "$EXT2_STAGE/TEST.TXT"
+cp /tmp/nyonos-fs-inner.txt "$EXT2_STAGE/SUB/INNER.TXT"
+printf 'hello from ext2\nsecond line\n' > "$EXT2_STAGE/hello.txt"
+printf 'nested file content\n' > "$EXT2_STAGE/docs/nested.txt"
+printf 'deep\n' > "$EXT2_STAGE/docs/deep.txt"
+head -c 200000 /dev/urandom > "$EXT2_STAGE/big.bin"
+ln -s hello.txt "$EXT2_STAGE/link.txt"
+ln -s docs/nested.txt "$EXT2_STAGE/docs/dlink.txt"
 
 make -C src/user >/dev/null
-
-if [ ! -f fat16.img ]; then
-    exit 1
-fi
 
 PROGRAMS="hello fdtest mmtest forktest pipetest fstest fd2test evtest fbtest devtest"
 if [ -f src/user/bin/systest ]; then
@@ -70,6 +68,10 @@ if [ -f src/user/bin/featest ]; then
     PROGRAMS="$PROGRAMS featest"
 fi
 
+if [ -f src/user/bin/tlstest ]; then
+    PROGRAMS="$PROGRAMS tlstest"
+fi
+
 if [ -f src/user/bin/proctest ]; then
     PROGRAMS="$PROGRAMS proctest"
 fi
@@ -89,10 +91,8 @@ for prog in $PROGRAMS; do
     fi
 done
 
-mdeltree -i fat16.img@@1M ::/BIN >/dev/null 2>&1 || true
-mmd -i fat16.img@@1M ::/BIN
 for prog in $PROGRAMS; do
-    mcopy -i fat16.img@@1M "src/user/bin/$prog" "::/BIN/$prog"
+    cp "src/user/bin/$prog" "$EXT2_STAGE/BIN/$prog"
 done
 
 BB_BIN=$NYONOS_BUSYBOX
@@ -101,15 +101,15 @@ if [ -z "$BB_BIN" ] && [ -f ../busybox/busybox ]; then
 fi
 
 if [ -n "$BB_BIN" ] && [ -f "$BB_BIN" ]; then
-    mcopy -i fat16.img@@1M "$BB_BIN" ::/BIN/busybox
+    cp "$BB_BIN" "$EXT2_STAGE/BIN/busybox"
     BB_APPLETS="basename cat clear cmp comm cp cut dirname du echo env expand expr false find grep head hexdump hostname id install ln ls md5sum mkdir mktemp mv nl od printf readlink rev rm rmdir seq sha256sum shred sleep sort split stat strings sync tac tail tee test touch tr true uname unexpand uniq wc which xargs yes"
     for applet in $BB_APPLETS; do
-        mcopy -i fat16.img@@1M "$BB_BIN" "::/BIN/$applet"
+        ln -sf busybox "$EXT2_STAGE/BIN/$applet"
     done
 fi
 
 if [ -f ../bash/bash ]; then
-    mcopy -i fat16.img@@1M ../bash/bash ::/BIN/BASH
+    cp ../bash/bash "$EXT2_STAGE/BIN/BASH"
 fi
 
 NANO_BIN=$NYONOS_NANO
@@ -118,7 +118,7 @@ if [ -z "$NANO_BIN" ] && [ -f tools/nano.bin ]; then
 fi
 
 if [ -n "$NANO_BIN" ] && [ -f "$NANO_BIN" ]; then
-    mcopy -i fat16.img@@1M "$NANO_BIN" ::/BIN/NANO
+    cp "$NANO_BIN" "$EXT2_STAGE/BIN/NANO"
 fi
 
 TERMINFO_DIR=$NYONOS_TERMINFO
@@ -127,13 +127,13 @@ if [ -z "$TERMINFO_DIR" ] && [ -d tools/terminfo ]; then
 fi
 
 if [ -n "$TERMINFO_DIR" ] && [ -d "$TERMINFO_DIR" ]; then
-    mmd -i fat16.img@@1M ::/usr ::/usr/share ::/usr/share/terminfo 2>/dev/null || true
-    for d in "$TERMINFO_DIR"/*; do
-        if [ -d "$d" ]; then
-            mcopy -s -i fat16.img@@1M "$d" ::/usr/share/terminfo/
-        fi
-    done
+    cp -r "$TERMINFO_DIR"/. "$EXT2_STAGE/usr/share/terminfo/" 2>/dev/null || true
 fi
+
+dd if=/dev/zero of=build/ext2.img bs=1M count=$EXT2_MB 2>/dev/null
+mke2fs -q -t ext2 -b 1024 -I 128 -d "$EXT2_STAGE" \
+    -O ^resize_inode,^dir_index,^filetype,^ext_attr,^sparse_super,^large_file,^huge_file,^dir_nlink,^extra_isize,^metadata_csum,^orphan_file,^64bit,^has_journal \
+    build/ext2.img 2>/dev/null || mke2fs -q -t ext2 -b 1024 -I 128 -d "$EXT2_STAGE" build/ext2.img
 
 PATH=$PATH:/usr/sbin:/sbin sgdisk nyonOS.img -n 1:2048 -t 1:ef00 -m 1
 
@@ -154,4 +154,4 @@ mcopy -i nyonOS.img@@1M /tmp/limine-binary/BOOTIA32.EFI ::/EFI/BOOT/
 /tmp/limine-binary/limine bios-install nyonOS.img
 
 echo "=== Build Complete ==="
-echo "Boot with: qemu-system-x86_64 -drive format=raw,file=nyonOS.img -drive format=raw,file=fat16.img"
+echo "Boot with: qemu-system-x86_64 -drive format=raw,file=nyonOS.img -drive format=raw,file=build/ext2.img"
