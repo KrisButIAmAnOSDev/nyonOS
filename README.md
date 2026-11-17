@@ -17,6 +17,7 @@ A unstable x86_64 hobby OS kernel written from scratch. Boots via Limine on BIOS
 
 - **kbd** — 8x16 font data (from the `kbd` package, GPL-2.0-or-later)
 - **bash** — the shell (GPL-3.0-or-later)
+- **fastfetch** - well worth sayin my agent did the patch file and patch for me (MIT)
 - **busybox** — user-provided applets (GPL-2.0-only)
 - **nano** — user-provided text editor (GPL-3.0-or-later)
 
