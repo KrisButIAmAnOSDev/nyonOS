@@ -35,6 +35,7 @@
 #define ABI_ENXIO (-6)
 #define ABI_ENOTTY (-25)
 #define ABI_EROFS (-30)
+#define ABI_EXDEV (-18)
 
 #define ABI_SIG_DFL 0
 #define ABI_SIG_IGN 1
@@ -121,10 +122,21 @@ struct sys_stat {
     uint64_t cluster;
     uint32_t attr;
     uint32_t is_dir;
+    uint32_t mode;
+    uint32_t uid;
+    uint32_t gid;
+    uint32_t pad;
     char name[ABI_MAX_NAME];
 };
 
-struct sys_dirent {
+struct sys_statfs {
+    uint64_t total_blocks;
+    uint64_t free_blocks;
+    uint64_t total_inodes;
+    uint64_t free_inodes;
+    uint32_t block_size;
+    uint32_t name_max;
+};struct sys_dirent {
     uint64_t size;
     uint32_t cluster;
     uint32_t attr;
@@ -250,6 +262,27 @@ struct sys_itimerspec {
 #define ABI_MMAP_PROT_WRITE  2
 #define ABI_MMAP_PROT_EXEC   4
 #define ABI_MMAP_ANON       0x20
+#define ABI_MMAP_SHARED     0x01
+#define ABI_MMAP_PRIVATE    0x02
+#define ABI_MMAP_FIXED      0x10
+
+#define ABI_MREMAP_MAYMOVE  0x01
+
+#define ABI_F_GETLK         5
+#define ABI_F_SETLK         6
+#define ABI_F_SETLKW        7
+#define ABI_F_RDLCK         0
+#define ABI_F_WRLCK         1
+#define ABI_F_UNLCK         2
+
+struct sys_flock {
+    int16_t type;
+    int16_t whence;
+    int64_t start;
+    int64_t len;
+    int32_t pid;
+    int32_t pad;
+};
 
 #define ABI_FUTEX_WAIT 0
 #define ABI_FUTEX_WAKE 1

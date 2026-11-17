@@ -19,11 +19,30 @@ dd if=/dev/zero bs=1M count=64 of=nyonOS.img
 awk 'BEGIN{printf "that my jarona"; for(i=0;i<2986;i++) printf "."}' > /tmp/nyonos-fs-test.txt
 printf 'inner payload\n' > /tmp/nyonos-fs-inner.txt
 
-EXT2_MB=${EXT2_MB:-64}
+EXT2_MB=${EXT2_MB:-512}
 EXT2_STAGE=build/ext2-stage
 
 rm -rf "$EXT2_STAGE" build/ext2.img
-mkdir -p "$EXT2_STAGE/BIN" "$EXT2_STAGE/usr/share/terminfo" "$EXT2_STAGE/SUB" "$EXT2_STAGE/docs" "$EXT2_STAGE/empty"
+mkdir -p "$EXT2_STAGE/BIN" "$EXT2_STAGE/usr/share/terminfo" "$EXT2_STAGE/SUB" "$EXT2_STAGE/docs" "$EXT2_STAGE/empty" "$EXT2_STAGE/etc"
+
+cat > "$EXT2_STAGE/etc/os-release" <<'EOF'
+NAME="nyonOS"
+ID=nyonos
+PRETTY_NAME="nyonOS 26.0"
+VERSION_ID="26.0"
+VERSION="26.0"
+HOME_URL="https://github.com/kawkaw/nyonOS"
+ANSI_COLOR="38;2;255;150;200"
+EOF
+
+printf 'nyon\n' > "$EXT2_STAGE/etc/hostname"
+
+cat > "$EXT2_STAGE/etc/passwd" <<'EOF'
+root:x:0:0:root:/root:/bin/bash
+nyon:x:1000:1000:nyon:/:/bin/bash
+EOF
+
+printf 'nyonos\n' > "$EXT2_STAGE/etc/machine-id"
 
 cp /tmp/nyonos-fs-test.txt "$EXT2_STAGE/TEST.TXT"
 cp /tmp/nyonos-fs-inner.txt "$EXT2_STAGE/SUB/INNER.TXT"
@@ -42,6 +61,9 @@ if [ -f src/user/bin/systest ]; then
 fi
 if [ -f src/user/bin/asynctest ]; then
     PROGRAMS="$PROGRAMS asynctest"
+fi
+if [ -f src/user/bin/mmaptest ]; then
+    PROGRAMS="$PROGRAMS mmaptest"
 fi
 if [ -f src/user/bin/mhello ]; then
     PROGRAMS="$PROGRAMS mhello"
@@ -72,8 +94,8 @@ if [ -f src/user/bin/tlstest ]; then
     PROGRAMS="$PROGRAMS tlstest"
 fi
 
-if [ -f src/user/bin/proctest ]; then
-    PROGRAMS="$PROGRAMS proctest"
+if [ -f src/user/bin/procfstest ]; then
+    PROGRAMS="$PROGRAMS procfstest"
 fi
 
 if [ -f src/user/bin/clktest ]; then
@@ -119,6 +141,16 @@ fi
 
 if [ -n "$NANO_BIN" ] && [ -f "$NANO_BIN" ]; then
     cp "$NANO_BIN" "$EXT2_STAGE/BIN/NANO"
+fi
+
+FASTFETCH_BIN=$NYONOS_FASTFETCH
+if [ -z "$FASTFETCH_BIN" ] && [ -f tools/fastfetch.bin ]; then
+    FASTFETCH_BIN=tools/fastfetch.bin
+fi
+if [ -n "$FASTFETCH_BIN" ] && [ -f "$FASTFETCH_BIN" ]; then
+    cp "$FASTFETCH_BIN" "$EXT2_STAGE/BIN/fastfetch"
+else
+    echo "fastfetch: no binary found, /BIN/FASTFETCH will be missing" >&2
 fi
 
 TERMINFO_DIR=$NYONOS_TERMINFO

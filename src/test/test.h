@@ -18,6 +18,8 @@ void mm_test(void);
 void pipe_test(void);
 void fswrite_test(void);
 void fd2_test(void);
+void mmap_test(void);
+void procfs_test(void);
 void futex_pair_test(void);
 void sysdep_test(void);
 void exectest_run(void);

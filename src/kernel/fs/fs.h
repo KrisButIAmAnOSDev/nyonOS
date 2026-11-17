@@ -43,6 +43,9 @@ typedef struct {
 } fs_volume_t;
 
 bool fs_mount(block_device_t *dev);
+int fs_lock_set(uint32_t pid, uint64_t key, int type, uint64_t start, uint64_t end, bool block);
+int fs_lock_get(uint32_t pid, uint64_t key, int *type, uint64_t *start, uint64_t *end);
+void fs_lock_release(uint32_t pid, uint64_t key);
 bool fs_is_mounted(void);
 fs_volume_t *fs_get(void);
 

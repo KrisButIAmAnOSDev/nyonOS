@@ -4,6 +4,8 @@
 #include <unistd.h>
 #include <string.h>
 #include <errno.h>
+#include <time.h>
+#include <stdio.h>
 
 static volatile ulong *res = (volatile ulong *)RES_VIRT;
 static int idx;
@@ -54,8 +56,52 @@ int main(void) {
     ck(unlink("/S2.TXT"), 0);
 
     errno = 0;
-    ck(link("/TEST.TXT", "/S3.TXT"), -1);
-    ck(errno == EOPNOTSUPP, 1);
+    struct stat s3;
+    ck(link("/TEST.TXT", "/S3.TXT"), 0);
+    ck(fstatat(AT_FDCWD, "/S3.TXT", &s3, 0), 0);
+    ck_true(s3.st_ino == st.st_ino);
+    ck(unlink("/S3.TXT"), 0);
+    ck_true(fstatat(AT_FDCWD, "/S3.TXT", &s3, 0) == -1);
+
+    int rf = open("/S4.TXT", O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    ck_true(rf >= 0);
+    if (rf >= 0) {
+        ck(write(rf, "rn", 2), 2);
+        ck(close(rf), 0);
+    }
+    ck(rename("/S4.TXT", "/S5.TXT"), 0);
+    ck_true(fstatat(AT_FDCWD, "/S4.TXT", &s3, 0) == -1);
+    ck(fstatat(AT_FDCWD, "/S5.TXT", &s3, 0), 0);
+    ck((slong)s3.st_size, 2);
+    ck(unlink("/S5.TXT"), 0);
+
+    ck(chown("/TEST.TXT", 500, 600), 0);
+    ck(fstatat(AT_FDCWD, "/TEST.TXT", &s3, 0), 0);
+    ck((slong)s3.st_uid, 500);
+    ck((slong)s3.st_gid, 600);
+    ck(chown("/TEST.TXT", 1000, 1000), 0);
+
+    struct timespec tsv[2];
+    tsv[0].tv_sec = 1000000;
+    tsv[0].tv_nsec = 0;
+    tsv[1].tv_sec = 1000001;
+    tsv[1].tv_nsec = 0;
+    ck(utimensat(AT_FDCWD, "/TEST.TXT", tsv, 0), 0);
+
+    {
+        int of = open("/S6.TXT", O_RDWR | O_CREAT | O_TRUNC, 0644);
+        ck_true(of >= 0);
+        if (of >= 0) {
+            ck(write(of, "still here", 10), 10);
+            ck(unlink("/S6.TXT"), 0);
+            ck_true(fstatat(AT_FDCWD, "/S6.TXT", &s3, 0) == -1);
+            ck(lseek(of, 0, SEEK_SET), 0);
+            char ob[16];
+            ck(read(of, ob, 10), 10);
+            ck_true(memcmp(ob, "still here", 10) == 0);
+            ck(close(of), 0);
+        }
+    }
 
     ck(chmod("/TEST.TXT", 0400), 0);
     ck(access("/TEST.TXT", W_OK), -1);

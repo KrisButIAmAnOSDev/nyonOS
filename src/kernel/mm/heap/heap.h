@@ -5,6 +5,9 @@
 #include <stddef.h>
 
 void heap_init(void);
+size_t heap_used_bytes(void);
+size_t heap_used_blocks(void);
+size_t heap_free_blocks(void);
 void *kmalloc(size_t size);
 void kfree(void *ptr);
 void *kzalloc(size_t size);

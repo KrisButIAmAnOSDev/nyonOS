@@ -147,7 +147,10 @@ static bool heap_grow(size_t min_extra) {
     if (!vmm_va_alloc(&heap_va, pages, &vaddr)) return false;
 
     paddr_t phys;
-    if (!pmm_alloc(&phys, pages)) {
+    pmm_set_tag(PMM_TAG_HEAP);
+    bool got = pmm_alloc(&phys, pages);
+    pmm_set_tag(PMM_TAG_NONE);
+    if (!got) {
         vmm_va_free(&heap_va, vaddr, pages);
         return false;
     }
@@ -348,3 +351,32 @@ void *krealloc(void *ptr, size_t size) {
     return np;
 }
 
+size_t heap_used_bytes(void) {
+    size_t pages = 0;
+    for (size_t i = 0; i < segment_count; i++) pages += segments[i].pages;
+    return pages * PAGE_SIZE;
+}
+
+static void heap_walk_counts(size_t *used, size_t *freec) {
+    size_t u = 0, f = 0;
+    for (struct block_header *b = heap_head; b; b = b->next) {
+        size_t sz = b->size;
+        if (sz < sizeof(struct block_header)) sz = sizeof(struct block_header);
+        if (b->free) f += sz;
+        else u += sz;
+    }
+    if (used) *used = u;
+    if (freec) *freec = f;
+}
+
+size_t heap_used_blocks(void) {
+    size_t u = 0, f = 0;
+    heap_walk_counts(&u, &f);
+    return u;
+}
+
+size_t heap_free_blocks(void) {
+    size_t u = 0, f = 0;
+    heap_walk_counts(&u, &f);
+    return f;
+}

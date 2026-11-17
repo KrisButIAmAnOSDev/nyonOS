@@ -59,17 +59,18 @@ $(PERCPU_OFF): src/arch/x86_64/cpu/cpu.h scripts/gen_percpu_off.py
 	mkdir -p obj
 	python3 scripts/gen_percpu_off.py src $@
 
-.PHONY: all imageall kernel image run clean run-kvm run-ihatedisplay run-ihatedisplay-kvm
+.PHONY: all imageall kernel image run clean run-kvm run-ihatedisplay run-ihatedisplay-kvm fastfetch
 
 all: imageall
 	qemu-system-x86_64 $(QEMU_KVM) -smp $(QEMU_SMP) -cpu $(QEMU_CPU) -drive format=raw,file=nyonOS.img -drive format=raw,file=$(QEMU_EXT2) $(if $(QEMU_FAT),$(QEMU_FAT_DRIVE)) -d int,cpu_reset -D qemu.log -serial stdio -no-reboot -k en-us
 
 imageall: kernel user $(ASM_ABI) $(PERCPU_OFF)
 	@NANO_BIN=$$(python3 tools/build_nano.py 2>/dev/null); \
+	FASTFETCH_BIN=$$($(MAKE) --no-print-directory fastfetch 2>/dev/null); \
 	if [ -n "$$NANO_BIN" ]; then \
-		NYONOS_NANO="$$NANO_BIN" NYONOS_TERMINFO="build/ports/terminfo" ./build.sh; \
+		NYONOS_NANO="$$NANO_BIN" NYONOS_TERMINFO="build/ports/terminfo" NYONOS_FASTFETCH="$$FASTFETCH_BIN" ./build.sh; \
 	else \
-		./build.sh; \
+		NYONOS_FASTFETCH="$$FASTFETCH_BIN" ./build.sh; \
 	fi
 
 kernel: bin/$(OUTPUT)
@@ -91,7 +92,15 @@ obj/%.S.o: %.S
 	$(CC) $(CFLAGS) $(DEPFLAGS) -c $< -o $@
 
 image: kernel user $(ASM_ABI) $(PERCPU_OFF)
-	./build.sh
+	@FASTFETCH_BIN=$$($(MAKE) --no-print-directory fastfetch 2>/dev/null); \
+	NYONOS_FASTFETCH="$$FASTFETCH_BIN" ./build.sh
+
+fastfetch:
+	@if [ -x tools/build_fastfetch.sh ] && [ ! -f tools/fastfetch.bin ]; then \
+		echo "building fastfetch for nyonOS..." >&2; \
+		tools/build_fastfetch.sh >/dev/null 2>&1 || true; \
+	fi
+	@if [ -f tools/fastfetch.bin ]; then echo tools/fastfetch.bin; fi
 
 user:
 	$(MAKE) -C src/user NYONOS_MLIBC_CC="$(NYONOS_MLIBC_CC)" NYONOS_MLIBC_LD="$(NYONOS_MLIBC_LD)"

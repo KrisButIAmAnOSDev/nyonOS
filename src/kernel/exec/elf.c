@@ -165,7 +165,7 @@ static const char *default_env[] = {
     "HOME=/",
     "PWD=/",
     "SHELL=/BIN/BASH",
-    "TERM=xterm",
+    "TERM=nyon",
     "USER=nyon",
     "LOGNAME=nyon",
     "PS1=\\[\\e[1;36m\\]nyon\\[\\e[0m\\] \\e[35m\\w\\e[0m # ",
@@ -322,11 +322,11 @@ static int elf_load_core(const fs_node *file, struct elf_image *out, const char 
                 phys = existing & VMM_PT_ADDR_MASK;
                 page = (uint8_t *)(vmm_hhdm_offset + phys);
             } else {
-                if (!pmm_alloc(&phys, 1)) {
+                { pmm_set_tag(PMM_TAG_ELF); bool __g = pmm_alloc(&phys, 1); pmm_set_tag(PMM_TAG_NONE); if (!__g) {
                     if (err) *err = "out of memory";
                     result = ELF_ETOOLARGE;
                     break;
-                }
+                }}
                 page = (uint8_t *)(vmm_hhdm_offset + phys);
                 memset(page, 0, PAGE_SIZE);
             }

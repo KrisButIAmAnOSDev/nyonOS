@@ -19,7 +19,20 @@ typedef struct {
     uint32_t dir_index;
     const struct fs_ops *ops;
     uint32_t dev_id;
+    uint64_t cache_key;
+    uint32_t mode;
+    uint32_t uid;
+    uint32_t gid;
 } fs_node_t;
+
+typedef struct {
+    uint64_t total_blocks;
+    uint64_t free_blocks;
+    uint64_t total_inodes;
+    uint64_t free_inodes;
+    uint32_t block_size;
+    uint32_t name_max;
+} fs_statfs_t;
 
 struct fs_ops {
     bool (*iterate)(const fs_node_t *dir, uint32_t index, fs_node_t *out);
@@ -32,17 +45,24 @@ struct fs_ops {
     int (*mkdir)(const char *path, fs_node_t *out);
     int (*unlink)(const char *path);
     int (*rmdir)(const char *path);
-    int (*utimens)(const char *path, int64_t mtime);
-    int (*node_utimens)(fs_node_t *node, int64_t mtime);
+    int (*utimens)(const char *path, int64_t atime, int64_t mtime);
+    int (*node_utimens)(fs_node_t *node, int64_t atime, int64_t mtime);
     bool (*sync)(void);
     bool (*readlink)(const char *path, char *buf, uint32_t size);
     int (*chmod)(fs_node_t *node, uint32_t mode);
     int (*symlink)(const char *target, const char *path, fs_node_t *out);
+    int (*link)(const char *oldpath, const char *newpath);
+    int (*rename)(const char *oldpath, const char *newpath);
+    int (*chown)(fs_node_t *node, int uid, int gid);
+    int (*statfs)(fs_statfs_t *out);
+    int (*open)(const fs_node_t *node);
+    void (*release)(const fs_node_t *node);
 };
 
 bool vfs_mount(const char *prefix, const struct fs_ops *ops);
 bool vfs_set_default(const struct fs_ops *ops);
 uint32_t fs_node_read_all(const fs_node_t *node, void *buf, uint32_t max);
+uint64_t fs_node_lock_key(const fs_node_t *node);
 
 bool fs_lookup(const char *path, fs_node_t *out);
 bool fs_iterate(const fs_node_t *dir, uint32_t index, fs_node_t *out);
@@ -54,13 +74,20 @@ int fs_create(const char *path, fs_node_t *out);
 int fs_mkdir(const char *path, fs_node_t *out);
 int fs_unlink(const char *path);
 int fs_rmdir(const char *path);
-int fs_utimens(const char *path, int64_t mtime);
-int fs_node_utimens(fs_node_t *node, int64_t mtime);
+int fs_utimens(const char *path, int64_t atime, int64_t mtime);
+int fs_node_utimens(fs_node_t *node, int64_t atime, int64_t mtime);
 bool fs_sync(void);
 
 int fs_node_chattr(fs_node_t *node, uint32_t mode);
 int fs_symlink(const char *target, const char *path);
 int fs_readlink(const char *path, char *buf, uint32_t size);
+int fs_link(const char *oldpath, const char *newpath);
+int fs_rename(const char *oldpath, const char *newpath);
+int fs_chown(const char *path, int uid, int gid);
+int fs_node_chown(fs_node_t *node, int uid, int gid);
+int fs_statfs(fs_statfs_t *out);
+int fs_node_opened(const fs_node_t *node);
+void fs_node_released(const fs_node_t *node);
 fs_node_t *fs_node_ref(const fs_node_t *n);
 void fs_node_unref(fs_node_t *n);
 bool vfs_lookup(const char *path, fs_node_t *out);
@@ -73,13 +100,20 @@ int vfs_create(const char *path, fs_node_t *out);
 int vfs_mkdir(const char *path, fs_node_t *out);
 int vfs_unlink(const char *path);
 int vfs_rmdir(const char *path);
-int vfs_utimens(const char *path, int64_t mtime);
-int vfs_node_utimens(fs_node_t *node, int64_t mtime);
+int vfs_utimens(const char *path, int64_t atime, int64_t mtime);
+int vfs_node_utimens(fs_node_t *node, int64_t atime, int64_t mtime);
 bool vfs_sync(void);
 bool vfs_readlink(const char *path, char *buf, uint32_t size);
 int vfs_symlink(const char *target, const char *path);
+int vfs_link(const char *oldpath, const char *newpath);
+int vfs_rename(const char *oldpath, const char *newpath);
+int vfs_chown(const char *path, int uid, int gid);
+int vfs_node_chown(fs_node_t *node, int uid, int gid);
+int vfs_statfs(fs_statfs_t *out);
 
 bool devfs_init(void);
+bool proc_init(void);
+const struct fs_ops *proc_ops(void);
 const struct fs_ops *devfs_ops(void);
 
 #define DEVFS_DEV_FB0   1

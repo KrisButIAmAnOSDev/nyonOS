@@ -106,6 +106,29 @@ static slong __sys4(ulong n, ulong a0, ulong a1, ulong a2, ulong a3) {
     return r;
 }
 
+static slong __sys5(ulong n, ulong a0, ulong a1, ulong a2, ulong a3, ulong a4) {
+    slong r;
+    register ulong r10 __asm__("r10") = a3;
+    register ulong r8 __asm__("r8") = a4;
+    __asm__ volatile("syscall"
+                     : "=a"(r)
+                     : "a"(n), "D"(a0), "S"(a1), "d"(a2), "r"(r10), "r"(r8)
+                     : "rcx", "r11", "memory");
+    return r;
+}
+
+static slong __sys6(ulong n, ulong a0, ulong a1, ulong a2, ulong a3, ulong a4, ulong a5) {
+    slong r;
+    register ulong r10 __asm__("r10") = a3;
+    register ulong r8 __asm__("r8") = a4;
+    register ulong r9 __asm__("r9") = a5;
+    __asm__ volatile("syscall"
+                     : "=a"(r)
+                     : "a"(n), "D"(a0), "S"(a1), "d"(a2), "r"(r10), "r"(r8), "r"(r9)
+                     : "rcx", "r11", "memory");
+    return r;
+}
+
 #define N(...) __VA_ARGS__
 
 #define X(name, num, ret, nargs, argnames, ...)                                        \

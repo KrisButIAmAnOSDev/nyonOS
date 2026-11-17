@@ -15,5 +15,6 @@ void kmem_cache_free(struct kmem_cache *cache, void *obj);
 
 size_t kmem_cache_obj_size(struct kmem_cache *cache);
 size_t kmem_cache_pages_per_slab(struct kmem_cache *cache);
+size_t slab_pages_used(void);
 
 #endif

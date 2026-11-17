@@ -156,7 +156,7 @@ int fd_close(struct task *t, int fd);
 int fd_dup(struct task *t, int fd, uint32_t rights, uint16_t flags);
 int fd_truncate(struct task *t, int fd, uint64_t len);
 int fd_sync(struct task *t, int fd);
-int fd_utimens(struct task *t, int fd, int64_t mtime);
+int fd_utimens(struct task *t, int fd, int64_t atime, int64_t mtime);
 int fd_chmod(struct task *t, int fd, unsigned mode);
 void fd_close_cloexec(struct task *t);
 int fd_dup2(struct task *t, int oldfd, int newfd, uint32_t flags);

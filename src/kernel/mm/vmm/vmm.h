@@ -66,6 +66,9 @@ bool vmm_pin(struct page_table *root, vaddr_t vaddr);
 bool vmm_cow_enabled(void);
 size_t vmm_cow_shared(void);
 bool vmm_set_cow(bool on);
+size_t vmm_tables_used(void);
+size_t vmm_frames_mapped(void);
+size_t vmm_count_user_frames(struct page_table *root);
 bool vmm_range_writable_in(struct page_table *root, vaddr_t addr, size_t len);
 
 #define VM_PROT_READ   1

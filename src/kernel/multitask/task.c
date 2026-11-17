@@ -57,6 +57,8 @@ static inline bool sched_enabled(void) { return cpu_self()->sched_enabled; }
 static inline void set_sched_enabled(bool v) { cpu_self()->sched_enabled = v; }
 static inline uint64_t switch_count(void) { return cpu_self()->switch_count; }
 static inline void bump_switch_count(void) { cpu_self()->switch_count++; }
+static volatile uint32_t blocked_count;
+static volatile uint64_t chan_epoch_v;
 static volatile uint64_t earliest_wake_v = UINT64_MAX;
 
 static inline uint64_t earliest_wake(void) {
@@ -347,11 +349,11 @@ struct task *task_spawn(const char *name, void (*entry)(void)) {
     }
 
     paddr_t phys;
-    if (!pmm_alloc(&phys, TASK_STACK_PAGES)) {
+    { pmm_set_tag(PMM_TAG_STACK); bool __g = pmm_alloc(&phys, TASK_STACK_PAGES); pmm_set_tag(PMM_TAG_NONE); if (!__g) {
         lock_release(LOCK_SCHED, &sched_lock);
         kprintf(PRINT_SERIAL, "task: out of memory for stack (mem leak?)\n");
         return NULL;
-    }
+    }}
 
     struct task *t = &tasks[slot];
     t->stack_base = vmm_hhdm_offset + phys;
@@ -422,18 +424,18 @@ static struct task *spawn_ring3(const char *name, paddr_t code_phys, size_t code
     }
 
     paddr_t kphys, uphys;
-    if (!pmm_alloc(&kphys, TASK_STACK_PAGES)) {
+    { pmm_set_tag(PMM_TAG_STACK); bool __g = pmm_alloc(&kphys, TASK_STACK_PAGES); pmm_set_tag(PMM_TAG_NONE); if (!__g) {
         vmm_destroy_address_space(pml4);
         lock_release(LOCK_SCHED, &sched_lock);
         return NULL;
-    }
+    }}
     task_kstack_zero(kphys);
-    if (!pmm_alloc(&uphys, TASK_USER_STACK_PAGES)) {
+    { pmm_set_tag(PMM_TAG_STACK); bool __g = pmm_alloc(&uphys, TASK_USER_STACK_PAGES); pmm_set_tag(PMM_TAG_NONE); if (!__g) {
         pmm_free(kphys, TASK_STACK_PAGES);
         vmm_destroy_address_space(pml4);
         lock_release(LOCK_SCHED, &sched_lock);
         return NULL;
-    }
+    }}
 
 
     if (!vmm_map_user_exec(pml4, code_virt, code_phys, code_pages, VMM_USER_EXEC_FLAGS)) {
@@ -539,7 +541,7 @@ struct task *task_spawn_thread(struct task *parent, const char *name,
     if (!slot) { lock_release(LOCK_SCHED, &sched_lock); return NULL; }
 
     paddr_t kphys;
-    if (!pmm_alloc(&kphys, TASK_STACK_PAGES)) { lock_release(LOCK_SCHED, &sched_lock); return NULL; }
+    { pmm_set_tag(PMM_TAG_STACK); bool __g = pmm_alloc(&kphys, TASK_STACK_PAGES); pmm_set_tag(PMM_TAG_NONE); if (!__g) { lock_release(LOCK_SCHED, &sched_lock); return NULL; }}
     task_kstack_zero(kphys);
 
     struct task *t = &tasks[slot];
@@ -622,10 +624,10 @@ struct task *task_spawn_fork(struct task *parent, const char *name,
     if (!slot) { lock_release(LOCK_SCHED, &sched_lock); return NULL; }
 
     paddr_t kphys;
-    if (!pmm_alloc(&kphys, TASK_STACK_PAGES)) {
+    { pmm_set_tag(PMM_TAG_STACK); bool __g = pmm_alloc(&kphys, TASK_STACK_PAGES); pmm_set_tag(PMM_TAG_NONE); if (!__g) {
         lock_release(LOCK_SCHED, &sched_lock);
         return NULL;
-    }
+    }}
     task_kstack_zero(kphys);
 
     if (share_vm) vs->refcount++;
@@ -864,7 +866,7 @@ int task_wait_child(struct task *parent, int32_t want, int32_t *status_out, int3
         self->wait_chan = &self->child_chan;
         self->wake_tick = 0;
         self->blocked = true;
-        self->cpu = cpu_id();
+            self->cpu = cpu_id();
         lock_release(LOCK_SCHED, &sched_lock);
 
         task_sleep_registered();
@@ -884,7 +886,7 @@ struct task *task_spawn_vmspace(const char *name, struct vmspace *vs, vaddr_t en
     if (!slot) { lock_release(LOCK_SCHED, &sched_lock); return NULL; }
 
     paddr_t kphys;
-    if (!pmm_alloc(&kphys, TASK_STACK_PAGES)) { lock_release(LOCK_SCHED, &sched_lock); return NULL; }
+    { pmm_set_tag(PMM_TAG_STACK); bool __g = pmm_alloc(&kphys, TASK_STACK_PAGES); pmm_set_tag(PMM_TAG_NONE); if (!__g) { lock_release(LOCK_SCHED, &sched_lock); return NULL; }}
     task_kstack_zero(kphys);
 
     struct task *t = &tasks[slot];
@@ -1016,6 +1018,18 @@ static void task_switch_to(struct isr_frame *frame, bool force_away) {
     __asm__ volatile("cli" ::: "memory");
 
     lock_acquire(LOCK_SCHED, &sched_lock);
+
+    {
+        uint64_t now = pit_get_ticks();
+        uint64_t last = cpu_self()->last_switch_tick;
+        if (last && now > last) {
+            if (idle_slot[cpu_id()] < TASK_MAX && current_slot() == idle_slot[cpu_id()])
+                cpu_self()->idle_ticks += now - last;
+            else
+                cpu_self()->busy_ticks += now - last;
+        }
+        cpu_self()->last_switch_tick = now;
+    }
 
     task_fpu_save();
 
@@ -1258,17 +1272,13 @@ uint64_t task_wait_gen(void) {
     return __atomic_load_n(&tasks[current_slot()].wake_gen, __ATOMIC_ACQUIRE);
 }
 
-bool task_wait_since(void *chan, uint64_t seen) {
-    if (__atomic_load_n(&tasks[current_slot()].wake_gen, __ATOMIC_ACQUIRE) != seen) return false;
-    task_wait(chan, 0);
-    return true;
-}
 
 bool task_wait(void *chan, uint64_t deadline) {
     uint64_t rflags;
     __asm__ volatile("pushfq; pop %0; cli" : "=r"(rflags) :: "memory");
 
     struct task *self = &tasks[current_slot()];
+    __atomic_add_fetch(&blocked_count, 1, __ATOMIC_RELAXED);
 
     uint64_t seen = __atomic_load_n(&self->wake_gen, __ATOMIC_ACQUIRE);
 
@@ -1293,6 +1303,7 @@ bool task_wait(void *chan, uint64_t deadline) {
     bool timed_out = deadline && pit_get_ticks() >= deadline;
     self->wait_chan = NULL;
     self->wake_tick = 0;
+    __atomic_sub_fetch(&blocked_count, 1, __ATOMIC_RELAXED);
 
     if (rflags & TASK_RFLAGS_IF) __asm__ volatile("sti" ::: "memory");
     return timed_out;
@@ -1300,9 +1311,51 @@ bool task_wait(void *chan, uint64_t deadline) {
 
 void task_wake_chan(void *chan) {
     if (!chan) return;
+    __atomic_add_fetch(&chan_epoch_v, 1, __ATOMIC_ACQ_REL);
     for (size_t i = 0; i < TASK_MAX; i++) {
         if (tasks[i].in_use && tasks[i].wait_chan == chan) task_release_wait(&tasks[i], i);
     }
+}
+
+uint64_t task_chan_epoch(void) {
+    return __atomic_load_n(&chan_epoch_v, __ATOMIC_ACQUIRE);
+}
+
+bool task_wait_epoch(void *chan, uint64_t deadline, uint64_t epoch) {
+    uint64_t rflags;
+    __asm__ volatile("pushfq; pop %0; cli" : "=r"(rflags) :: "memory");
+
+    struct task *self = &tasks[current_slot()];
+    uint64_t gen0 = __atomic_load_n(&self->wake_gen, __ATOMIC_ACQUIRE);
+
+    __atomic_add_fetch(&blocked_count, 1, __ATOMIC_RELAXED);
+    lock_acquire(LOCK_SCHED, &sched_lock);
+    self->wait_chan = chan;
+    self->wake_tick = deadline;
+    if (deadline && deadline < earliest_wake()) set_earliest_wake(deadline);
+    self->blocked = true;
+    self->cpu = cpu_id();
+    lock_release(LOCK_SCHED, &sched_lock);
+
+    if (__atomic_load_n(&self->wake_gen, __ATOMIC_ACQUIRE) != gen0 ||
+        __atomic_load_n(&chan_epoch_v, __ATOMIC_ACQUIRE) != epoch) {
+        __atomic_store_n(&self->blocked, false, __ATOMIC_RELEASE);
+    }
+
+    for (;;) {
+        __asm__ volatile("sti; hlt" ::: "memory");
+        __asm__ volatile("cli" ::: "memory");
+        if (!__atomic_load_n(&self->blocked, __ATOMIC_ACQUIRE)) break;
+        if (deadline && pit_get_ticks() >= deadline) break;
+    }
+
+    bool timed_out = deadline && pit_get_ticks() >= deadline;
+    self->wait_chan = NULL;
+    self->wake_tick = 0;
+    __atomic_sub_fetch(&blocked_count, 1, __ATOMIC_RELAXED);
+
+    if (rflags & TASK_RFLAGS_IF) __asm__ volatile("sti" ::: "memory");
+    return timed_out;
 }
 
 int task_futex_wait(void *chan, uintptr_t uaddr, uint32_t expected, uint64_t deadline) {
@@ -1310,6 +1363,7 @@ int task_futex_wait(void *chan, uintptr_t uaddr, uint32_t expected, uint64_t dea
     __asm__ volatile("pushfq; pop %0; cli" : "=r"(rflags) :: "memory");
 
     struct task *self = &tasks[current_slot()];
+    __atomic_add_fetch(&blocked_count, 1, __ATOMIC_RELAXED);
 
     uint64_t seen = __atomic_load_n(&self->wake_gen, __ATOMIC_ACQUIRE);
 
@@ -1331,6 +1385,7 @@ int task_futex_wait(void *chan, uintptr_t uaddr, uint32_t expected, uint64_t dea
         self->blocked = false;
         self->wait_chan = NULL;
         lock_release(LOCK_SCHED, &sched_lock);
+        __atomic_sub_fetch(&blocked_count, 1, __ATOMIC_RELAXED);
         if (rflags & TASK_RFLAGS_IF) __asm__ volatile("sti" ::: "memory");
         return -14;
     }
@@ -1341,6 +1396,7 @@ int task_futex_wait(void *chan, uintptr_t uaddr, uint32_t expected, uint64_t dea
         self->wait_chan = NULL;
         self->wake_tick = 0;
         lock_release(LOCK_SCHED, &sched_lock);
+        __atomic_sub_fetch(&blocked_count, 1, __ATOMIC_RELAXED);
         if (rflags & TASK_RFLAGS_IF) __asm__ volatile("sti" ::: "memory");
         return woken ? 0 : -11;
     }
@@ -1354,13 +1410,14 @@ int task_futex_wait(void *chan, uintptr_t uaddr, uint32_t expected, uint64_t dea
     bool timed_out = deadline && pit_get_ticks() >= deadline;
     self->wait_chan = NULL;
     self->wake_tick = 0;
+    __atomic_sub_fetch(&blocked_count, 1, __ATOMIC_RELAXED);
 
     if (rflags & TASK_RFLAGS_IF) __asm__ volatile("sti" ::: "memory");
     return timed_out ? -110 : 0;
 }
 
 void task_tick(uint64_t now) {
-    if (now < earliest_wake()) return;
+    if (!__atomic_load_n(&blocked_count, __ATOMIC_ACQUIRE)) return;
     if (preempt_count() != 0) return;
     if (atomic_flag_test_and_set_explicit(&sched_lock.f, memory_order_acquire)) return;
     preempt_disable();
@@ -1532,4 +1589,47 @@ struct page_table *task_current_pml4(void) {
 
 uint64_t task_switch_count(void) {
     return switch_count();
+}
+
+size_t task_stack_pages_used(void) {
+    size_t pages = 0;
+    for (size_t i = 1; i < TASK_MAX; i++) {
+        struct task *t = &tasks[i];
+        if (!t->in_use) continue;
+        if (t->stack_base) pages += TASK_STACK_PAGES;
+        if (t->user_stack_phys) pages += TASK_USER_STACK_PAGES;
+    }
+    return pages;
+}
+
+size_t task_count_live(void) {
+    size_t n = 0;
+    for (size_t i = 1; i < TASK_MAX; i++) {
+        if (tasks[i].in_use) n++;
+    }
+    return n;
+}
+
+size_t task_user_frames(void) {
+    size_t frames = 0;
+    for (size_t i = 1; i < TASK_MAX; i++) {
+        struct task *t = &tasks[i];
+        if (!t->in_use || !t->pml4) continue;
+        frames += vmm_count_user_frames(t->pml4);
+    }
+    return frames;
+}
+
+void task_set_exe_path(struct task *t, const char *path) {
+    if (!t) return;
+    if (t->exe_path) {
+        kfree(t->exe_path);
+        t->exe_path = NULL;
+    }
+    if (!path || !*path) return;
+    size_t n = strlen(path);
+    char *copy = kmalloc(n + 1);
+    if (!copy) return;
+    memcpy(copy, path, n + 1);
+    t->exe_path = copy;
 }

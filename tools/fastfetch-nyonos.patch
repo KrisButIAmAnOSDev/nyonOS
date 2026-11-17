@@ -1,0 +1,532 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 71c0e88..4dde1a1 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -30,6 +30,8 @@ elseif("${CMAKE_SYSTEM_NAME}" STREQUAL "DragonFly")
+     set(DragonFly TRUE CACHE BOOL "..." FORCE)
+ elseif("${CMAKE_SYSTEM_NAME}" STREQUAL "SunOS")
+     set(SunOS TRUE CACHE BOOL "..." FORCE)
++elseif("${CMAKE_SYSTEM_NAME}" STREQUAL "nyonos")
++    set(NYONOS TRUE CACHE BOOL "..." FORCE) # LINUX means GNU/Linux, not just the kernel
+ elseif(NOT APPLE AND NOT WIN32)
+     message(FATAL_ERROR "Unsupported platform: ${CMAKE_SYSTEM_NAME}")
+ endif()
+@@ -54,31 +56,31 @@ include(CheckIncludeFile)
+ 
+ include(CMakeDependentOption)
+ 
+-cmake_dependent_option(ENABLE_VULKAN "Enable vulkan" ON "LINUX OR APPLE OR FreeBSD OR OpenBSD OR NetBSD OR WIN32 OR ANDROID OR SunOS" OFF)
+-cmake_dependent_option(ENABLE_WAYLAND "Enable wayland-client" ON "LINUX OR FreeBSD OR OpenBSD OR NetBSD" OFF)
+-cmake_dependent_option(ENABLE_XCB_RANDR "Enable xcb-randr" ON "LINUX OR FreeBSD OR OpenBSD OR NetBSD OR SunOS" OFF)
+-cmake_dependent_option(ENABLE_XRANDR "Enable xrandr" ON "LINUX OR FreeBSD OR OpenBSD OR NetBSD OR SunOS" OFF)
+-cmake_dependent_option(ENABLE_DRM "Enable libdrm" ON "LINUX OR FreeBSD OR OpenBSD OR NetBSD OR SunOS" OFF)
++cmake_dependent_option(ENABLE_VULKAN "Enable vulkan" ON "LINUX OR APPLE OR FreeBSD OR OpenBSD OR NetBSD OR WIN32 OR ANDROID OR SunOS OR NYONOS" OFF)
++cmake_dependent_option(ENABLE_WAYLAND "Enable wayland-client" ON "LINUX OR FreeBSD OR OpenBSD OR NetBSD OR NYONOS" OFF)
++cmake_dependent_option(ENABLE_XCB_RANDR "Enable xcb-randr" ON "LINUX OR FreeBSD OR OpenBSD OR NetBSD OR SunOS OR NYONOS" OFF)
++cmake_dependent_option(ENABLE_XRANDR "Enable xrandr" ON "LINUX OR FreeBSD OR OpenBSD OR NetBSD OR SunOS OR NYONOS" OFF)
++cmake_dependent_option(ENABLE_DRM "Enable libdrm" ON "LINUX OR FreeBSD OR OpenBSD OR NetBSD OR SunOS OR NYONOS" OFF)
+ cmake_dependent_option(ENABLE_DRM_AMDGPU "Enable libdrm_amdgpu" ON "LINUX" OFF)
+-cmake_dependent_option(ENABLE_GIO "Enable gio-2.0" ON "LINUX OR FreeBSD OR OpenBSD OR NetBSD OR SunOS" OFF)
+-cmake_dependent_option(ENABLE_DCONF "Enable dconf" ON "LINUX OR FreeBSD OR OpenBSD OR NetBSD OR SunOS" OFF)
+-cmake_dependent_option(ENABLE_DBUS "Enable dbus-1" ON "LINUX OR FreeBSD OR OpenBSD OR NetBSD OR SunOS" OFF)
++cmake_dependent_option(ENABLE_GIO "Enable gio-2.0" ON "LINUX OR FreeBSD OR OpenBSD OR NetBSD OR SunOS OR NYONOS" OFF)
++cmake_dependent_option(ENABLE_DCONF "Enable dconf" ON "LINUX OR FreeBSD OR OpenBSD OR NetBSD OR SunOS OR NYONOS" OFF)
++cmake_dependent_option(ENABLE_DBUS "Enable dbus-1" ON "LINUX OR FreeBSD OR OpenBSD OR NetBSD OR SunOS OR NYONOS" OFF)
+ cmake_dependent_option(ENABLE_XFCONF "Enable libxfconf-0" ON "LINUX OR FreeBSD OR OpenBSD OR NetBSD OR SunOS" OFF)
+-cmake_dependent_option(ENABLE_SQLITE3 "Enable sqlite3" ON "LINUX OR FreeBSD OR APPLE OR OpenBSD OR NetBSD OR SunOS" OFF)
++cmake_dependent_option(ENABLE_SQLITE3 "Enable sqlite3" ON "LINUX OR FreeBSD OR APPLE OR OpenBSD OR NetBSD OR SunOS OR NYONOS" OFF)
+ cmake_dependent_option(ENABLE_RPM "Enable rpm" ON "LINUX" OFF)
+ cmake_dependent_option(ENABLE_IMAGEMAGICK7 "Enable imagemagick 7" ON "LINUX OR FreeBSD OR OpenBSD OR NetBSD OR APPLE OR WIN32 OR SunOS" OFF)
+ cmake_dependent_option(ENABLE_IMAGEMAGICK6 "Enable imagemagick 6" ON "LINUX OR FreeBSD OR OpenBSD OR NetBSD OR APPLE OR SunOS" OFF)
+ cmake_dependent_option(ENABLE_CHAFA "Enable chafa" ON "ENABLE_IMAGEMAGICK6 OR ENABLE_IMAGEMAGICK7" OFF)
+ cmake_dependent_option(ENABLE_ZLIB "Enable zlib" ON "ENABLE_IMAGEMAGICK6 OR ENABLE_IMAGEMAGICK7" OFF)
+-cmake_dependent_option(ENABLE_EGL "Enable egl" ON "LINUX OR FreeBSD OR OpenBSD OR NetBSD OR WIN32 OR SunOS" OFF)
+-cmake_dependent_option(ENABLE_GLX "Enable glx" ON "LINUX OR FreeBSD OR OpenBSD OR NetBSD OR SunOS" OFF)
++cmake_dependent_option(ENABLE_EGL "Enable egl" ON "LINUX OR FreeBSD OR OpenBSD OR NetBSD OR WIN32 OR SunOS OR NYONOS" OFF)
++cmake_dependent_option(ENABLE_GLX "Enable glx" ON "LINUX OR FreeBSD OR OpenBSD OR NetBSD OR SunOS OR NYONOS" OFF)
+ cmake_dependent_option(ENABLE_OSMESA "Enable osmesa" ON "LINUX OR FreeBSD OR OpenBSD OR NetBSD OR SunOS" OFF)
+ cmake_dependent_option(ENABLE_OPENCL "Enable opencl" ON "LINUX OR FreeBSD OR OpenBSD OR NetBSD OR WIN32 OR ANDROID OR SunOS" OFF)
+-cmake_dependent_option(ENABLE_FREETYPE "Enable freetype" ON "ANDROID" OFF)
++cmake_dependent_option(ENABLE_FREETYPE "Enable freetype" ON "ANDROID OR NYONOS" OFF)
+ cmake_dependent_option(ENABLE_PULSE "Enable pulse" ON "LINUX OR OpenBSD OR NetBSD OR SunOS" OFF)
+ cmake_dependent_option(ENABLE_DDCUTIL "Enable ddcutil" ON "LINUX" OFF)
+ cmake_dependent_option(ENABLE_DIRECTX_HEADERS "Enable DirectX headers for WSL" ON "LINUX" OFF)
+-cmake_dependent_option(ENABLE_ELF "Enable libelf" ON "LINUX OR ANDROID OR DragonFly" OFF)
++cmake_dependent_option(ENABLE_ELF "Enable libelf" ON "LINUX OR ANDROID OR DragonFly OR NYONOS" OFF)
+ cmake_dependent_option(ENABLE_THREADS "Enable multithreading" ON "Threads_FOUND" OFF)
+ cmake_dependent_option(ENABLE_LIBZFS "Enable libzfs" ON "LINUX OR FreeBSD OR SunOS" OFF)
+ cmake_dependent_option(ENABLE_PCIACCESS "Enable libpciaccess" ON "NetBSD OR OpenBSD OR SunOS" OFF)
+@@ -504,6 +506,7 @@ if(LINUX)
+         src/detection/gtk_qt/gtk.c
+         src/detection/host/host_linux.c
+         src/detection/host/host_mac.c
++        src/detection/host/host_mac.c
+         src/detection/icons/icons_linux.c
+         src/detection/initsystem/initsystem_linux.c
+         src/detection/keyboard/keyboard_linux.c
+@@ -511,7 +514,7 @@ if(LINUX)
+         src/detection/lm/lm_linux.c
+         src/detection/loadavg/loadavg_linux.c
+         src/detection/locale/locale_linux.c
+-        src/detection/localip/localip_linux.c
++        src/detection/localip/localip_nosupport.c
+         src/detection/gamepad/gamepad_linux.c
+         src/detection/media/media_linux.c
+         src/detection/memory/memory_linux.c
+@@ -522,6 +525,7 @@ if(LINUX)
+         src/detection/packages/packages_linux.c
+         src/detection/poweradapter/poweradapter_linux.c
+         src/detection/processes/processes_linux.c
++        src/detection/gtk_qt/gtk.c
+         src/detection/gtk_qt/qt.c
+         src/detection/sound/sound_linux.c
+         src/detection/swap/swap_linux.c
+@@ -577,7 +581,7 @@ elseif(ANDROID)
+         src/detection/lm/lm_nosupport.c
+         src/detection/loadavg/loadavg_linux.c
+         src/detection/locale/locale_linux.c
+-        src/detection/localip/localip_linux.c
++        src/detection/localip/localip_nosupport.c
+         src/detection/gamepad/gamepad_nosupport.c
+         src/detection/media/media_nosupport.c
+         src/detection/memory/memory_linux.c
+@@ -659,7 +663,7 @@ elseif(FreeBSD)
+         src/detection/libc/libc_bsd.c
+         src/detection/loadavg/loadavg_bsd.c
+         src/detection/locale/locale_linux.c
+-        src/detection/localip/localip_linux.c
++        src/detection/localip/localip_nosupport.c
+         src/detection/gamepad/gamepad_bsd.c
+         src/detection/media/media_linux.c
+         src/detection/memory/memory_bsd.c
+@@ -741,7 +745,7 @@ elseif(NetBSD)
+         src/detection/libc/libc_nosupport.c
+         src/detection/loadavg/loadavg_bsd.c
+         src/detection/locale/locale_linux.c
+-        src/detection/localip/localip_linux.c
++        src/detection/localip/localip_nosupport.c
+         src/detection/gamepad/gamepad_nosupport.c
+         src/detection/media/media_linux.c
+         src/detection/memory/memory_obsd.c
+@@ -823,7 +827,7 @@ elseif(OpenBSD)
+         src/detection/libc/libc_nosupport.c
+         src/detection/loadavg/loadavg_bsd.c
+         src/detection/locale/locale_linux.c
+-        src/detection/localip/localip_linux.c
++        src/detection/localip/localip_nosupport.c
+         src/detection/gamepad/gamepad_nosupport.c
+         src/detection/media/media_linux.c
+         src/detection/memory/memory_obsd.c
+@@ -892,7 +896,7 @@ elseif(APPLE)
+         src/detection/loadavg/loadavg_bsd.c
+         src/detection/libc/libc_apple.c
+         src/detection/locale/locale_linux.c
+-        src/detection/localip/localip_linux.c
++        src/detection/localip/localip_nosupport.c
+         src/detection/gamepad/gamepad_apple.c
+         src/detection/media/media_apple.m
+         src/detection/memory/memory_apple.c
+@@ -1048,7 +1052,7 @@ elseif(SunOS)
+         src/detection/lm/lm_nosupport.c
+         src/detection/loadavg/loadavg_sunos.c
+         src/detection/locale/locale_linux.c
+-        src/detection/localip/localip_linux.c
++        src/detection/localip/localip_nosupport.c
+         src/detection/gamepad/gamepad_nosupport.c
+         src/detection/media/media_linux.c
+         src/detection/memory/memory_sunos.c
+@@ -1079,6 +1083,89 @@ elseif(SunOS)
+         src/util/platform/FFPlatform_unix.c
+         src/util/binary_linux.c
+     )
++elseif(NYONOS)
++    list(APPEND LIBFASTFETCH_SRC
++        src/common/dbus.c
++        src/common/io/io_unix.c
++        src/common/netif/netif_linux.c
++        src/common/networking_linux.c
++        src/common/processing_linux.c
++        src/detection/battery/battery_nosupport.c
++        src/detection/bios/bios_nosupport.c
++        src/detection/board/board_nosupport.c
++        src/detection/bootmgr/bootmgr_nosupport.c
++        src/detection/brightness/brightness_nosupport.c
++        src/detection/btrfs/btrfs_nosupport.c
++        src/detection/camera/camera_nosupport.c
++        src/detection/chassis/chassis_nosupport.c
++        src/detection/cpu/cpu_linux.c
++        src/detection/cpucache/cpucache_nosupport.c
++        src/detection/cpuusage/cpuusage_linux.c
++        src/detection/cursor/cursor_nosupport.c
++        src/detection/bluetooth/bluetooth_nosupport.c
++        src/detection/bluetoothradio/bluetoothradio_nosupport.c
++        src/detection/disk/disk_nosupport.c
++        src/detection/dns/dns_linux.c
++        src/detection/physicaldisk/physicaldisk_nosupport.c
++        src/detection/physicalmemory/physicalmemory_nosupport.c
++        src/detection/diskio/diskio_nosupport.c
++        src/detection/displayserver/linux/displayserver_linux.c
++        src/detection/displayserver/linux/drm.c
++        src/detection/displayserver/linux/wayland/wayland.c
++        src/detection/displayserver/linux/wayland/global-output.c
++        src/detection/displayserver/linux/wayland/zwlr-output.c
++        src/detection/displayserver/linux/wayland/kde-output.c
++        src/detection/displayserver/linux/wayland/wlr-output-management-unstable-v1-protocol.c
++        src/detection/displayserver/linux/wayland/kde-output-device-v2-protocol.c
++        src/detection/displayserver/linux/wayland/kde-output-order-v1-protocol.c
++        src/detection/displayserver/linux/wayland/xdg-output-unstable-v1-protocol.c
++        src/detection/displayserver/linux/wmde.c
++        src/detection/displayserver/linux/xcb.c
++        src/detection/displayserver/linux/xlib.c
++        src/detection/font/font_linux.c
++        src/detection/gpu/gpu_nosupport.c
++        src/detection/gpu/gpu_pci.c
++        src/detection/host/host_linux.c
++        src/detection/host/host_mac.c
++        src/detection/icons/icons_linux.c
++        src/detection/initsystem/initsystem_linux.c
++        src/detection/keyboard/keyboard_nosupport.c
++        src/detection/libc/libc_linux.c
++        src/detection/lm/lm_nosupport.c
++        src/detection/loadavg/loadavg_linux.c
++        src/detection/locale/locale_linux.c
++        src/detection/localip/localip_nosupport.c
++        src/detection/gamepad/gamepad_nosupport.c
++        src/detection/media/media_nosupport.c
++        src/detection/memory/memory_linux.c
++        src/detection/mouse/mouse_nosupport.c
++        src/detection/netio/netio_nosupport.c
++        src/detection/opengl/opengl_linux.c
++        src/detection/os/os_linux.c
++        src/detection/packages/packages_nosupport.c
++        src/detection/poweradapter/poweradapter_nosupport.c
++        src/detection/processes/processes_linux.c
++        src/detection/gtk_qt/qt.c
++        src/detection/gtk_qt/gtk.c
++        src/detection/sound/sound_nosupport.c
++        src/detection/swap/swap_nosupport.c
++        src/detection/terminalfont/terminalfont_linux.c
++        src/detection/terminalshell/terminalshell_linux.c
++        src/detection/terminalsize/terminalsize_linux.c
++        src/detection/theme/theme_nosupport.c
++        src/detection/tpm/tpm_nosupport.c
++        src/detection/uptime/uptime_linux.c
++        src/detection/users/users_nosupport.c
++        src/detection/version/version.c
++        src/detection/wallpaper/wallpaper_nosupport.c
++        src/detection/wifi/wifi_nosupport.c
++        src/detection/wm/wm_nosupport.c
++        src/detection/de/de_nosupport.c
++        src/detection/wmtheme/wmtheme_nosupport.c
++        src/detection/zpool/zpool_nosupport.c
++        src/util/platform/FFPlatform_unix.c
++        src/util/binary_linux.c
++    )
+ endif()
+ 
+ if(ENABLE_DIRECTX_HEADERS)
+@@ -1189,6 +1276,8 @@ elseif(NetBSD)
+     target_compile_definitions(libfastfetch PUBLIC _GNU_SOURCE)
+     set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wno-char-subscripts")
+     set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -Wl,-rpath,/usr/X11R7/lib -Wl,-rpath,/usr/pkg/lib") # ditto
++elseif(NYONOS)
++    target_compile_definitions(libfastfetch PUBLIC _GNU_SOURCE _XOPEN_SOURCE _ATFILE_SOURCE)
+ endif()
+ 
+ if(FreeBSD OR OpenBSD OR NetBSD)
+diff --git a/CMakeToolchain-nyonos.txt b/CMakeToolchain-nyonos.txt
+new file mode 100644
+index 0000000..3cb5381
+--- /dev/null
++++ b/CMakeToolchain-nyonos.txt
+@@ -0,0 +1,42 @@
++set(CMAKE_SYSTEM_NAME nyonos)
++set(CMAKE_SYSTEM_PROCESSOR x86_64)
++
++set(NYONOS_TOOLCHAIN "$ENV{NYONOS_TOOLCHAIN}" CACHE PATH "nyonOS toolchain prefix")
++set(NYONOS_SYSROOT "$ENV{NYONOS_SYSROOT}" CACHE PATH "nyonOS sysroot")
++set(NYONOS_LDSCRIPT "$ENV{NYONOS_LDSCRIPT}" CACHE PATH "mlibc linker script")
++
++if(NOT NYONOS_TOOLCHAIN)
++    set(NYONOS_TOOLCHAIN "${CMAKE_CURRENT_LIST_DIR}/../../../../nyonos-toolchain/toolchain16")
++endif()
++if(NOT NYONOS_SYSROOT)
++    set(NYONOS_SYSROOT "${CMAKE_CURRENT_LIST_DIR}/../../../../nyonos-toolchain/sysroot")
++endif()
++if(NOT NYONOS_LDSCRIPT)
++    set(NYONOS_LDSCRIPT "${CMAKE_CURRENT_LIST_DIR}/../../../../mlibc/sysdeps/nyonos/nyonos.ld")
++endif()
++
++set(CMAKE_C_COMPILER "${NYONOS_TOOLCHAIN}/bin/x86_64-nyonos-gcc")
++set(CMAKE_CXX_COMPILER "${NYONOS_TOOLCHAIN}/bin/x86_64-nyonos-g++")
++set(CMAKE_AR "${NYONOS_TOOLCHAIN}/bin/x86_64-nyonos-ar")
++set(CMAKE_RANLIB "${NYONOS_TOOLCHAIN}/bin/x86_64-nyonos-ranlib")
++set(CMAKE_STRIP "${NYONOS_TOOLCHAIN}/bin/x86_64-nyonos-strip")
++set(CMAKE_OBJDUMP "${NYONOS_TOOLCHAIN}/bin/x86_64-nyonos-objdump")
++
++set(CMAKE_SYSROOT ${NYONOS_SYSROOT})
++set(CMAKE_FIND_ROOT_PATH ${NYONOS_SYSROOT})
++
++set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)
++set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)
++set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
++set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE ONLY)
++
++# the nyonOS C++ library is not installed yet at configure time, so the
++# compiler probe must not link an executable
++set(CMAKE_TRY_COMPILE_TARGET_TYPE STATIC_LIBRARY)
++
++# mlibc provides pthread symbols in libc itself; do not look for -lpthreads
++set(CMAKE_HAVE_LIBC_PTHREAD TRUE CACHE INTERNAL "pthreads are in libc")
++
++set(CMAKE_EXE_LINKER_FLAGS_INIT "-static -T${NYONOS_LDSCRIPT} -z max-page-size=0x1000")
++set(CMAKE_C_FLAGS_INIT "-fno-pie")
++set(CMAKE_CXX_FLAGS_INIT "-fno-pie")
+diff --git a/src/common/processing_linux.c b/src/common/processing_linux.c
+index 63d3951..90199aa 100644
+--- a/src/common/processing_linux.c
++++ b/src/common/processing_linux.c
+@@ -141,7 +141,7 @@ void ffProcessGetInfoLinux(pid_t pid, FFstrbuf* processName, FFstrbuf* exe, cons
+     assert(processName->length > 0);
+     ffStrbufClear(exe);
+ 
+-    #ifdef __linux__
++    #if defined(__linux__) || defined(__nyonos__)
+ 
+     char filePath[64];
+     snprintf(filePath, sizeof(filePath), "/proc/%d/cmdline", (int)pid);
+@@ -321,7 +321,7 @@ const char* ffProcessGetBasicInfoLinux(pid_t pid, FFstrbuf* name, pid_t* ppid, i
+     if (pid <= 0)
+         return "Invalid pid";
+ 
+-    #ifdef __linux__
++    #if defined(__linux__) || defined(__nyonos__)
+ 
+     char procFilePath[64];
+     if (ppid)
+diff --git a/src/detection/cpu/cpu_linux.c b/src/detection/cpu/cpu_linux.c
+index 3fc9c85..eb6f55a 100644
+--- a/src/detection/cpu/cpu_linux.c
++++ b/src/detection/cpu/cpu_linux.c
+@@ -5,7 +5,9 @@
+ #include "util/mallocHelper.h"
+ #include "util/stringUtils.h"
+ 
++#ifndef __nyonos__
+ #include <sys/sysinfo.h>
++#endif
+ #include <stdlib.h>
+ #include <unistd.h>
+ #include <dirent.h>
+@@ -507,8 +509,13 @@ const char* ffDetectCPUImpl(const FFCPUOptions* options, FFCPUResult* cpu)
+     const char* error = parseCpuInfo(&cpuinfo, cpu, &physicalCoresBuffer, &cpuMHz, &cpuIsa, &cpuUarch, &cpuImplementerStr);
+     if (error) return error;
+ 
+-    cpu->coresLogical = (uint16_t) get_nprocs_conf();
+-    cpu->coresOnline = (uint16_t) get_nprocs();
++    #ifdef __nyonos__
++        cpu->coresLogical = (uint16_t) ffStrbufToUInt(&physicalCoresBuffer, 1);
++        cpu->coresOnline = cpu->coresLogical;
++    #else
++        cpu->coresLogical = (uint16_t) get_nprocs_conf();
++        cpu->coresOnline = (uint16_t) get_nprocs();
++    #endif
+     cpu->coresPhysical = (uint16_t) ffStrbufToUInt(&physicalCoresBuffer, cpu->coresLogical);
+     #if __x86_64__ || __i386__
+     cpu->packages = getPackageCount(&cpuinfo);
+diff --git a/src/detection/displayserver/linux/wmde.c b/src/detection/displayserver/linux/wmde.c
+index 557be31..968bd79 100644
+--- a/src/detection/displayserver/linux/wmde.c
++++ b/src/detection/displayserver/linux/wmde.c
+@@ -348,7 +348,7 @@ static const char* getFromProcesses(FFDisplayServerResult* result)
+                 break;
+         }
+     }
+-#elif __linux__
++#elif defined(__linux__) || defined(__nyonos__)
+     FF_AUTO_CLOSE_DIR DIR* procdir = opendir("/proc");
+     if(procdir == NULL)
+         return "opendir(\"/proc\") failed";
+diff --git a/src/detection/initsystem/initsystem_linux.c b/src/detection/initsystem/initsystem_linux.c
+index 6776ef7..54942e1 100644
+--- a/src/detection/initsystem/initsystem_linux.c
++++ b/src/detection/initsystem/initsystem_linux.c
+@@ -48,7 +48,7 @@ const char* ffDetectInitSystem(FFInitSystemResult* result)
+ 
+     if (instance.config.general.detectVersion)
+     {
+-        #if __linux__ && !__ANDROID__
++        #if (__linux__ && !__ANDROID__) || defined(__nyonos__)
+         if (ffStrbufEqualS(&result->name, "systemd"))
+         {
+             ffBinaryExtractStrings(result->exe.chars, extractSystemdVersion, &result->version, (uint32_t) strlen("systemd 0.0 running in x"));
+diff --git a/src/detection/libc/libc_linux.c b/src/detection/libc/libc_linux.c
+index 19e8e83..06dcdd8 100644
+--- a/src/detection/libc/libc_linux.c
++++ b/src/detection/libc/libc_linux.c
+@@ -13,6 +13,9 @@ const char* ffDetectLibc(FFLibcResult* result)
+ #elif defined(__GNU_LIBRARY__)
+     result->name = "glibc";
+     result->version = FF_STR(__GLIBC__) "." FF_STR(__GLIBC_MINOR__);
++#elif defined(__nyonos__)
++    result->name = "mlibc";
++    result->version = "rolling release";
+ #else
+     result->name = "musl";
+     #ifdef FF_MUSL_VERSION
+diff --git a/src/detection/loadavg/loadavg_linux.c b/src/detection/loadavg/loadavg_linux.c
+index 9e8b091..eec7f59 100644
+--- a/src/detection/loadavg/loadavg_linux.c
++++ b/src/detection/loadavg/loadavg_linux.c
+@@ -1,7 +1,9 @@
+ #include "detection/loadavg/loadavg.h"
+ #include "common/io/io.h"
+ 
++#ifndef __nyonos__
+ #include <sys/sysinfo.h>
++#endif
+ 
+ const char* ffDetectLoadavg(double result[3])
+ {
+@@ -20,12 +22,16 @@ const char* ffDetectLoadavg(double result[3])
+ 
+     #endif
+ 
+-    // getloadavg requires higher ANDROID_API version
+-    struct sysinfo si;
+-    if (sysinfo(&si) < 0)
+-        return "sysinfo() failed";
++    #ifdef __nyonos__
++        return "/proc/loadavg unavailable";
++    #else
++        // getloadavg requires higher ANDROID_API version
++        struct sysinfo si;
++        if (sysinfo(&si) < 0)
++            return "sysinfo() failed";
+ 
+-    for (int i = 0; i < 3; i++)
+-        result[i] = (double) si.loads[i] / (1 << SI_LOAD_SHIFT);
+-    return NULL;
++        for (int i = 0; i < 3; i++)
++            result[i] = (double) si.loads[i] / (1 << SI_LOAD_SHIFT);
++        return NULL;
++    #endif
+ }
+diff --git a/src/detection/localip/localip_nosupport.c b/src/detection/localip/localip_nosupport.c
+new file mode 100644
+index 0000000..93fdf2a
+--- /dev/null
++++ b/src/detection/localip/localip_nosupport.c
+@@ -0,0 +1,6 @@
++#include "localip.h"
++
++const char* ffDetectLocalIps(FF_MAYBE_UNUSED const FFLocalIpOptions* options, FF_MAYBE_UNUSED FFlist* results)
++{
++    return "Not supported on this platform";
++}
+diff --git a/src/detection/terminalsize/terminalsize_linux.c b/src/detection/terminalsize/terminalsize_linux.c
+index 70c29d5..1c118d2 100644
+--- a/src/detection/terminalsize/terminalsize_linux.c
++++ b/src/detection/terminalsize/terminalsize_linux.c
+@@ -3,6 +3,9 @@
+ 
+ #include <sys/ioctl.h>
+ #include <unistd.h>
++#ifdef __nyonos__
++    #include <termios.h>
++#endif
+ 
+ #ifdef __sun
+     #include <sys/termios.h>
+@@ -11,7 +14,11 @@
+ bool ffDetectTerminalSize(FFTerminalSizeResult* result)
+ {
+     struct winsize winsize = {};
+-    ioctl(STDOUT_FILENO, TIOCGWINSZ, &winsize);
++    #ifdef __nyonos__
++        tcgetwinsize(STDOUT_FILENO, &winsize);
++    #else
++        ioctl(STDOUT_FILENO, TIOCGWINSZ, &winsize);
++    #endif
+ 
+     if (winsize.ws_row == 0 || winsize.ws_col == 0)
+         ffGetTerminalResponse("\e[18t", 2, "\e[8;%hu;%hut", &winsize.ws_row, &winsize.ws_col);
+diff --git a/src/options/general.h b/src/options/general.h
+index 8cb0d48..3357249 100644
+--- a/src/options/general.h
++++ b/src/options/general.h
+@@ -16,7 +16,7 @@ typedef struct FFOptionsGeneral
+     bool detectVersion;
+ 
+     // Module options that cannot be put in module option structure
+-    #if defined(__linux__) || defined(__FreeBSD__) || defined(__sun) || defined(__OpenBSD__) || defined(__NetBSD__)
++    #if defined(__linux__) || defined(__FreeBSD__) || defined(__sun) || defined(__OpenBSD__) || defined(__NetBSD__) || defined(__nyonos__)
+     FFstrbuf playerName;
+     bool escapeBedrock;
+     FFDsForceDrmType dsForceDrm;
+diff --git a/src/util/FFstrbuf.h b/src/util/FFstrbuf.h
+index 1c754b1..3512038 100644
+--- a/src/util/FFstrbuf.h
++++ b/src/util/FFstrbuf.h
+@@ -7,6 +7,7 @@
+ #include <stdbool.h>
+ #include <stdio.h>
+ #include <string.h>
++#include <strings.h>
+ #include <stdlib.h>
+ #include <assert.h>
+ 
+diff --git a/src/util/platform/FFPlatform_unix.c b/src/util/platform/FFPlatform_unix.c
+index b0d0ac1..98ea66c 100644
+--- a/src/util/platform/FFPlatform_unix.c
++++ b/src/util/platform/FFPlatform_unix.c
+@@ -19,7 +19,7 @@
+ static void getExePath(FFPlatform* platform)
+ {
+     char exePath[PATH_MAX + 1];
+-    #ifdef __linux__
++    #if defined(__linux__ ) || defined(__nyonos__)
+         ssize_t exePathLen = readlink("/proc/self/exe", exePath, sizeof(exePath) - 1);
+         exePath[exePathLen] = '\0';
+     #elif defined(__APPLE__)
+diff --git a/src/util/smbiosHelper.c b/src/util/smbiosHelper.c
+index 9366f8a..2574fbd 100644
+--- a/src/util/smbiosHelper.c
++++ b/src/util/smbiosHelper.c
+@@ -50,13 +50,13 @@ const FFSmbiosHeader* ffSmbiosNextEntry(const FFSmbiosHeader* header)
+     return (const FFSmbiosHeader*) (p + 1);
+ }
+ 
+-#if defined(__linux__) || defined(__FreeBSD__) || defined(__sun)
++#if defined(__linux__) || defined(__FreeBSD__) || defined(__sun) || defined(__nyonos__)
+ #include <fcntl.h>
+ #include <sys/stat.h>
+ #include <sys/mman.h>
+ #include <stddef.h>
+ 
+-#ifdef __linux__
++#if defined(__linux__) || defined(__nyonos__)
+     #include "common/properties.h"
+ #elif defined(__FreeBSD__)
+     #include "common/settings.h"
+@@ -65,6 +65,8 @@ const FFSmbiosHeader* ffSmbiosNextEntry(const FFSmbiosHeader* header)
+     #define loff_t off_t
+ #endif
+ 
++typedef off_t loff_t;
++
+ bool ffGetSmbiosValue(const char* devicesPath, const char* classPath, FFstrbuf* buffer)
+ {
+     if (ffReadFileBuffer(devicesPath, buffer))
+diff --git a/src/util/smbiosHelper.h b/src/util/smbiosHelper.h
+index 1bce70b..033c48c 100644
+--- a/src/util/smbiosHelper.h
++++ b/src/util/smbiosHelper.h
+@@ -89,6 +89,6 @@ typedef const FFSmbiosHeader* FFSmbiosHeaderTable[FF_SMBIOS_TYPE_END_OF_TABLE];
+ const FFSmbiosHeader* ffSmbiosNextEntry(const FFSmbiosHeader* header);
+ const FFSmbiosHeaderTable* ffGetSmbiosHeaderTable();
+ 
+-#ifdef __linux__
++#if defined(__linux__) || defined(__nyonos__)
+ bool ffGetSmbiosValue(const char* devicesPath, const char* classPath, FFstrbuf* buffer);
+ #endif

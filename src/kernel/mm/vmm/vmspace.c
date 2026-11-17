@@ -166,6 +166,16 @@ struct vm_region *vm_region_find(struct vmspace *vs, vaddr_t addr) {
     return NULL;
 }
 
+bool vm_commit_cow(struct vmspace *vs, vaddr_t vaddr, paddr_t phys, size_t pages, uint8_t prot) {
+    if (!vs || !vs->pml4 || pages == 0) return false;
+    if (vaddr & (PAGE_SIZE - 1) || phys & (PAGE_SIZE - 1)) return false;
+    uint64_t flags = vm_flags_for(prot);
+    flags &= ~PAGE_WRITE;
+    flags |= PAGE_COW;
+    return vmm_map_frames(vs->pml4, vaddr, phys, pages, flags,
+                          (prot & VM_PROT_EXEC) != 0, false);
+}
+
 bool vm_commit(struct vmspace *vs, vaddr_t vaddr, paddr_t phys, size_t pages, uint8_t prot, bool owned) {
     if (!vs || !vs->pml4 || pages == 0) return false;
     if (vaddr & (PAGE_SIZE - 1) || phys & (PAGE_SIZE - 1)) return false;
@@ -188,7 +198,10 @@ bool vm_map_anon_zeroed(struct vmspace *vs, vaddr_t vaddr, size_t pages, uint8_t
 
     for (size_t i = 0; i < pages; i++) {
         paddr_t phys;
-        if (!pmm_alloc(&phys, 1)) return false;
+        pmm_set_tag(PMM_TAG_USER);
+        bool got = pmm_alloc(&phys, 1);
+        pmm_set_tag(PMM_TAG_NONE);
+        if (!got) return false;
 
         if (zero)
             memset((void *)(vmm_hhdm_offset + phys), 0, PAGE_SIZE);

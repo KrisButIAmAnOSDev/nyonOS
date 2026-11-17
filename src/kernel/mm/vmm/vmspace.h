@@ -17,6 +17,7 @@
 #define VM_BACKING_ANON 0
 #define VM_BACKING_NONE 1
 #define VM_BACKING_PHYS 2
+#define VM_BACKING_FILE 3
 
 struct vm_region {
     vaddr_t start;
@@ -56,6 +57,7 @@ bool vm_map_phys(struct vmspace *vs, vaddr_t vaddr, paddr_t phys, size_t pages, 
 bool vm_map_anon_zeroed(struct vmspace *vs, vaddr_t vaddr, size_t pages, uint8_t prot, bool zero);
 bool vm_protect(struct vmspace *vs, vaddr_t addr, size_t pages, uint8_t prot);
 bool vm_commit(struct vmspace *vs, vaddr_t vaddr, paddr_t phys, size_t pages, uint8_t prot, bool owned);
+bool vm_commit_cow(struct vmspace *vs, vaddr_t vaddr, paddr_t phys, size_t pages, uint8_t prot);
 
 bool vm_setup_stack(struct vmspace *vs);
 bool vm_grow_stack(struct vmspace *vs, vaddr_t addr);

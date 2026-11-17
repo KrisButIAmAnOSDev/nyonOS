@@ -70,7 +70,10 @@ static struct slab *slab_of(struct kmem_cache *c, void *obj) {
 
 static struct slab *slab_create(struct kmem_cache *c) {
     paddr_t phys;
-    if (!pmm_alloc(&phys, c->pages_per_slab)) return NULL;
+    pmm_set_tag(PMM_TAG_SLAB);
+    bool got = pmm_alloc(&phys, c->pages_per_slab);
+    pmm_set_tag(PMM_TAG_NONE);
+    if (!got) return NULL;
 
     void *base = (void *)(vmm_hhdm_offset + phys);
     struct slab *s = (struct slab *)base;
@@ -254,4 +257,15 @@ size_t kmem_cache_pages_per_slab(struct kmem_cache *c) {
 void slab_init(void) {
     cache_registry = NULL;
     kprintf(PRINT_SERIAL, "Slab: initialized\n");
+}
+
+size_t slab_pages_used(void) {
+    size_t pages = 0;
+    for (struct kmem_cache *c = cache_registry; c; c = c->registry_next) {
+        for (struct slab *s = c->partial; s; s = s->next)
+            pages += c->pages_per_slab;
+        for (struct slab *s = c->empty; s; s = s->next)
+            pages += c->pages_per_slab;
+    }
+    return pages;
 }

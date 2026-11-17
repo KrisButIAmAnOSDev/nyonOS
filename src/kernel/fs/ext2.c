@@ -57,6 +57,7 @@ static spinlock_t e2_lock = SPINLOCK_INIT;
 static bool e2_readlink_locked(const fs_node_t *node, char *buf, uint32_t size);
 static uint8_t e2_bounce[MAX_CPUS][EXT2_BLOCK_MAX];
 static uint8_t e2_bounce2[MAX_CPUS][EXT2_BLOCK_MAX];
+static uint8_t e2_bounce3[MAX_CPUS][EXT2_BLOCK_MAX];
 
 static inline uint16_t rd16(const uint8_t *p) {
     return (uint16_t)(p[0] | ((uint16_t)p[1] << 8));
@@ -77,6 +78,12 @@ static uint8_t *bounce2(void) {
     uint32_t id = cpu_id();
     if (id >= MAX_CPUS) id = 0;
     return e2_bounce2[id];
+}
+
+static uint8_t *bounce3(void) {
+    uint32_t id = cpu_id();
+    if (id >= MAX_CPUS) id = 0;
+    return e2_bounce3[id];
 }
 
 static bool e2_read_block(uint32_t block, void *buf) {
@@ -208,16 +215,25 @@ static uint32_t e2_group_first_block(uint32_t g) {
 
 static uint8_t e2_bm_buf[8192];
 
+static struct { uint32_t blk; uint8_t data[EXT2_BLOCK_MAX]; } e2_bmcache[MAX_CPUS];
+
+static uint8_t *e2_bitmap_block(uint32_t block) {
+    uint32_t id = cpu_id();
+    if (id >= MAX_CPUS) id = 0;
+    if (e2_bmcache[id].blk == block) return e2_bmcache[id].data;
+    if (!e2_read_block(block, e2_bmcache[id].data)) return NULL;
+    e2_bmcache[id].blk = block;
+    return e2_bmcache[id].data;
+}
+
 static bool e2_bitmap_load(uint32_t bitmap_block, uint32_t bits) {
     uint32_t bytes = (bits + 7) / 8;
     uint32_t nblocks = (bytes + e2.block_size - 1) / e2.block_size;
 
-    memset(e2_bm_buf, 0, bytes);
     for (uint32_t i = 0; i < nblocks; i++) {
-        uint32_t chunk = bytes - i * e2.block_size;
-        if (chunk > e2.block_size) chunk = e2.block_size;
-        uint8_t *dst = e2_bm_buf + i * e2.block_size;
-        if (!e2_read_block(bitmap_block + i, dst)) return false;
+        uint8_t *b = e2_bitmap_block(bitmap_block + i);
+        if (!b) return false;
+        memcpy(e2_bm_buf + i * e2.block_size, b, e2.block_size);
     }
     return true;
 }
@@ -227,9 +243,10 @@ static bool e2_bitmap_store(uint32_t bitmap_block, uint32_t bits) {
     uint32_t nblocks = (bytes + e2.block_size - 1) / e2.block_size;
 
     for (uint32_t i = 0; i < nblocks; i++) {
-        uint32_t chunk = bytes - i * e2.block_size;
-        if (chunk > e2.block_size) chunk = e2.block_size;
-        if (!e2_write_block(bitmap_block + i, e2_bm_buf + i * e2.block_size)) return false;
+        uint8_t *b = e2_bitmap_block(bitmap_block + i);
+        if (!b) return false;
+        memcpy(b, e2_bm_buf + i * e2.block_size, e2.block_size);
+        if (!e2_write_block(bitmap_block + i, b)) return false;
     }
     return true;
 }
@@ -287,6 +304,17 @@ static void e2_group_counts(uint32_t g, int32_t dblocks, int32_t dinodes) {
     fi = (uint16_t)((int32_t)fi + dinodes);
     gd[12] = (uint8_t)fb; gd[13] = (uint8_t)(fb >> 8);
     gd[14] = (uint8_t)fi; gd[15] = (uint8_t)(fi >> 8);
+    uint32_t gdt_block = (e2.block_size == 1024) ? 2 : 1;
+    uint64_t off = (uint64_t)gdt_block * e2.block_size + (uint64_t)g * e2.desc_size;
+    e2_write_at(off, gd, 32);
+}
+
+static void e2_dir_counts(uint32_t g, int32_t delta) {
+    uint8_t gd[32];
+    if (!e2_group_desc(g, gd)) return;
+    uint16_t dc = rd16(gd + 16);
+    dc = (uint16_t)((int32_t)dc + delta);
+    gd[16] = (uint8_t)dc; gd[17] = (uint8_t)(dc >> 8);
     uint32_t gdt_block = (e2.block_size == 1024) ? 2 : 1;
     uint64_t off = (uint64_t)gdt_block * e2.block_size + (uint64_t)g * e2.desc_size;
     e2_write_at(off, gd, 32);
@@ -594,6 +622,10 @@ static void e2_fill_node(fs_node_t *out, uint32_t ino, const uint8_t *inode,
     out->is_root = false;
     out->ops = &ext2_ops;
     out->dev_id = 1;
+    out->cache_key = ino;
+    out->mode = mode & 07777u;
+    out->uid = rd16(inode + 2);
+    out->gid = rd16(inode + 24);
 }
 
 static bool e2_node_from_inode(uint32_t ino, const char *name, fs_node_t *out) {
@@ -921,6 +953,13 @@ static bool e2_read_locked(const fs_node_t *node, uint32_t offset, void *buf, ui
         len -= bytes;
         offset += bytes;
     }
+
+    uint32_t now = (uint32_t)rtc_unix_time();
+    uint32_t *atime = (uint32_t *)(inode + 8);
+    if (*atime != now) {
+        *atime = now;
+        e2_write_inode(node->cluster, inode);
+    }
     return true;
 }
 
@@ -980,10 +1019,15 @@ static int e2_write_locked(fs_node_t *node, uint32_t offset, const void *buf, ui
 
         uint8_t *b = bounce();
         preempt_disable();
-        bool ok = e2_read_block(blk, b);
-        if (ok) {
-            memcpy(b + boff, in, chunk);
-            ok = e2_write_block(blk, b);
+        bool ok;
+        if (boff == 0 && chunk == e2.block_size) {
+            ok = e2_write_block(blk, in);
+        } else {
+            ok = e2_read_block(blk, b);
+            if (ok) {
+                memcpy(b + boff, in, chunk);
+                ok = e2_write_block(blk, b);
+            }
         }
         preempt_enable();
         if (!ok) {
@@ -1006,24 +1050,94 @@ static int e2_write_locked(fs_node_t *node, uint32_t offset, const void *buf, ui
     return (int)len;
 }
 
+static void e2_sub_blocks(uint8_t *inode, uint32_t nblocks) {
+    uint32_t *p = (uint32_t *)(inode + 28);
+    uint32_t dec = nblocks * (e2.block_size / 512);
+    *p = (*p > dec) ? (*p - dec) : 0;
+}
+
+static void e2_unmap_block(uint8_t *inode, uint32_t lblk) {
+    uint32_t *ib = (uint32_t *)(inode + 40);
+    uint32_t ptrs = e2.block_size / 4;
+
+    if (lblk < 12) {
+        ib[lblk] = 0;
+        return;
+    }
+    lblk -= 12;
+
+    uint8_t *b = bounce();
+    uint8_t *c = bounce2();
+
+    if (lblk < ptrs) {
+        if (!ib[12]) return;
+        if (!e2_read_block(ib[12], b)) return;
+        ((uint32_t *)b)[lblk] = 0;
+        e2_write_block(ib[12], b);
+        return;
+    }
+    lblk -= ptrs;
+
+    if (lblk < ptrs * ptrs) {
+        if (!ib[13]) return;
+        if (!e2_read_block(ib[13], b)) return;
+        uint32_t *tab = (uint32_t *)b;
+        uint32_t idx = lblk / ptrs;
+        uint32_t off = lblk % ptrs;
+        uint32_t t2 = tab[idx];
+        if (!t2) return;
+        if (!e2_read_block(t2, c)) return;
+        ((uint32_t *)c)[off] = 0;
+        e2_write_block(t2, c);
+        return;
+    }
+    lblk -= ptrs * ptrs;
+
+    if (!ib[14]) return;
+    if (!e2_read_block(ib[14], b)) return;
+    uint32_t *tab = (uint32_t *)b;
+    uint32_t i1 = lblk / (ptrs * ptrs);
+    uint32_t rem = lblk % (ptrs * ptrs);
+    uint32_t i2 = rem / ptrs;
+    uint32_t i3 = rem % ptrs;
+    uint32_t t2 = tab[i1];
+    if (!t2) return;
+    if (!e2_read_block(t2, c)) return;
+    uint32_t *tab2 = (uint32_t *)c;
+    uint32_t t3 = tab2[i2];
+    if (!t3) return;
+    uint8_t *d = bounce3();
+    if (!e2_read_block(t3, d)) return;
+    ((uint32_t *)d)[i3] = 0;
+    e2_write_block(t3, d);
+}
+
 static void e2_free_tables(uint8_t *inode) {
     uint8_t *ib = inode + 40;
     uint32_t ptrs = e2.block_size / 4;
     uint8_t *b = bounce();
     uint8_t *c = bounce2();
+    uint32_t freed = 0;
 
     uint32_t t1 = rd32(ib + 48);
-    if (t1) e2_free_block(t1);
+    if (t1) {
+        e2_free_block(t1);
+        freed++;
+    }
 
     t1 = rd32(ib + 52);
     if (t1) {
         if (e2_read_block(t1, b)) {
             for (uint32_t i = 0; i < ptrs; i++) {
                 uint32_t t2 = rd32(b + i * 4);
-                if (t2) e2_free_block(t2);
+                if (t2) {
+                    e2_free_block(t2);
+                    freed++;
+                }
             }
         }
         e2_free_block(t1);
+        freed++;
     }
 
     t1 = rd32(ib + 56);
@@ -1035,31 +1149,68 @@ static void e2_free_tables(uint8_t *inode) {
                 if (e2_read_block(t2, c)) {
                     for (uint32_t j = 0; j < ptrs; j++) {
                         uint32_t t3 = rd32(c + j * 4);
-                        if (t3) e2_free_block(t3);
+                        if (t3) {
+                            e2_free_block(t3);
+                            freed++;
+                        }
                     }
                 }
                 e2_free_block(t2);
+                freed++;
             }
         }
         e2_free_block(t1);
+        freed++;
     }
 
     uint32_t *ibp = (uint32_t *)(inode + 40);
     for (int i = 12; i < 15; i++) ibp[i] = 0;
+    e2_sub_blocks(inode, freed);
 }
 
 static bool e2_free_tail(uint8_t *inode, uint32_t new_blocks) {
     uint32_t old_blocks = (rd32(inode + 4) + e2.block_size - 1) / e2.block_size;
     if (new_blocks >= old_blocks) return true;
 
+    uint32_t freed = 0;
     for (uint32_t l = new_blocks; l < old_blocks; l++) {
         uint32_t blk;
         if (!e2_map_block(inode, l, &blk)) continue;
         e2_free_block(blk);
+        e2_unmap_block(inode, l);
+        freed++;
     }
+    e2_sub_blocks(inode, freed);
 
     if (new_blocks == 0) e2_free_tables(inode);
     return true;
+}
+
+#define E2_OPEN_SLOTS 256
+static struct { uint32_t ino; uint32_t refs; } e2_opens[E2_OPEN_SLOTS];
+
+static void e2_open_inc(uint32_t ino) {
+    if (!ino) return;
+    for (uint32_t i = 0; i < E2_OPEN_SLOTS; i++) {
+        if (e2_opens[i].ino == ino) { e2_opens[i].refs++; return; }
+        if (e2_opens[i].ino == 0) { e2_opens[i].ino = ino; e2_opens[i].refs = 1; return; }
+    }
+}
+
+static uint32_t e2_open_dec(uint32_t ino) {
+    for (uint32_t i = 0; i < E2_OPEN_SLOTS; i++) {
+        if (e2_opens[i].ino != ino) continue;
+        if (e2_opens[i].refs > 0) e2_opens[i].refs--;
+        if (e2_opens[i].refs == 0) e2_opens[i].ino = 0;
+        return e2_opens[i].refs;
+    }
+    return 0;
+}
+
+static uint32_t e2_open_count(uint32_t ino) {
+    for (uint32_t i = 0; i < E2_OPEN_SLOTS; i++)
+        if (e2_opens[i].ino == ino) return e2_opens[i].refs;
+    return 0;
 }
 
 static int e2_truncate_locked(fs_node_t *node) {
@@ -1182,6 +1333,44 @@ static bool e2_touch_dir(fs_node_t *dir) {
     return e2_write_inode(dir->cluster, inode);
 }
 
+static uint32_t e2_generation;
+
+static void e2_stamp_generation(uint8_t *inode) {
+    e2_generation++;
+    if (!e2_generation) e2_generation = 1;
+    *(uint32_t *)(inode + 100) = e2_generation;
+}
+
+static bool e2_bump_links(uint32_t ino, int delta) {
+    uint8_t inode[256];
+    if (e2.inode_size > sizeof inode) return false;
+    if (!e2_read_inode(ino, inode)) return false;
+    uint16_t *links = (uint16_t *)(inode + 26);
+    int32_t v = (int32_t)*links + delta;
+    if (v < 0) v = 0;
+    *links = (uint16_t)v;
+    return e2_write_inode(ino, inode);
+}
+
+static void e2_inherit_ids(uint8_t *inode, uint32_t parent_ino) {
+    uint8_t parent[256];
+    if (e2.inode_size > sizeof parent) return;
+    if (!e2_read_inode(parent_ino, parent)) return;
+    uint16_t *uid = (uint16_t *)(inode + 2);
+    uint16_t *gid = (uint16_t *)(inode + 24);
+    *uid = rd16(parent + 2);
+    *gid = rd16(parent + 24);
+}
+
+static void e2_put_dirent(uint8_t *slot, uint32_t ino, uint16_t rec_len, uint8_t ftype,
+                          const char *name, uint32_t name_len) {
+    *(uint32_t *)slot = ino;
+    *(uint16_t *)(slot + 4) = rec_len;
+    slot[6] = (uint8_t)name_len;
+    slot[7] = e2_filetype() ? ftype : 0;
+    memcpy(slot + 8, name, name_len);
+}
+
 static bool e2_dir_add(fs_node_t *dir, uint32_t ino, uint8_t ftype, const char *name) {
     uint32_t name_len = (uint32_t)strlen(name);
     if (!name_len || name_len > 255) return false;
@@ -1210,23 +1399,26 @@ static bool e2_dir_add(fs_node_t *dir, uint32_t ino, uint8_t ftype, const char *
             uint16_t rec_len = rd16(b + off + 4);
             if (rec_len < 8 || off + rec_len > e2.block_size) break;
 
-            if (!child) {
+            if (child == 0) {
                 if (rec_len >= need) {
-                    uint32_t *di = (uint32_t *)(b + off);
-                    uint16_t *dr = (uint16_t *)(b + off + 4);
-                    *di = ino;
-                    *dr = (uint16_t)rec_len;
-                    b[off + 6] = (uint8_t)name_len;
-                    if (e2_filetype()) b[off + 7] = ftype;
-                    else b[off + 7] = 0;
-                    memcpy(b + off + 8, name, name_len);
+                    e2_put_dirent(b + off, ino, rec_len, ftype, name, name_len);
                     ok = e2_write_block(blk, b);
                     preempt_enable();
                     e2_touch_dir(dir);
                     return ok;
                 }
-                off += rec_len;
-                continue;
+            } else {
+                uint16_t nlen = e2_filetype() ? b[off + 6] : rd16(b + off + 6);
+                uint16_t own = (uint16_t)((8 + nlen + 3) & ~3u);
+                if (own <= rec_len && (uint16_t)(rec_len - own) >= need) {
+                    *(uint16_t *)(b + off + 4) = own;
+                    e2_put_dirent(b + off + own, ino, (uint16_t)(rec_len - own),
+                                  ftype, name, name_len);
+                    ok = e2_write_block(blk, b);
+                    preempt_enable();
+                    e2_touch_dir(dir);
+                    return ok;
+                }
             }
 
             off += rec_len;
@@ -1239,13 +1431,7 @@ static bool e2_dir_add(fs_node_t *dir, uint32_t ino, uint8_t ftype, const char *
 
     uint8_t *b = bounce();
     memset(b, 0, e2.block_size);
-    uint32_t *di = (uint32_t *)b;
-    uint16_t *dr = (uint16_t *)(b + 4);
-    *di = ino;
-    *dr = (uint16_t)e2.block_size;
-    b[6] = (uint8_t)name_len;
-    b[7] = e2_filetype() ? ftype : 0;
-    memcpy(b + 8, name, name_len);
+    e2_put_dirent(b, ino, (uint16_t)e2.block_size, ftype, name, name_len);
     if (!e2_write_block(nblk, b)) return false;
 
     uint32_t *sz = (uint32_t *)(inode + 4);
@@ -1289,6 +1475,7 @@ static int e2_create_locked(const char *path, fs_node_t *out) {
     uint8_t inode[256];
     if (e2.inode_size > sizeof inode) return ABI_EINVAL;
     memset(inode, 0, sizeof inode);
+    e2_stamp_generation(inode);
     uint16_t *mode = (uint16_t *)(inode + 0);
     *mode = 0x8000 | 0644;
     uint16_t *links = (uint16_t *)(inode + 26);
@@ -1299,6 +1486,7 @@ static int e2_create_locked(const char *path, fs_node_t *out) {
     *ctime = *mtime;
     uint32_t *atime = (uint32_t *)(inode + 8);
     *atime = *mtime;
+    e2_inherit_ids(inode, dir.cluster);
 
     if (!e2_write_inode(ino, inode)) {
         e2_free_inode(ino);
@@ -1341,16 +1529,22 @@ static int e2_mkdir_locked(const char *path, fs_node_t *out) {
     memset(dbuf, 0, sizeof dbuf);
 
     uint32_t *di = (uint32_t *)dbuf;
-    uint16_t *dr = (uint16_t *)(dbuf + 4);
-    uint8_t *dn = dbuf + 6;
-    uint8_t *dt = dbuf + 7;
-    di[0] = ino; dr[0] = 12; *dn = 1; *dt = e2_filetype() ? EXT2_FT_DIR : 0; dbuf[8] = '.';
-    di[3] = dir.cluster; dr[3] = 12; dn[3] = 2; dt[3] = e2_filetype() ? EXT2_FT_DIR : 0;
-    dbuf[11] = '.'; dbuf[12] = '.';
+    di[0] = ino;
+    *(uint16_t *)(dbuf + 4) = 12;
+    dbuf[6] = 1;
+    dbuf[7] = e2_filetype() ? EXT2_FT_DIR : 0;
+    dbuf[8] = '.';
+    di[3] = dir.cluster;
+    *(uint16_t *)(dbuf + 16) = (uint16_t)(e2.block_size - 12);
+    dbuf[18] = 2;
+    dbuf[19] = e2_filetype() ? EXT2_FT_DIR : 0;
+    dbuf[20] = '.';
+    dbuf[21] = '.';
 
     uint8_t inode[256];
     if (e2.inode_size > sizeof inode) return ABI_EINVAL;
     memset(inode, 0, sizeof inode);
+    e2_stamp_generation(inode);
     uint16_t *mode = (uint16_t *)(inode + 0);
     *mode = 0x4000 | 0755;
     uint16_t *links = (uint16_t *)(inode + 26);
@@ -1363,18 +1557,21 @@ static int e2_mkdir_locked(const char *path, fs_node_t *out) {
     ib[0] = blk;
     uint32_t *mtime = (uint32_t *)(inode + 16);
     *mtime = (uint32_t)rtc_unix_time();
+    e2_inherit_ids(inode, dir.cluster);
 
     if (!e2_write_block(blk, dbuf) || !e2_write_inode(ino, inode)) {
         e2_free_block(blk);
         e2_free_inode(ino);
         return ABI_EIO;
     }
+    e2_dir_counts((ino - 1) / e2.inodes_per_group, 1);
 
     if (!e2_dir_add(&dir, ino, EXT2_FT_DIR, name)) {
         e2_free_block(blk);
         e2_free_inode(ino);
         return ABI_ENOSPC;
     }
+    e2_bump_links(dir.cluster, 1);
 
     if (!e2_node_from_inode(ino, name, out)) return ABI_EIO;
     return 0;
@@ -1400,9 +1597,30 @@ static int e2_unlink_locked(const char *path) {
     if (e2.inode_size > sizeof inode) return ABI_EINVAL;
     if (!e2_read_inode(ino, inode)) return ABI_EIO;
 
-    e2_free_tail(inode, 0);
+    uint16_t links = rd16(inode + 26);
+    uint32_t now = (uint32_t)rtc_unix_time();
 
-    memset(inode, 0, sizeof inode);
+    if (links > 1) {
+        *(uint16_t *)(inode + 26) = (uint16_t)(links - 1);
+        *(uint32_t *)(inode + 12) = now;
+        e2_write_inode(ino, inode);
+        if (!e2_dir_remove(&dir, dblk, doff)) return ABI_EIO;
+        e2_touch_dir(&dir);
+        return 0;
+    }
+
+    if (e2_open_count(ino) > 0) {
+        *(uint16_t *)(inode + 26) = 0;
+        *(uint32_t *)(inode + 20) = now;
+        e2_write_inode(ino, inode);
+        if (!e2_dir_remove(&dir, dblk, doff)) return ABI_EIO;
+        e2_touch_dir(&dir);
+        return 0;
+    }
+
+    e2_free_tail(inode, 0);
+    *(uint16_t *)(inode + 26) = 0;
+    *(uint32_t *)(inode + 20) = now;
     e2_write_inode(ino, inode);
     e2_free_inode(ino);
 
@@ -1446,23 +1664,10 @@ static int e2_rmdir_locked(const char *path) {
 
     if (!e2_dir_remove(&dir, dblk, doff)) return ABI_EIO;
     e2_touch_dir(&dir);
+    e2_bump_links(dir.cluster, -1);
+    e2_dir_counts((ino - 1) / e2.inodes_per_group, -1);
     return 0;
 }
-
-static int e2_utimens(const char *path, int64_t mtime) {
-    (void)path; (void)mtime;
-    return ABI_EROFS;
-}
-
-static int e2_node_utimens(fs_node_t *node, int64_t mtime) {
-    (void)node; (void)mtime;
-    return ABI_EROFS;
-}
-
-static bool e2_sync(void) {
-    return true;
-}
-
 
 static bool e2_iterate(const fs_node_t *dir, uint32_t index, fs_node_t *out) {
     bool ok;
@@ -1529,6 +1734,7 @@ static int e2_symlink_locked(const char *target, const char *path, fs_node_t *ou
     uint8_t inode[256];
     if (e2.inode_size > sizeof inode) return ABI_EINVAL;
     memset(inode, 0, sizeof inode);
+    e2_stamp_generation(inode);
 
     uint16_t *mode = (uint16_t *)(inode + 0);
     *mode = EXT2_S_IFLNK | 0777;
@@ -1538,6 +1744,7 @@ static int e2_symlink_locked(const char *target, const char *path, fs_node_t *ou
     *size = tlen;
     uint32_t *mtime = (uint32_t *)(inode + 16);
     *mtime = (uint32_t)rtc_unix_time();
+    e2_inherit_ids(inode, dir.cluster);
 
     if (tlen < 60) {
         memcpy(inode + 40, target, tlen);
@@ -1665,6 +1872,257 @@ static int e2_rmdir(const char *path) {
     return r;
 }
 
+static int e2_set_times_locked(const fs_node_t *node, int64_t atime, int64_t mtime) {
+    uint8_t inode[256];
+    if (e2.inode_size > sizeof inode) return ABI_EINVAL;
+    if (!e2_read_inode(node->cluster, inode)) return ABI_EIO;
+    if (atime >= 0) *(uint32_t *)(inode + 8) = (uint32_t)atime;
+    if (mtime >= 0) *(uint32_t *)(inode + 16) = (uint32_t)mtime;
+    *(uint32_t *)(inode + 12) = (uint32_t)rtc_unix_time();
+    if (!e2_write_inode(node->cluster, inode)) return ABI_EIO;
+    return 0;
+}
+
+static int e2_utimens(const char *path, int64_t atime, int64_t mtime) {
+    if (!e2.mounted || !path) return ABI_EINVAL;
+    int r;
+    spin_lock(&e2_lock);
+    fs_node_t node;
+    if (!e2_lookup_locked(path, &node)) r = ABI_ENOENT;
+    else r = e2_set_times_locked(&node, atime, mtime);
+    spin_unlock(&e2_lock);
+    return r;
+}
+
+static int e2_node_utimens(fs_node_t *node, int64_t atime, int64_t mtime) {
+    if (!node) return ABI_EINVAL;
+    int r;
+    spin_lock(&e2_lock);
+    r = e2_set_times_locked(node, atime, mtime);
+    spin_unlock(&e2_lock);
+    return r;
+}
+
+static bool e2_sync(void) {
+    if (!e2.mounted) return false;
+    spin_lock(&e2_lock);
+    uint8_t sb[1024];
+    if (e2_read_at(EXT2_SUPER_OFFSET, sb, sizeof sb)) {
+        *(uint32_t *)(sb + 48) = (uint32_t)rtc_unix_time();
+        *(uint16_t *)(sb + 58) = 1;
+        e2_write_at(EXT2_SUPER_OFFSET, sb, sizeof sb);
+        block_flush(e2.dev);
+    }
+    spin_unlock(&e2_lock);
+    return true;
+}
+
+static int e2_chown_locked(fs_node_t *node, int uid, int gid) {
+    if (!e2.mounted || !node) return ABI_EINVAL;
+    uint8_t inode[256];
+    if (e2.inode_size > sizeof inode) return ABI_EINVAL;
+    if (!e2_read_inode(node->cluster, inode)) return ABI_EIO;
+    if (uid >= 0) *(uint16_t *)(inode + 2) = (uint16_t)uid;
+    if (gid >= 0) *(uint16_t *)(inode + 24) = (uint16_t)gid;
+    *(uint32_t *)(inode + 12) = (uint32_t)rtc_unix_time();
+    if (!e2_write_inode(node->cluster, inode)) return ABI_EIO;
+    return 0;
+}
+
+static int e2_chown(fs_node_t *node, int uid, int gid) {
+    int r;
+    spin_lock(&e2_lock);
+    r = e2_chown_locked(node, uid, gid);
+    spin_unlock(&e2_lock);
+    return r;
+}
+
+static int e2_statfs(fs_statfs_t *out) {
+    if (!out || !e2.mounted) return ABI_EINVAL;
+    uint8_t sb[1024];
+    uint32_t fb = 0, fi = 0;
+    if (e2_read_at(EXT2_SUPER_OFFSET, sb, sizeof sb)) {
+        fb = rd32(sb + 12);
+        fi = rd32(sb + 16);
+    }
+    out->total_blocks = e2.blocks_count;
+    out->free_blocks = fb;
+    out->total_inodes = e2.inodes_count;
+    out->free_inodes = fi;
+    out->block_size = e2.block_size;
+    out->name_max = 255;
+    return 0;
+}
+
+static int e2_open(const fs_node_t *node) {
+    if (!e2.mounted || !node) return ABI_EINVAL;
+    spin_lock(&e2_lock);
+    e2_open_inc(node->cluster);
+    spin_unlock(&e2_lock);
+    return 0;
+}
+
+static void e2_release(const fs_node_t *node) {
+    if (!e2.mounted || !node) return;
+    spin_lock(&e2_lock);
+    if (e2_open_dec(node->cluster) == 0) {
+        uint8_t inode[256];
+        if (e2.inode_size <= sizeof inode && e2_read_inode(node->cluster, inode)) {
+            if (rd16(inode + 26) == 0 && rd32(inode + 20) != 0) {
+                e2_free_tail(inode, 0);
+                e2_free_inode(node->cluster);
+            }
+        }
+    }
+    spin_unlock(&e2_lock);
+}
+
+static int e2_link_locked(const char *oldpath, const char *newpath) {
+    fs_node_t src;
+    if (!e2_lookup_locked(oldpath, &src)) return ABI_ENOENT;
+    if (src.is_dir) return ABI_EPERM;
+
+    char ndir[FS_PATH_MAX], nname[FS_MAX_NAME + 1];
+    if (!e2_split_path(newpath, ndir, sizeof ndir, nname, sizeof nname)) return ABI_EINVAL;
+
+    fs_node_t nparent;
+    if (!e2_lookup_locked(ndir, &nparent) || !nparent.is_dir) return ABI_ENOENT;
+
+    uint32_t have = 0, hblk = 0, hoff = 0;
+    if (e2_dir_find(&nparent, nname, &have, &hblk, &hoff)) return ABI_EEXIST;
+
+    if (!e2_dir_add(&nparent, src.cluster, EXT2_FT_REG, nname)) return ABI_ENOSPC;
+    e2_bump_links(src.cluster, 1);
+    return 0;
+}
+
+static int e2_link(const char *oldpath, const char *newpath) {
+    int r;
+    spin_lock(&e2_lock);
+    r = e2_link_locked(oldpath, newpath);
+    spin_unlock(&e2_lock);
+    return r;
+}
+
+static bool e2_dir_set_dotdot(fs_node_t *dir, uint32_t parent_ino) {
+    uint8_t inode[256];
+    if (e2.inode_size > sizeof inode) return false;
+    if (!e2_read_inode(dir->cluster, inode)) return false;
+
+    uint32_t blk;
+    if (!e2_map_block(inode, 0, &blk)) return false;
+
+    preempt_disable();
+    uint8_t *b = bounce();
+    bool ok = e2_read_block(blk, b);
+    if (ok) {
+        uint32_t off = 0;
+        ok = false;
+        while (off + 8 <= e2.block_size) {
+            uint16_t rec = rd16(b + off + 4);
+            uint16_t nl = e2_filetype() ? b[off + 6] : rd16(b + off + 6);
+            if (rec < 8 || off + rec > e2.block_size) break;
+            if (nl == 2 && memcmp(b + off + 8, "..", 2) == 0) {
+                *(uint32_t *)(b + off) = parent_ino;
+                ok = e2_write_block(blk, b);
+                break;
+            }
+            off += rec;
+        }
+    }
+    preempt_enable();
+    return ok;
+}
+
+static void e2_drop_link(uint32_t ino) {
+    uint8_t inode[256];
+    if (e2.inode_size > sizeof inode) return;
+    if (!e2_read_inode(ino, inode)) return;
+
+    uint16_t links = rd16(inode + 26);
+    uint32_t now = (uint32_t)rtc_unix_time();
+    if (links > 1) {
+        *(uint16_t *)(inode + 26) = (uint16_t)(links - 1);
+        *(uint32_t *)(inode + 12) = now;
+        e2_write_inode(ino, inode);
+        return;
+    }
+    if (e2_open_count(ino) > 0) {
+        *(uint16_t *)(inode + 26) = 0;
+        *(uint32_t *)(inode + 20) = now;
+        e2_write_inode(ino, inode);
+        return;
+    }
+    e2_free_tail(inode, 0);
+    *(uint16_t *)(inode + 26) = 0;
+    *(uint32_t *)(inode + 20) = now;
+    e2_write_inode(ino, inode);
+    e2_free_inode(ino);
+}
+
+static int e2_rename_locked(const char *oldpath, const char *newpath) {
+    char odir[FS_PATH_MAX], oname[FS_MAX_NAME + 1];
+    char ndir[FS_PATH_MAX], nname[FS_MAX_NAME + 1];
+    if (!e2_split_path(oldpath, odir, sizeof odir, oname, sizeof oname)) return ABI_EINVAL;
+    if (!e2_split_path(newpath, ndir, sizeof ndir, nname, sizeof nname)) return ABI_EINVAL;
+
+    fs_node_t oparent, nparent;
+    if (!e2_lookup_locked(odir, &oparent) || !oparent.is_dir) return ABI_ENOENT;
+    if (!e2_lookup_locked(ndir, &nparent) || !nparent.is_dir) return ABI_ENOENT;
+
+    uint32_t oino = 0, oblk = 0, ooff = 0;
+    if (!e2_dir_find(&oparent, oname, &oino, &oblk, &ooff)) return ABI_ENOENT;
+
+    fs_node_t src;
+    if (!e2_node_from_inode(oino, oname, &src)) return ABI_EIO;
+
+    uint32_t tino = 0, tblk = 0, toff = 0;
+    bool target = e2_dir_find(&nparent, nname, &tino, &tblk, &toff);
+    if (target && tino == oino) return 0;
+
+    if (target) {
+        fs_node_t tnode;
+        if (!e2_node_from_inode(tino, nname, &tnode)) return ABI_EIO;
+        if (tnode.is_dir && !src.is_dir) return ABI_EISDIR;
+        if (src.is_dir && !tnode.is_dir) return ABI_ENOTDIR;
+
+        if (tnode.is_dir) {
+            fs_node_t ent;
+            uint32_t cnt = 0;
+            while (e2_iterate_locked(&tnode, cnt, &ent)) cnt++;
+            if (cnt) return ABI_ENOTEMPTY;
+            e2_drop_link(tino);
+            e2_dir_counts((tino - 1) / e2.inodes_per_group, -1);
+            e2_bump_links(nparent.cluster, -1);
+        } else {
+            e2_drop_link(tino);
+        }
+        if (!e2_dir_remove(&nparent, tblk, toff)) return ABI_EIO;
+    }
+
+    if (!e2_dir_remove(&oparent, oblk, ooff)) return ABI_EIO;
+    if (!e2_dir_add(&nparent, oino, src.is_dir ? EXT2_FT_DIR : EXT2_FT_REG, nname))
+        return ABI_ENOSPC;
+
+    if (src.is_dir && oparent.cluster != nparent.cluster) {
+        e2_bump_links(oparent.cluster, -1);
+        e2_bump_links(nparent.cluster, 1);
+        e2_dir_set_dotdot(&src, nparent.cluster);
+    }
+
+    e2_touch_dir(&oparent);
+    if (oparent.cluster != nparent.cluster) e2_touch_dir(&nparent);
+    return 0;
+}
+
+static int e2_rename(const char *oldpath, const char *newpath) {
+    int r;
+    spin_lock(&e2_lock);
+    r = e2_rename_locked(oldpath, newpath);
+    spin_unlock(&e2_lock);
+    return r;
+}
+
 const struct fs_ops ext2_ops = {
     .iterate = e2_iterate,
     .lookup = e2_lookup,
@@ -1682,6 +2140,12 @@ const struct fs_ops ext2_ops = {
     .chmod = e2_chmod,
     .symlink = e2_symlink,
     .readlink = e2_readlink,
+    .link = e2_link,
+    .rename = e2_rename,
+    .chown = e2_chown,
+    .statfs = e2_statfs,
+    .open = e2_open,
+    .release = e2_release,
 };
 
 bool ext2_mount(block_device_t *dev) {
@@ -1733,6 +2197,16 @@ bool ext2_mount(block_device_t *dev) {
     e2.mounted = true;
 
     for (uint32_t id = 0; id < MAX_CPUS; id++) e2_icache_blk[id] = 0;
+
+    {
+        uint16_t mc = rd16(sb + 52);
+        mc++;
+        sb[52] = (uint8_t)mc;
+        sb[53] = (uint8_t)(mc >> 8);
+        *(uint16_t *)(sb + 58) = 0;
+        *(uint32_t *)(sb + 44) = (uint32_t)rtc_unix_time();
+        e2_write_at(EXT2_SUPER_OFFSET, sb, sizeof sb);
+    }
 
     kprintf(PRINT_SERIAL, "EXT2: mounted %s, block size %u, %u blocks, %u inodes, "
             "%u groups, inode size %u\n",

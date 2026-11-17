@@ -43,9 +43,24 @@ static bool cpu_has_5level(void) {
 #define VMM_PT_ENTRIES 512
 #define VMM_PT_INDEX_MASK 0x1FF
 
+static volatile size_t vmm_table_count;
+static volatile size_t vmm_frame_count;
+
+size_t vmm_tables_used(void) {
+    return __atomic_load_n(&vmm_table_count, __ATOMIC_RELAXED);
+}
+
+size_t vmm_frames_mapped(void) {
+    return __atomic_load_n(&vmm_frame_count, __ATOMIC_RELAXED);
+}
+
 static struct page_table *alloc_page_table(void) {
     paddr_t phys;
-    if (!pmm_alloc(&phys, 1)) return NULL;
+    pmm_set_tag(PMM_TAG_PTABLES);
+    bool got = pmm_alloc(&phys, 1);
+    pmm_set_tag(PMM_TAG_NONE);
+    if (!got) return NULL;
+    __atomic_add_fetch(&vmm_table_count, 1, __ATOMIC_RELAXED);
     struct page_table *pt = (struct page_table *)(vmm_hhdm_offset + phys);
     memset(pt->entries, 0, sizeof(pt->entries));
     return pt;
@@ -233,7 +248,10 @@ static bool clone_user_level(struct page_table *src, struct page_table *dst,
 
         if (level == 1) {
             paddr_t np;
-            if (!pmm_alloc(&np, 1)) return false;
+            pmm_set_tag(PMM_TAG_COW);
+            bool got = pmm_alloc(&np, 1);
+            pmm_set_tag(PMM_TAG_NONE);
+            if (!got) return false;
             uint8_t *dp = (uint8_t *)(vmm_hhdm_offset + np);
             const uint8_t *sp2 =
                 (const uint8_t *)(vmm_hhdm_offset + (e & VMM_PT_ADDR_MASK));
@@ -398,7 +416,10 @@ static bool cow_resolve_locked(struct page_table *root, vaddr_t vaddr) {
     paddr_t old = *entry & VMM_PT_ADDR_MASK;
     paddr_t np;
 
-    if (!pmm_alloc(&np, 1)) return false;
+    pmm_set_tag(PMM_TAG_COW);
+    bool got = pmm_alloc(&np, 1);
+    pmm_set_tag(PMM_TAG_NONE);
+    if (!got) return false;
 
     const uint8_t *src = (const uint8_t *)(vmm_hhdm_offset + old);
     uint8_t *dst = (uint8_t *)(vmm_hhdm_offset + np);
@@ -651,6 +672,29 @@ void vmm_switch_address_space(struct page_table *pml4) {
 }
 
 static void release_shared_frames(struct page_table *table, int level);
+
+static void count_user_frames(struct page_table *t, int level, size_t *frames) {
+    for (size_t i = 0; i < VMM_PT_ENTRIES; i++) {
+        uint64_t e = t->entries[i];
+        if (!(e & PAGE_PRESENT)) continue;
+        if (level == 1) {
+            if (e & PAGE_USER) (*frames)++;
+            continue;
+        }
+        struct page_table *child = (struct page_table *)(vmm_hhdm_offset + (e & VMM_PT_ADDR_MASK));
+        count_user_frames(child, level - 1, frames);
+    }
+}
+
+size_t vmm_count_user_frames(struct page_table *root) {
+    if (!root) return 0;
+    int levels = vmm_5level ? 5 : 4;
+    size_t frames = 0;
+    lock_acquire(LOCK_VMM, &vmm_lock);
+    count_user_frames(root, levels, &frames);
+    lock_release(LOCK_VMM, &vmm_lock);
+    return frames;
+}
 
 static void reclaim_owned_frames(struct page_table *table, int level, uint32_t *freed) {
     for (size_t i = 0; i < VMM_PT_ENTRIES; i++) {

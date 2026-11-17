@@ -1,6 +1,7 @@
 #include "kernel/vfs/vfs.h"
 #include "kernel/kprintf/kprintf.h"
 #include "abi/abi.h"
+#include "kernel/mm/pagecache/pcache.h"
 
 #include "kernel/lib/string.h"
 #include "kernel/lib/string.h"
@@ -121,6 +122,7 @@ bool vfs_read(const fs_node_t *node, uint32_t offset, void *buf, uint32_t len) {
 
 int vfs_write(fs_node_t *node, uint32_t offset, const void *buf, uint32_t len) {
     if (!node || !node->ops || !node->ops->write) return -1;
+    pcache_write_through(node, offset, buf, len);
     return node->ops->write(node, offset, buf, len);
 }
 
@@ -187,21 +189,77 @@ int vfs_rmdir(const char *path) {
     return ops->rmdir(path + strip);
 }
 
-int vfs_utimens(const char *path, int64_t mtime) {
-    if (vfs_default_ops && vfs_default_ops->utimens)
-        return vfs_default_ops->utimens(path, mtime);
-    return -1;
+int vfs_utimens(const char *path, int64_t atime, int64_t mtime) {
+    const struct fs_ops *ops = NULL;
+    int strip = vfs_mount_for(path, &ops);
+    if (strip < 0 || !ops || !ops->utimens) return -ABI_EROFS;
+    return ops->utimens(path + strip, atime, mtime);
 }
 
-int vfs_node_utimens(fs_node_t *node, int64_t mtime) {
-    if (!node || !node->ops || !node->ops->node_utimens) return -1;
-    return node->ops->node_utimens(node, mtime);
+int vfs_node_utimens(fs_node_t *node, int64_t atime, int64_t mtime) {
+    if (!node || !node->ops || !node->ops->node_utimens) return -ABI_EROFS;
+    return node->ops->node_utimens(node, atime, mtime);
+}
+
+int vfs_link(const char *oldpath, const char *newpath) {
+    const struct fs_ops *ops = NULL;
+    int strip = vfs_mount_for(newpath, &ops);
+    if (strip < 0 || !ops || !ops->link) return -ABI_EXDEV;
+    return ops->link(oldpath, newpath + strip);
+}
+
+int vfs_rename(const char *oldpath, const char *newpath) {
+    const struct fs_ops *ops = NULL;
+    const struct fs_ops *nops = NULL;
+    int ostrip = vfs_mount_for(oldpath, &ops);
+    int nstrip = vfs_mount_for(newpath, &nops);
+    if (ostrip < 0 || nstrip < 0 || !ops || !ops->rename) return -ABI_EXDEV;
+    if (ops != nops) return -ABI_EXDEV;
+    return ops->rename(oldpath + ostrip, newpath + nstrip);
+}
+
+int vfs_chown(const char *path, int uid, int gid) {
+    const struct fs_ops *ops = NULL;
+    int strip = vfs_mount_for(path, &ops);
+    if (strip < 0 || !ops || !ops->chown) return -ABI_EROFS;
+    fs_node_t node;
+    if (!ops->lookup(path + strip, &node)) return -ABI_ENOENT;
+    return ops->chown(&node, uid, gid);
+}
+
+int vfs_node_chown(fs_node_t *node, int uid, int gid) {
+    if (!node || !node->ops || !node->ops->chown) return -ABI_EROFS;
+    return node->ops->chown(node, uid, gid);
+}
+
+int vfs_statfs(fs_statfs_t *out) {
+    if (!out) return -ABI_EINVAL;
+    memset(out, 0, sizeof(*out));
+    if (vfs_default_ops && vfs_default_ops->statfs) return vfs_default_ops->statfs(out);
+    return -ABI_ENOSYS;
+}
+
+int fs_node_opened(const fs_node_t *node) {
+    if (!node || !node->ops || !node->ops->open) return 0;
+    return node->ops->open(node);
+}
+
+void fs_node_released(const fs_node_t *node) {
+    if (!node || !node->ops || !node->ops->release) return;
+    node->ops->release(node);
 }
 
 bool vfs_sync(void) {
+    pcache_sync_all();
     if (vfs_default_ops && vfs_default_ops->sync)
         return vfs_default_ops->sync();
     return false;
+}
+
+uint64_t fs_node_lock_key(const fs_node_t *node) {
+    if (!node) return 0;
+    if (node->cache_key) return node->cache_key;
+    return ((uint64_t)(uintptr_t)node->ops << 32) ^ (uint64_t)node->cluster;
 }
 
 uint32_t fs_node_read_all(const fs_node_t *node, void *buf, uint32_t max) {
@@ -253,12 +311,35 @@ int fs_rmdir(const char *path) {
     return vfs_rmdir(path);
 }
 
-int fs_utimens(const char *path, int64_t mtime) {
-    return vfs_utimens(path, mtime);
+int fs_utimens(const char *path, int64_t atime, int64_t mtime) {
+    return vfs_utimens(path, atime, mtime);
 }
 
-int fs_node_utimens(fs_node_t *node, int64_t mtime) {
-    return vfs_node_utimens(node, mtime);
+int fs_node_utimens(fs_node_t *node, int64_t atime, int64_t mtime) {
+    return vfs_node_utimens(node, atime, mtime);
+}
+
+int fs_link(const char *oldpath, const char *newpath) {
+    if (!oldpath || !newpath) return ABI_EINVAL;
+    return vfs_link(oldpath, newpath);
+}
+
+int fs_rename(const char *oldpath, const char *newpath) {
+    if (!oldpath || !newpath) return ABI_EINVAL;
+    return vfs_rename(oldpath, newpath);
+}
+
+int fs_chown(const char *path, int uid, int gid) {
+    if (!path) return ABI_EINVAL;
+    return vfs_chown(path, uid, gid);
+}
+
+int fs_node_chown(fs_node_t *node, int uid, int gid) {
+    return vfs_node_chown(node, uid, gid);
+}
+
+int fs_statfs(fs_statfs_t *out) {
+    return vfs_statfs(out);
 }
 
 bool fs_sync(void) {

@@ -377,8 +377,8 @@ static void sink_putc(struct fmt_sink *s, char c) {
     s->len++;
 }
 
-static void put_unsigned(struct fmt_sink *s, uint64_t v, unsigned base, bool upper,
-                         int min_digits, char pad) {
+static size_t render_unsigned(char *out, size_t cap, uint64_t v, unsigned base, bool upper,
+                              int min_digits, char pad) {
     const char *digits = upper ? "0123456789ABCDEF" : "0123456789abcdef";
     char buf[24];
     int i = 0;
@@ -390,16 +390,32 @@ static void put_unsigned(struct fmt_sink *s, uint64_t v, unsigned base, bool upp
 
     while (i < min_digits && i < 24) buf[i++] = pad;
 
-    while (i--) sink_putc(s, buf[i]);
+    size_t n = 0;
+    while (i--) {
+        if (n < cap) out[n] = buf[i];
+        n++;
+    }
+    return n;
 }
 
-static void put_signed(struct fmt_sink *s, int64_t v, int min_digits, char pad) {
+static size_t render_signed(char *out, size_t cap, int64_t v, int min_digits, char pad) {
+    size_t n = 0;
     if (v < 0) {
-        sink_putc(s, '-');
-        put_unsigned(s, (uint64_t)(-(v + 1)) + 1, 10, false, min_digits, pad);
-        return;
+        if (n < cap) out[n] = '-';
+        n++;
+        n += render_unsigned(out + n, cap > n ? cap - n : 0,
+                             (uint64_t)(-(v + 1)) + 1, 10, false, min_digits, pad);
+        return n;
     }
-    put_unsigned(s, (uint64_t)v, 10, false, min_digits, pad);
+    return render_unsigned(out, cap, (uint64_t)v, 10, false, min_digits, pad);
+}
+
+static void emit_aligned(struct fmt_sink *s, const char *text, size_t len,
+                          int width, int left_align) {
+    for (size_t i = 0; i < len; i++) sink_putc(s, text[i]);
+    if (left_align) {
+        for (size_t i = len; i < (size_t)width; i++) sink_putc(s, ' ');
+    }
 }
 
 static void kvformat(struct fmt_sink *s, const char *fmt, va_list args) {
@@ -412,20 +428,33 @@ static void kvformat(struct fmt_sink *s, const char *fmt, va_list args) {
         fmt++;
         if (!*fmt) return;
 
-        int prec = -1;
+        int left_align = 0;
+        int zero_pad = 0;
+        for (;;) {
+            if (*fmt == '-') { left_align = 1; fmt++; continue; }
+            if (*fmt == '0') { zero_pad = 1; fmt++; continue; }
+            if (*fmt == '+' || *fmt == ' ' || *fmt == '#') { fmt++; continue; }
+            break;
+        }
+
+        int width = 0;
         if (*fmt == '*') {
             fmt++;
-            prec = va_arg(args, int);
-            if (prec < 0) prec = -1;
-        } else if (*fmt == '.') {
-            fmt++;
+            width = va_arg(args, int);
+            if (width < 0) { left_align = 1; width = -width; }
+        } else {
+            while (*fmt >= '0' && *fmt <= '9') { width = width * 10 + (*fmt - '0'); fmt++; }
+        }
 
+        int prec = -1;
+        if (*fmt == '.') {
+            fmt++;
+            prec = 0;
             if (*fmt == '*') {
                 fmt++;
                 prec = va_arg(args, int);
                 if (prec < 0) prec = -1;
             } else {
-                prec = 0;
                 while (*fmt >= '0' && *fmt <= '9') { prec = prec * 10 + (*fmt - '0'); fmt++; }
             }
         }
@@ -433,14 +462,11 @@ static void kvformat(struct fmt_sink *s, const char *fmt, va_list args) {
         int longness = 0;
         while (*fmt == 'l') { longness++; fmt++; }
         if (*fmt == 'z') { longness = 1; fmt++; }
-
-        int zero_pad = 0;
-        if (*fmt == '0') { zero_pad = 1; fmt++; }
-        int width = 0;
-        while (*fmt >= '0' && *fmt <= '9') { width = width * 10 + (*fmt - '0'); fmt++; }
+        if (*fmt == 'h') { fmt++; }
+        if (*fmt == 'j') { longness = 2; fmt++; }
 
         int min_digits = prec > 0 ? prec : 0;
-        if (width > min_digits) min_digits = width;
+        if (!left_align && width > min_digits) min_digits = width;
         char pad = zero_pad ? '0' : ' ';
 
         switch (*fmt) {
@@ -449,14 +475,18 @@ static void kvformat(struct fmt_sink *s, const char *fmt, va_list args) {
                 int64_t v = (longness >= 2) ? va_arg(args, long long)
                           : (longness == 1) ? (long)va_arg(args, long)
                           : (int)va_arg(args, int);
-                put_signed(s, v, min_digits, pad);
+                char tmp[32];
+                size_t n = render_signed(tmp, sizeof tmp, v, min_digits, pad);
+                emit_aligned(s, tmp, n, width, left_align);
                 break;
             }
             case 'u': {
                 uint64_t v = (longness >= 2) ? va_arg(args, unsigned long long)
                            : (longness == 1) ? (unsigned long)va_arg(args, unsigned long)
                            : (unsigned)va_arg(args, unsigned int);
-                put_unsigned(s, v, 10, false, min_digits, pad);
+                char tmp[32];
+                size_t n = render_unsigned(tmp, sizeof tmp, v, 10, false, min_digits, pad);
+                emit_aligned(s, tmp, n, width, left_align);
                 break;
             }
             case 'x':
@@ -464,13 +494,19 @@ static void kvformat(struct fmt_sink *s, const char *fmt, va_list args) {
                 uint64_t v = (longness >= 2) ? va_arg(args, unsigned long long)
                            : (longness == 1) ? (unsigned long)va_arg(args, unsigned long)
                            : (unsigned)va_arg(args, unsigned int);
-                put_unsigned(s, v, 16, *fmt == 'X', min_digits, pad);
+                char tmp[32];
+                size_t n = render_unsigned(tmp, sizeof tmp, v, 16, *fmt == 'X',
+                                           min_digits, pad);
+                emit_aligned(s, tmp, n, width, left_align);
                 break;
             }
             case 'p': {
                 sink_putc(s, '0');
                 sink_putc(s, 'x');
-                put_unsigned(s, (uint64_t)(uintptr_t)va_arg(args, void *), 16, false, min_digits, pad);
+                uint64_t v = (uint64_t)(uintptr_t)va_arg(args, void *);
+                char tmp[32];
+                size_t n = render_unsigned(tmp, sizeof tmp, v, 16, false, min_digits, pad);
+                emit_aligned(s, tmp, n, width, left_align);
                 break;
             }
             case 's': {
@@ -479,8 +515,13 @@ static void kvformat(struct fmt_sink *s, const char *fmt, va_list args) {
 
                 size_t slen = 0;
                 while (str[slen] && slen < (size_t)prec) slen++;
-                for (size_t i = slen; i < (size_t)width; i++) sink_putc(s, ' ');
+                if (!left_align) {
+                    for (size_t i = slen; i < (size_t)width; i++) sink_putc(s, ' ');
+                }
                 for (size_t i = 0; i < slen; i++) sink_putc(s, str[i]);
+                if (left_align) {
+                    for (size_t i = slen; i < (size_t)width; i++) sink_putc(s, ' ');
+                }
                 break;
             }
             case 'c':

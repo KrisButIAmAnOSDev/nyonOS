@@ -23,6 +23,8 @@ static uint8_t *pmm_state = NULL;
 static uint32_t *pmm_share = NULL;
 static struct pmm_free_block *pmm_free_lists[PMM_MAX_ORDER + 1];
 static size_t total_pages = 0;
+static uint8_t *pmm_tags = NULL;
+static volatile uint8_t pmm_current_tag = PMM_TAG_NONE;
 static size_t free_pages = 0;
 
 static uint64_t pmm_hhdm_offset = 0;
@@ -165,15 +167,18 @@ void pmm_init(struct limine_memmap_response *memmap, uint64_t hhdm_offset) {
 
     paddr_t share_phys = memmap_carve(memmap, (size_t)total_pages * 4);
     paddr_t state_phys = memmap_carve(memmap, total_pages);
-    if (!share_phys || !state_phys) {
+    paddr_t tag_phys = memmap_carve(memmap, total_pages);
+    if (!share_phys || !state_phys || !tag_phys) {
         kprintf(PRINT_SERIAL, "PMM: no space for metadata\n");
         for (;;) __asm__ volatile("hlt");
     }
 
     pmm_share = (uint32_t *)(pmm_hhdm_offset + share_phys);
     pmm_state = (uint8_t *)(pmm_hhdm_offset + state_phys);
+    pmm_tags = (uint8_t *)(pmm_hhdm_offset + tag_phys);
     memset(pmm_share, 0, total_pages);
     memset(pmm_state, PMM_RESERVED, total_pages);
+    memset(pmm_tags, PMM_TAG_NONE, total_pages);
     for (unsigned o = 0; o <= PMM_MAX_ORDER; o++) pmm_free_lists[o] = NULL;
 
     free_pages = 0;
@@ -205,6 +210,7 @@ static bool pmm_alloc_cached(paddr_t *out) {
     if (cache->count) {
         size_t page = cache->pages[--cache->count];
         pmm_state[page] = PMM_STATE_USED(0);
+        pmm_tags[page] = pmm_current_tag;
         __atomic_sub_fetch(&free_pages, 1, __ATOMIC_RELAXED);
         irq_restore(flags);
         *out = page_addr(page);
@@ -223,6 +229,7 @@ static bool pmm_alloc_cached(paddr_t *out) {
     if (ok) {
         page = cache->pages[--cache->count];
         pmm_state[page] = PMM_STATE_USED(0);
+        pmm_tags[page] = pmm_current_tag;
         __atomic_sub_fetch(&free_pages, 1, __ATOMIC_RELAXED);
     }
     lock_release(LOCK_PMM, &pmm_lock);
@@ -278,8 +285,23 @@ bool pmm_alloc(paddr_t *out, size_t pages) {
     lock_release(LOCK_PMM, &pmm_lock);
 
     if (page == SIZE_MAX) return false;
+    for (size_t i = 0; i < ((size_t)1 << order); i++)
+        pmm_tags[page + i] = pmm_current_tag;
     *out = page_addr(page);
     return true;
+}
+
+void pmm_set_tag(uint8_t tag) {
+    pmm_current_tag = tag;
+}
+
+size_t pmm_pages_by_tag(uint8_t tag) {
+    size_t n = 0;
+    for (size_t i = 0; i < total_pages; i++) {
+        if (pmm_tags[i] == tag && pmm_state[i] != PMM_RESERVED &&
+            (pmm_state[i] & 0x80u)) n++;
+    }
+    return n;
 }
 
 static bool pmm_page_managed(size_t page) {
@@ -339,3 +361,21 @@ size_t pmm_total_pages(void) { return total_pages; }
 
 bool pmm_share_ready(void) { return pmm_share != NULL; }
 size_t pmm_free_pages(void) { return __atomic_load_n(&free_pages, __ATOMIC_RELAXED); }
+
+size_t pmm_cache_pages_used(void) {
+    size_t n = 0;
+    for (uint32_t i = 0; i < MAX_CPUS; i++) n += pmm_caches[i].count;
+    return n;
+}
+
+size_t pmm_usable_pages(void) {
+    size_t n = 0;
+    for (size_t i = 0; i < pmm_region_count; i++) n += pmm_regions[i].pages;
+    return n;
+}
+
+size_t pmm_reserved_pages(void) {
+    size_t total = pmm_total_pages();
+    size_t usable = pmm_usable_pages();
+    return total > usable ? total - usable : 0;
+}

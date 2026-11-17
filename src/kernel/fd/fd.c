@@ -340,11 +340,11 @@ int fd_sync(struct task *t, int fd) {
     return fs_sync() ? 0 : ABI_EIO;
 }
 
-int fd_utimens(struct task *t, int fd, int64_t mtime) {
+int fd_utimens(struct task *t, int fd, int64_t atime, int64_t mtime) {
     struct kobject *o = fd_get_checked(t, fd, KOBJ_FILE, 0);
     if (!o) return FD_EBADF;
     struct file *f = (struct file *)o;
-    int r = fs_node_utimens(f->node, mtime);
+    int r = fs_node_utimens(f->node, atime, mtime);
     kobject_put(o);
     return r;
 }
@@ -676,6 +676,11 @@ static int64_t file_lseek(struct kobject *o, int64_t off, int whence) {
 
 static int file_close(struct kobject *o) {
     struct file *f = (struct file *)o;
+    if (f->node) {
+        struct task *t = task_current();
+        fs_lock_release(t ? t->pid : 0, fs_node_lock_key(f->node));
+        fs_node_released(f->node);
+    }
     fs_node_unref(f->node);
     return 0;
 }
@@ -820,6 +825,7 @@ static int console_wait_readable(struct kobject *o) {
 
     int r;
     for (;;) {
+        uint64_t epoch = task_chan_epoch();
         if (task_sig_pending()) {
             if (rflags & 0x200) __asm__ volatile("sti" ::: "memory");
             return FD_EINTR;
@@ -831,7 +837,7 @@ static int console_wait_readable(struct kobject *o) {
         }
         if (owner != me && !(owner && task_in_pgrp(owner))) { r = FD_EIO; break; }
         if (tty_input_ready()) { r = 0; break; }
-        task_wait(keyboard_wait_chan(), 0);
+        task_wait_epoch(keyboard_wait_chan(), 0, epoch);
     }
 
     if (rflags & 0x200) __asm__ volatile("sti" ::: "memory");
@@ -1223,7 +1229,8 @@ int fd_open(struct task *t, const char *path, uint32_t oflags) {
 
     kobject_init(&f->obj, KOBJ_FILE, FD_RIGHTS_ALL, &file_ops);
     f->node = fs_node_ref(&node);
-    if (!f->node) { kfree(f); return FD_ENOSPC; }
+    if (!f->node) { kobject_release_mem(&f->obj); return FD_ENOSPC; }
+    fs_node_opened(f->node);
     f->pos = 0;
     f->writable = (oflags & FD_OPEN_MODE) != FD_OPEN_READ;
     f->append = (oflags & FD_OPEN_APPEND) != 0;

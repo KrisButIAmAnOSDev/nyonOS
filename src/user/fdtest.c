@@ -22,6 +22,25 @@ static void ck(slong got, slong want) {
     else bad(got, want);
 }
 
+struct fl {
+    short type;
+    short whence;
+    long long start;
+    long long len;
+    int pid;
+    int pad;
+};
+
+static void zeromem(void *p, int n) {
+    unsigned char *b = (unsigned char *)p;
+    for (int i = 0; i < n; i++) b[i] = 0;
+}
+
+static void ck_true(int c) {
+    if (c) ok();
+    else bad(0, 1);
+}
+
 static void itoa(char *out, int v) {
     char tmp[12];
     int n = 0;
@@ -281,7 +300,13 @@ int main(void) {
         ck(sys_read(0, buf, 8), EAGAIN);
         attr.c_lflag &= ~2u;
         ck(sys_tcsetattr(0, 0, &attr), 0);
-        ck(sys_read(0, buf, 8), 7);
+        int rawgot = 0;
+        while (rawgot < 7) {
+            slong rr = sys_read(0, buf + rawgot, 8u - (unsigned)rawgot);
+            if (rr <= 0) break;
+            rawgot += (int)rr;
+        }
+        ck(rawgot, 7);
         buf[7] = 0;
         ck(streq(buf, "rawmode"), 1);
         attr.c_lflag |= 2u;
@@ -411,6 +436,67 @@ int main(void) {
     uintptr_t cst = 0;
     ck(sys_waitpid((int32_t)cpid, (uintptr_t)&cst, 0), (slong)cpid);
     ck(cst, 0);
+
+    {
+        int lfd = (int)sys_open("/LOCK.TXT", O_RDWR | O_CREAT | O_TRUNC);
+        ck_true(lfd >= 0);
+        if (lfd >= 0) {
+            struct fl fl;
+            zeromem(&fl, sizeof fl);
+            fl.type = 1;
+            fl.whence = 0;
+            fl.start = 0;
+            fl.len = 16;
+            ck(sys_fcntl(lfd, 6, (uint64_t)(uintptr_t)&fl), 0);
+
+            struct fl gl;
+            zeromem(&gl, sizeof gl);
+            gl.type = 2;
+            gl.whence = 0;
+            gl.start = 0;
+            gl.len = 16;
+            ck(sys_fcntl(lfd, 5, (uint64_t)(uintptr_t)&gl), 0);
+            ck(gl.type, 2);
+
+            uint32_t cpid = 0;
+            slong cpidv = sys_fork((uint32_t *)&cpid);
+            ck_true(cpidv >= 0);
+            if (cpidv == 0) {
+                int cfd = (int)sys_open("/LOCK.TXT", O_RDWR);
+                struct fl cg;
+                zeromem(&cg, sizeof cg);
+                cg.type = 2;
+                cg.whence = 0;
+                cg.start = 0;
+                cg.len = 16;
+                sys_fcntl(cfd, 5, (uint64_t)(uintptr_t)&cg);
+                if (cg.type != 1) { sys_close(cfd); sys_exit(2); }
+                struct fl cf;
+                zeromem(&cf, sizeof cf);
+                cf.type = 1;
+                cf.whence = 0;
+                cf.start = 0;
+                cf.len = 16;
+                slong cr = sys_fcntl(cfd, 6, (uint64_t)(uintptr_t)&cf);
+                sys_close(cfd);
+                sys_exit(cr == 0 ? 0 : 1);
+            }
+            if (cpidv > 0) {
+                uintptr_t cst = 0;
+                ck(sys_waitpid((int32_t)cpid, (uintptr_t)&cst, 0), (slong)cpid);
+                ck(cst, 256);
+
+                zeromem(&fl, sizeof fl);
+                fl.type = 2;
+                fl.whence = 0;
+                fl.start = 0;
+                fl.len = 16;
+                ck(sys_fcntl(lfd, 6, (uint64_t)(uintptr_t)&fl), 0);
+                ck(sys_unlinkat(AT_FDCWD, "/LOCK.TXT", 0), 0);
+            }
+            ck(sys_close(lfd), 0);
+        }
+    }
 
 done:
     res[RES_DONE] = failed ? RES_FAILED : RES_ALLPASS;

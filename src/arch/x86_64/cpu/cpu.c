@@ -1,4 +1,5 @@
 #include "cpu.h"
+#include "kernel/lib/string.h"
 #include "kernel/kprintf/kprintf.h"
 #include "arch/x86_64/syscall/syscall_msr.h"
 #include "kernel/mm/vmm/vmm.h"
@@ -260,6 +261,11 @@ struct percpu *cpu_self(void) {
 }
 
 uint32_t cpu_id(void) { return cpu_self()->processor_id; }
+
+struct percpu *cpu_percpu_at(uint32_t id) {
+    if (id >= MAX_CPUS) id = 0;
+    return &percpu_table[id];
+}
 uint32_t cpu_count(void) { return detected_cpus; }
 
 uint32_t cpu_online_count(void) {
@@ -392,4 +398,43 @@ const char *cpu_paging_mode_name(void) {
 int cpu_paging_mode_matches(void) {
     const char *want = cpu_paging_mode_name();
     return vmm_5level ? (want[0] == '5') : (want[0] == '4');
+}
+
+void cpu_vendor_string(char *buf, size_t cap) {
+    if (!buf || cap == 0) return;
+    uint32_t a, b, c, d;
+    do_cpuid(0, 0, &a, &b, &c, &d);
+    uint32_t words[3] = {b, d, c};
+    const char *s = (const char *)words;
+    size_t n = 12;
+    while (n > 0 && s[n - 1] == ' ') n--;
+    if (n >= cap) n = cap - 1;
+    memcpy(buf, s, n);
+    buf[n] = 0;
+}
+
+void cpu_brand_string(char *buf, size_t cap) {
+    if (!buf || cap == 0) return;
+    uint32_t a, b, c, d;
+    do_cpuid(0x80000000u, 0, &a, &b, &c, &d);
+    if (a < 0x80000004u) {
+        cpu_vendor_string(buf, cap);
+        return;
+    }
+    uint32_t words[12];
+    uint32_t *p = words;
+    for (uint32_t leaf = 0x80000002u; leaf <= 0x80000004u; leaf++) {
+        do_cpuid(leaf, 0, &a, &b, &c, &d);
+        *p++ = a;
+        *p++ = b;
+        *p++ = c;
+        *p++ = d;
+    }
+    const char *s = (const char *)words;
+    size_t n = 0;
+    while (n < 48 && s[n]) n++;
+    while (n > 0 && s[n - 1] == ' ') n--;
+    if (n >= cap) n = cap - 1;
+    memcpy(buf, s, n);
+    buf[n] = 0;
 }

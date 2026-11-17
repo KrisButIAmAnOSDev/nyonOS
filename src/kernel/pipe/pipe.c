@@ -6,6 +6,7 @@
 #include "kernel/sync/sync.h"
 #include "kernel/multitask/task.h"
 #include "kernel/uaccess/uaccess.h"
+#include "arch/x86_64/pit/pit.h"
 
 static spinlock_t pipe_lock = SPINLOCK_INIT;
 
@@ -139,7 +140,7 @@ static int pipe_wait_readable(struct kobject *o) {
     __asm__ volatile("pushfq; pop %0; cli" : "=r"(rflags) :: "memory");
 
     for (;;) {
-        uint64_t seen = task_wait_gen();
+        uint64_t seen = task_chan_epoch();
         if (task_sig_pending()) {
             if (rflags & 0x200) __asm__ volatile("sti" ::: "memory");
             return FD_EINTR;
@@ -148,7 +149,7 @@ static int pipe_wait_readable(struct kobject *o) {
         bool ready = p->count > 0 || p->write_ends == 0;
         lock_release(LOCK_PIPE, &pipe_lock);
         if (ready) break;
-        task_wait_since(&p->chan, seen);
+        task_wait_epoch(&p->chan, pit_get_ticks() + 50, seen);
     }
 
     if (rflags & 0x200) __asm__ volatile("sti" ::: "memory");
@@ -163,7 +164,7 @@ static int pipe_wait_writable(struct kobject *o) {
     __asm__ volatile("pushfq; pop %0; cli" : "=r"(rflags) :: "memory");
 
     for (;;) {
-        uint64_t seen = task_wait_gen();
+        uint64_t seen = task_chan_epoch();
         if (task_sig_pending()) {
             if (rflags & 0x200) __asm__ volatile("sti" ::: "memory");
             return FD_EINTR;
@@ -172,7 +173,7 @@ static int pipe_wait_writable(struct kobject *o) {
         bool ready = (p->cap - p->count) > 0 || p->read_ends == 0;
         lock_release(LOCK_PIPE, &pipe_lock);
         if (ready) break;
-        task_wait_since(&p->chan, seen);
+        task_wait_epoch(&p->chan, pit_get_ticks() + 50, seen);
     }
 
     if (rflags & 0x200) __asm__ volatile("sti" ::: "memory");

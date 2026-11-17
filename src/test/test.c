@@ -544,7 +544,10 @@ static const char *const c_fd_labels[C_CHECKS] = {
     "cloexec fds close cleanly",
     "fork before the exec cloexec check",
     "the exec child is reaped",
-    "exec keeps inheritable fds and drops cloexec ones"
+    "exec keeps inheritable fds and drops cloexec ones",
+    "lock file opened", "lock write lock ok", "getlk ok", "getlk reports the lock",
+    "child forked", "child waitpid ok", "child blocked by the lock",
+    "unlock ok", "lock file removed", "lock file closed",
 };
 
 void fd_test(void) {
@@ -868,6 +871,136 @@ void fd2_test(void) {
     }
 
     kprintf(PRINT_SERIAL, "FD2 ring3: %d of %d checks passed: ", checks_run - bad, checks_run);
+    kprintchar(bad == 0 ? 'Y' : 'N', PRINT_SERIAL);
+    kprintf(PRINT_SERIAL, "\n");
+
+    pmm_free(phys, 1);
+}
+
+void mmap_test(void) {
+    fs_node_t node;
+    if (!fs_lookup("/BIN/MMAPTEST", &node) && !fs_lookup("/BIN/mmaptest", &node)) {
+        kprintf(PRINT_SERIAL, "MMAP ring3: /BIN/mmaptest not found\n");
+        return;
+    }
+
+    paddr_t phys;
+    if (!pmm_alloc(&phys, 1)) { kprintf(PRINT_SERIAL, "MMAP ring3: alloc failed\n"); return; }
+
+    volatile uint64_t *res = (volatile uint64_t *)(vmm_hhdm_offset + phys);
+    for (int i = 0; i < C_RES_SLOTS; i++) res[i] = 0xdeadbeefdeadbeefULL;
+
+    struct elf_shared shared = { .phys = phys, .virt = C_RES_VIRT, .pages = 1, .owned_by_loader = false };
+
+    struct elf_image img;
+    const char *err = NULL;
+    int r = elf_load_shared(&node, &img, &err, NULL, 0, &shared);
+    if (r) {
+        pmm_free(phys, 1);
+        kprintf(PRINT_SERIAL, "MMAP ring3: load refused: %s\n", err ? err : "?");
+        return;
+    }
+
+    struct task *t = task_spawn_vmspace("ring3mmap", img.vs, img.entry, img.stack_top);
+    elf_destroy(&img);
+    if (!t) {
+        pmm_free(phys, 1);
+        kprintf(PRINT_SERIAL, "MMAP ring3: spawn failed\n");
+        return;
+    }
+
+    uint32_t pid = t->pid;
+    for (int i = 0; i < 600 && res[C_RES_DONE] == 0xdeadbeefdeadbeefULL && task_find_pid(pid); i++) pit_sleep(5);
+
+    bool ran = res[C_RES_DONE] != 0xdeadbeefdeadbeefULL;
+    for (int i = 0; i < 400 && task_find_pid(pid); i++) pit_sleep(5);
+    task_reap_now();
+
+    if (!ran) {
+        kprintf(PRINT_SERIAL, "MMAP ring3: the test never reported\n");
+        pmm_free(phys, 1);
+        return;
+    }
+
+    int checks_run = 0, bad = 0;
+    for (int i = 0; i < C_MAX_CHECKS; i++) {
+        if (res[C_RES_CHECK_BASE + i] == 0xdeadbeefdeadbeefULL) break;
+        checks_run++;
+        if (res[C_RES_CHECK_BASE + i] == 1) continue;
+        bad++;
+        kprintf(PRINT_SERIAL, "    FAIL mmap check %d: got %lld, wanted %lld\n", i,
+                (long long)res[C_RES_FAIL_BASE + i], (long long)res[C_RES_GOT_BASE + i]);
+    }
+
+    kprintf(PRINT_SERIAL, "MMAP ring3: %d of %d checks passed: ", checks_run - bad, checks_run);
+    kprintchar(bad == 0 ? 'Y' : 'N', PRINT_SERIAL);
+    kprintf(PRINT_SERIAL, "\n");
+
+    pmm_free(phys, 1);
+}
+
+void procfs_test(void) {
+    fs_node_t node;
+    const char *exe_path = "/BIN/procfstest";
+    if (!fs_lookup("/BIN/PROCfstest", &node)) {
+        if (!fs_lookup("/BIN/procfstest", &node)) {
+            kprintf(PRINT_SERIAL, "PROCFS ring3: /BIN/procfstest not found\n");
+            return;
+        }
+    } else {
+        exe_path = "/BIN/PROCfstest";
+    }
+
+    paddr_t phys;
+    if (!pmm_alloc(&phys, 1)) { kprintf(PRINT_SERIAL, "PROCFS ring3: alloc failed\n"); return; }
+
+    volatile uint64_t *res = (volatile uint64_t *)(vmm_hhdm_offset + phys);
+    for (int i = 0; i < C_RES_SLOTS; i++) res[i] = 0xdeadbeefdeadbeefULL;
+
+    struct elf_shared shared = { .phys = phys, .virt = C_RES_VIRT, .pages = 1, .owned_by_loader = false };
+
+    struct elf_image img;
+    const char *err = NULL;
+    int r = elf_load_shared(&node, &img, &err, NULL, 0, &shared);
+    if (r) {
+        pmm_free(phys, 1);
+        kprintf(PRINT_SERIAL, "PROCFS ring3: load refused: %s\n", err ? err : "?");
+        return;
+    }
+
+    struct task *t = task_spawn_vmspace("ring3proc", img.vs, img.entry, img.stack_top);
+    task_set_exe_path(t, exe_path);
+    elf_destroy(&img);
+    if (!t) {
+        pmm_free(phys, 1);
+        kprintf(PRINT_SERIAL, "PROCFS ring3: spawn failed\n");
+        return;
+    }
+
+    uint32_t pid = t->pid;
+    for (int i = 0; i < 600 && res[C_RES_DONE] == 0xdeadbeefdeadbeefULL && task_find_pid(pid); i++) pit_sleep(5);
+
+    bool ran = res[C_RES_DONE] != 0xdeadbeefdeadbeefULL;
+    for (int i = 0; i < 400 && task_find_pid(pid); i++) pit_sleep(5);
+    task_reap_now();
+
+    if (!ran) {
+        kprintf(PRINT_SERIAL, "PROCFS ring3: the test never reported\n");
+        pmm_free(phys, 1);
+        return;
+    }
+
+    int checks_run = 0, bad = 0;
+    for (int i = 0; i < C_MAX_CHECKS; i++) {
+        if (res[C_RES_CHECK_BASE + i] == 0xdeadbeefdeadbeefULL) break;
+        checks_run++;
+        if (res[C_RES_CHECK_BASE + i] == 1) continue;
+        bad++;
+        kprintf(PRINT_SERIAL, "    FAIL procfs check %d: got %lld, wanted %lld\n", i,
+                (long long)res[C_RES_FAIL_BASE + i], (long long)res[C_RES_GOT_BASE + i]);
+    }
+
+    kprintf(PRINT_SERIAL, "PROCFS ring3: %d of %d checks passed: ", checks_run - bad, checks_run);
     kprintchar(bad == 0 ? 'Y' : 'N', PRINT_SERIAL);
     kprintf(PRINT_SERIAL, "\n");
 
@@ -1809,7 +1942,15 @@ void sys_test(void) {
         "fstatat TEST.TXT ok", "size 3000", "regular file",
         "fstatat missing is ENOENT",
         "readlink EINVAL", "symlink ok", "symlink readlink ok", "symlink unlink ok",
-        "link EOPNOTSUPP",
+        "link ok", "link shares inode", "link unlink ok",
+        "create rename source", "write rename source", "close rename source",
+        "rename ok", "old name gone", "new name stat ok", "renamed size",
+        "rename cleanup",
+        "chown ok", "chown uid reported", "chown gid reported", "chown restore",
+        "utimensat ok",
+        "open for unlink-while-open", "write before unlink", "unlink while open",
+        "name gone after unlink", "seek fd ok", "read through unlinked fd",
+        "unlinked fd content", "close unlinked fd",
         "chmod 0400 ok", "write access denied", "chmod 0600 ok", "write access ok",
         "open TEST.TXT", "fchmod 0400", "fchmod 0600", "close",
         "read ext2 hello.txt", "ext2 write", "ext2 close write",

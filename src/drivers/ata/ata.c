@@ -406,12 +406,14 @@ static bool ata_pio(uint16_t base, uint8_t sel, uint8_t cmd, uint32_t lba, uint1
             return false;
         }
 
-        for (int i = 0; i < ATA_SECTOR_SIZE / 2; i++) {
-            if (writing) {
-                outw(base + REG_DATA, data[s * (ATA_SECTOR_SIZE / 2) + i]);
-            } else {
-                data[s * (ATA_SECTOR_SIZE / 2) + i] = inw(base + REG_DATA);
-            }
+        uint16_t *word = data + s * (ATA_SECTOR_SIZE / 2);
+        uint16_t nwords = ATA_SECTOR_SIZE / 2;
+        if (writing) {
+            __asm__ volatile("rep outsw" :: "S"(word), "c"(nwords), "d"(base + REG_DATA)
+                             : "memory");
+        } else {
+            __asm__ volatile("rep insw" : "+D"(word), "+c"(nwords) : "d"(base + REG_DATA)
+                             : "memory");
         }
         io_wait();
     }
@@ -470,8 +472,6 @@ static bool transfer(int drive, uint32_t lba, uint16_t count, void *buf, bool wr
         if (!ok) break;
         done += n;
     }
-
-    if (ok && writing) ok = ata_flush(base, head_for(drive));
 
     lock_release(LOCK_ATA, &ata_lock);
     return ok;

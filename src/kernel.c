@@ -17,6 +17,7 @@
 #include "kernel/crypto/crypto.h"
 #include "kernel/exec/elf.h"
 #include "kernel/mm/vmm/vmspace.h"
+#include "kernel/vfs/vfs.h"
 #include "kernel/pipe/pipe.h"
 #include "kernel/mm/pmm/pmm.h"
 #include "kernel/mm/heap/heap.h"
@@ -456,6 +457,7 @@ void kmain(void) {
     if (!mount_primary_ext2())
         kprintf(PRINT_SERIAL, "  no ext2 volume found\n");
     devfs_init();
+    proc_init();
 
     fs_test();
 
@@ -548,6 +550,8 @@ void kmain(void) {
             timed_test("pipe", pipe_test);
             timed_test("fsw", fswrite_test);
             timed_test("fd2", fd2_test);
+            timed_test("mmap", mmap_test);
+            timed_test("procfs", procfs_test);
             timed_test("futex", futex_pair_test);
             timed_test("exec", exectest_run);
             timed_test("mandel", mandel_run);
@@ -579,6 +583,7 @@ void kmain(void) {
         elf_run_test();
         test_time_end("elf_run", er_start);
     }
+
 
     {
         uint32_t n = cpu_count();

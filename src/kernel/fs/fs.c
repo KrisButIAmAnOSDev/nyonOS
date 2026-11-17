@@ -551,6 +551,10 @@ static bool root_node(fs_node_t *out) {
     out->is_dir = true;
     out->is_root = true;
     out->ops = &fat_ops;
+    out->cache_key = 0;
+    out->mode = 0;
+    out->uid = 0;
+    out->gid = 0;
     return true;
 }
 
@@ -600,6 +604,10 @@ static void dir_node(fs_node_t *out, uint32_t cluster) {
     out->dir_index = 0;
     out->ops = &fat_ops;
     out->dev_id = 0;
+    out->cache_key = 0;
+    out->mode = 0;
+    out->uid = 0;
+    out->gid = 0;
 }
 
 static int fs_resolve_parent(const char *path, fs_node_t *parent, char *name,
@@ -916,7 +924,8 @@ static void fat_stamp(int64_t unix_sec, uint16_t *out_time, uint16_t *out_date) 
     *out_date = (uint16_t)(((year - 1980) << 9) | (month << 5) | day);
 }
 
-static int fs_node_utimens_inner(fs_node_t *node, int64_t mtime) {
+static int fs_node_utimens_inner(fs_node_t *node, int64_t atime, int64_t mtime) {
+    (void)atime;
     if (!node || node->is_root) return 0;
 
     fs_node_t parent;
@@ -939,19 +948,19 @@ static int fs_node_utimens_inner(fs_node_t *node, int64_t mtime) {
     return sector_write(lba, buf) ? 0 : ABI_EIO;
 }
 
-static int fat_node_utimens(fs_node_t *node, int64_t mtime) {
+static int fat_node_utimens(fs_node_t *node, int64_t atime, int64_t mtime) {
     lock_acquire(LOCK_FS, &fs_lock);
-    int r = fs_node_utimens_inner(node, mtime);
+    int r = fs_node_utimens_inner(node, atime, mtime);
     lock_release(LOCK_FS, &fs_lock);
     return r;
 }
 
-static int fat_utimens(const char *path, int64_t mtime) {
+static int fat_utimens(const char *path, int64_t atime, int64_t mtime) {
     fs_node_t node;
     if (!fs.mounted) return ABI_EIO;
     bool ok = fat_lookup(path, &node);
     if (!ok) return ABI_ENOENT;
-    return fat_node_utimens(&node, mtime);
+    return fat_node_utimens(&node, atime, mtime);
 }
 
 static int fs_node_resize_inner(fs_node_t *node, uint32_t size) {
@@ -1372,6 +1381,21 @@ static int fat_symlink(const char *target, const char *path, fs_node_t *out) {
     return ABI_EOPNOTSUPP;
 }
 
+static int fat_link(const char *oldpath, const char *newpath) {
+    (void)oldpath; (void)newpath;
+    return ABI_EOPNOTSUPP;
+}
+
+static int fat_rename(const char *oldpath, const char *newpath) {
+    (void)oldpath; (void)newpath;
+    return ABI_EOPNOTSUPP;
+}
+
+static int fat_chown(fs_node_t *node, int uid, int gid) {
+    (void)node; (void)uid; (void)gid;
+    return ABI_EROFS;
+}
+
 static int fat_unlink(const char *path) {
     return fs_unlink_inner(path, false);
 }
@@ -1405,4 +1429,7 @@ const struct fs_ops fat_ops = {
     .sync = fat_sync,
     .chmod = fat_chmod,
     .symlink = fat_symlink,
+    .link = fat_link,
+    .rename = fat_rename,
+    .chown = fat_chown,
 };

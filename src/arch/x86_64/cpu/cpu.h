@@ -52,6 +52,9 @@ struct percpu {
     bool sched_enabled;
     uint64_t switch_count;
     uint64_t resched_count;
+    uint64_t busy_ticks;
+    uint64_t idle_ticks;
+    uint64_t last_switch_tick;
     volatile uint64_t wake_seq;
     uint64_t earliest_wake;
     uint64_t syscall_kstack_top;
@@ -70,6 +73,8 @@ struct percpu {
 
 void cpu_detect(void);
 const struct cpu_features *cpu_features_get(void);
+void cpu_vendor_string(char *buf, size_t cap);
+void cpu_brand_string(char *buf, size_t cap);
 
 bool cpu_has_nx(void);
 bool cpu_has_smep(void);
@@ -102,6 +107,7 @@ void cpu_set_lapic_base(uint64_t virt);
 void cpu_bootstrap_ap(uint32_t processor_id, uint32_t lapic_id, uint64_t hhdm_offset);
 void cpu_set_detected(uint32_t n);
 struct percpu *cpu_self(void);
+struct percpu *cpu_percpu_at(uint32_t id);
 size_t cpu_current_slot_of(uint32_t id);
 uint64_t cpu_resched_count(uint32_t id);
 uint32_t cpu_lapic_id(uint32_t id);

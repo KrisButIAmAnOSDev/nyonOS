@@ -17,7 +17,7 @@ USER_LDFLAGS = -nostdlib -static-pie -pie -z noexecstack -T user.ld
 BINS = bin/hello bin/fdtest bin/mmtest bin/forktest bin/pipetest bin/fstest bin/fd2test bin/evtest bin/fbtest bin/devtest
 
 ifneq ($(NYONOS_MLIBC_CC),)
-BINS += bin/mhello bin/sdtest bin/thrtest bin/clktest bin/proctest bin/featest bin/mandel bin/exectest bin/fdprobe bin/sigtest bin/systest bin/asynctest bin/tlstest
+BINS += bin/mmaptest bin/procfstest bin/mhello bin/sdtest bin/thrtest bin/clktest bin/proctest bin/featest bin/mandel bin/exectest bin/fdprobe bin/sigtest bin/systest bin/asynctest bin/tlstest
 endif
 
 -include $(BINS:=.o)
@@ -42,6 +42,14 @@ bin/mhello: mlibc_hello.c $(MLIBC_LD) $(MLIBC_LD_LINK)
 bin/fdprobe: fdprobe.c $(MLIBC_LD) $(MLIBC_LIBC) $(MLIBC_LD_LINK)
 	mkdir -p "$(dir $@)"
 	$(MLIBC_CC_RUN) -static -T$(MLIBC_LD) -z max-page-size=0x1000 -s $< -o $@
+
+bin/mmaptest: mmaptest.c $(MLIBC_LD) $(MLIBC_LIBC) $(MLIBC_LD_LINK)
+	mkdir -p "$(dir $@)"
+	$(MLIBC_CC_RUN) -static -T$(MLIBC_LD) -z max-page-size=0x1000 -I$(CURDIR)/../abi -s $< -o $@
+
+bin/procfstest: procfstest.c $(MLIBC_LD) $(MLIBC_LIBC) $(MLIBC_LD_LINK)
+	mkdir -p "$(dir $@)"
+	$(MLIBC_CC_RUN) -static -T$(MLIBC_LD) -z max-page-size=0x1000 -I$(CURDIR)/../abi -s $< -o $@
 
 bin/sdtest: sdtest.c $(MLIBC_LD) $(MLIBC_LIBC) $(MLIBC_LD_LINK)
 	mkdir -p "$(dir $@)"

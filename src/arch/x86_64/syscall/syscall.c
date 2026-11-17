@@ -2,6 +2,7 @@
 #include "kernel/lib/string.h"
 #include "arch/x86_64/cpu/cpu.h"
 #include "kernel/mm/vmm/vmm.h"
+#include "kernel/mm/pagecache/pcache.h"
 #include "kernel/tty/tty.h"
 #include "kernel/exec/elf.h"
 #include "syscall.h"
@@ -292,6 +293,7 @@ static int64_t sys_execve(uintptr_t path, uintptr_t uargv, uintptr_t uenvp) {
 
     exec_free_vec(argv);
     exec_free_vec(envp);
+    task_set_exe_path(t, kpath);
 
     kprintf(PRINT_SERIAL, "EXECDBG %s entry=%llx sp=%llx argc=%u\n", kpath,
             (unsigned long long)img.entry, (unsigned long long)img.stack_top,
@@ -480,25 +482,29 @@ static int64_t sys_sync(void) {
 
 static int64_t sys_utimensat(int dirfd, uintptr_t path, uintptr_t times, int flags) {
     (void)flags;
-    if (!times) return SYS_EINVAL;
 
-    struct sys_timespec2 tv;
-    if (in_user()) {
-        if (!copyin(&tv, (const void *)times, sizeof(tv))) return SYS_EFAULT;
-    } else {
-        tv = *(const struct sys_timespec2 *)times;
+    int64_t a = -1, m = -1;
+    if (times) {
+        struct sys_timespec2 tv;
+        if (in_user()) {
+            if (!copyin(&tv, (const void *)times, sizeof(tv))) return SYS_EFAULT;
+        } else {
+            tv = *(const struct sys_timespec2 *)times;
+        }
+        a = tv.asec;
+        m = tv.msec;
     }
 
     if (path) {
         char kpath[256];
         int cp_err = copy_path_resolved(path, kpath, sizeof kpath);
-    if (cp_err < 0) return cp_err;
-        return (int64_t)fs_utimens(kpath, tv.msec);
+        if (cp_err < 0) return cp_err;
+        return (int64_t)fs_utimens(kpath, a, m);
     }
 
     struct task *t = task_current();
     if (!t) return SYS_ENOSYS;
-    return (int64_t)fd_utimens(t, dirfd, tv.msec);
+    return (int64_t)fd_utimens(t, dirfd, a, m);
 }
 
 static int64_t sys_poll(uintptr_t fds_ptr, uint32_t nfds, int32_t timeout,
@@ -699,6 +705,18 @@ static void fill_stat(struct sys_stat *out, const fs_node_t *n) {
     out->cluster = n->cluster;
     out->attr = n->attr;
     out->is_dir = n->is_dir ? 1 : 0;
+    if (n->mode) {
+        out->mode = n->mode;
+        out->uid = n->uid;
+        out->gid = n->gid;
+    } else {
+        uint32_t m = n->is_dir ? 0755 : 0644;
+        if (n->attr & FS_ATTR_READ_ONLY) m &= ~0222u;
+        out->mode = m;
+        out->uid = 0;
+        out->gid = 0;
+    }
+    out->pad = 0;
     for (unsigned i = 0; i < SYS_MAX_NAME; i++) out->name[i] = (i < FS_MAX_NAME) ? n->name[i] : 0;
 }
 
@@ -807,6 +825,56 @@ static int64_t sys_mprotect(uint64_t addr, uint64_t len, unsigned prot) {
     return 0;
 }
 
+static int64_t sys_mmap_anon(uint64_t addr, uint64_t len, unsigned prot, unsigned flags) {
+    struct task *t = task_current();
+    if (!t || !in_user()) return SYS_EINVAL;
+    if (len == 0 || len > SYS_MMAP_HI - SYS_MMAP_LO) return SYS_EINVAL;
+    if (prot & ~(ABI_MMAP_PROT_READ | ABI_MMAP_PROT_WRITE | ABI_MMAP_PROT_EXEC)) return SYS_EINVAL;
+
+    uint8_t vprot = 0;
+    if (prot & ABI_MMAP_PROT_READ) vprot |= VM_PROT_READ;
+    if (prot & ABI_MMAP_PROT_WRITE) vprot |= VM_PROT_WRITE;
+    if (prot & ABI_MMAP_PROT_EXEC) vprot |= VM_PROT_EXEC;
+
+    size_t pages = (size_t)((len + PAGE_SIZE - 1) / PAGE_SIZE);
+    size_t bytes = pages * PAGE_SIZE;
+
+    preempt_disable();
+    vaddr_t base = 0;
+    if (flags & ABI_MMAP_FIXED) {
+        if (addr & (PAGE_SIZE - 1)) { preempt_enable(); return SYS_EINVAL; }
+        base = addr;
+        struct vm_region *oldr = vm_region_find(t->vs, base);
+        if (oldr) {
+            vm_free_range(t->vs, oldr->start, oldr->end);
+            vm_region_remove(t->vs, oldr->start, oldr->end);
+        }
+    } else if (!vm_find_free(t->vs, SYS_MMAP_LO, SYS_MMAP_HI, bytes, &base)) {
+        preempt_enable();
+        return SYS_ENOMEM;
+    }
+    if (vm_region_add(t->vs, base, base + bytes, vprot, VM_BACKING_ANON) != 0) {
+        preempt_enable();
+        return SYS_ENOMEM;
+    }
+    if (!vm_map_anon_zeroed(t->vs, base, pages, vprot, true)) {
+        vm_region_remove(t->vs, base, base + bytes);
+        preempt_enable();
+        return SYS_ENOMEM;
+    }
+    preempt_enable();
+    return (int64_t)base;
+}
+
+static int64_t sys_mmap_file(uint64_t addr, uint64_t len, unsigned prot,
+                             unsigned flags, int fd, int64_t offset);
+
+static int64_t sys_mmap_ext(uint64_t addr, uint64_t len, unsigned prot, unsigned flags,
+                            int fd, int64_t offset) {
+    if (fd < 0) return sys_mmap_anon(addr, len, prot, flags);
+    return sys_mmap_file(addr, len, prot, flags, fd, offset);
+}
+
 static int64_t sys_mmap(uint64_t len, unsigned prot, unsigned flags) {
     struct task *t = task_current();
     if (!t || !in_user()) return SYS_EINVAL;
@@ -841,6 +909,316 @@ static int64_t sys_mmap(uint64_t len, unsigned prot, unsigned flags) {
     return (int64_t)base;
 }
 
+static int64_t sys_mmap_file(uint64_t addr, uint64_t len, unsigned prot, unsigned flags,
+                             int fd, int64_t offset) {
+    struct task *t = task_current();
+    if (!t || !in_user()) return SYS_EINVAL;
+    if (len == 0 || len > SYS_MMAP_HI - SYS_MMAP_LO) return SYS_EINVAL;
+    if (offset < 0) return SYS_EINVAL;
+    if (offset % PAGE_SIZE) return SYS_EINVAL;
+    if (prot & ~(ABI_MMAP_PROT_READ | ABI_MMAP_PROT_WRITE | ABI_MMAP_PROT_EXEC)) return SYS_EINVAL;
+    if ((prot & ABI_MMAP_PROT_WRITE) && !(prot & ABI_MMAP_PROT_READ)) return SYS_EINVAL;
+
+    bool shared = (flags & ABI_MMAP_SHARED) != 0;
+    bool private_map = (flags & ABI_MMAP_PRIVATE) != 0;
+    if (shared == private_map) return SYS_EINVAL;
+
+    struct kobject *o = fd_get_checked(t, fd, KOBJ_FILE, 0);
+    if (!o) return SYS_EBADF;
+    struct file *f = (struct file *)o;
+    fs_node_t node = *f->node;
+    kobject_put(o);
+
+    if (node.is_dir) return SYS_EINVAL;
+    if (!node.cache_key) return SYS_EOPNOTSUPP;
+
+    struct pcache_file *c = pcache_acquire(&node);
+    if (!c) return SYS_ENOMEM;
+
+    size_t pages = (size_t)((len + PAGE_SIZE - 1) / PAGE_SIZE);
+    uint32_t first_page = (uint32_t)(offset / PAGE_SIZE);
+
+    paddr_t *phys = kmalloc(sizeof(paddr_t) * pages);
+    uint8_t *own_flag = kmalloc(pages);
+    if (!phys || !own_flag) {
+        if (phys) kfree(phys);
+        if (own_flag) kfree(own_flag);
+        pcache_release(c);
+        return SYS_ENOMEM;
+    }
+    memset(phys, 0, sizeof(paddr_t) * pages);
+    memset(own_flag, 0, pages);
+
+    uint8_t vprot = 0;
+    if (prot & ABI_MMAP_PROT_READ) vprot |= VM_PROT_READ;
+    if (prot & ABI_MMAP_PROT_WRITE) vprot |= VM_PROT_WRITE;
+    if (prot & ABI_MMAP_PROT_EXEC) vprot |= VM_PROT_EXEC;
+
+    for (size_t i = 0; i < pages; i++) {
+        uint32_t idx = first_page + (uint32_t)i;
+        if (idx < c->npages) {
+            phys[i] = c->phys[idx];
+            continue;
+        }
+        paddr_t p;
+        pmm_set_tag(PMM_TAG_USER);
+        bool got = pmm_alloc(&p, 1);
+        pmm_set_tag(PMM_TAG_NONE);
+        if (!got) {
+            for (size_t j = 0; j < i; j++)
+                if (own_flag[j]) pmm_free(phys[j], 1);
+            kfree(phys);
+            kfree(own_flag);
+            pcache_release(c);
+            return SYS_ENOMEM;
+        }
+        phys[i] = p;
+        own_flag[i] = 1;
+        uint8_t *dst = (uint8_t *)(vmm_hhdm_offset + p);
+        memset(dst, 0, PAGE_SIZE);
+    }
+
+    preempt_disable();
+    vaddr_t base = 0;
+    if (flags & ABI_MMAP_FIXED) {
+        if (addr & (PAGE_SIZE - 1)) {
+            preempt_enable();
+            for (size_t j = 0; j < pages; j++)
+                if (own_flag[j]) pmm_free(phys[j], 1);
+            kfree(phys);
+            kfree(own_flag);
+            pcache_release(c);
+            return SYS_EINVAL;
+        }
+        base = addr;
+        struct vm_region *oldr = vm_region_find(t->vs, base);
+        if (oldr) {
+            vm_free_range(t->vs, oldr->start, oldr->end);
+            vm_region_remove(t->vs, oldr->start, oldr->end);
+        }
+    } else if (!vm_find_free(t->vs, SYS_MMAP_LO, SYS_MMAP_HI, pages * PAGE_SIZE, &base)) {
+        preempt_enable();
+        for (size_t j = 0; j < pages; j++)
+            if (own_flag[j]) pmm_free(phys[j], 1);
+        kfree(phys);
+        kfree(own_flag);
+        pcache_release(c);
+        return SYS_ENOMEM;
+    }
+    if (vm_region_add(t->vs, base, base + pages * PAGE_SIZE, vprot, VM_BACKING_FILE) != 0) {
+        preempt_enable();
+        for (size_t j = 0; j < pages; j++)
+            if (own_flag[j]) pmm_free(phys[j], 1);
+        kfree(phys);
+        kfree(own_flag);
+        pcache_release(c);
+        return SYS_ENOMEM;
+    }
+    bool mapped = true;
+    for (size_t i = 0; i < pages; i++) {
+        uint32_t idx = first_page + (uint32_t)i;
+        bool cowpage = !shared && idx < c->npages;
+        bool ok;
+        if (cowpage)
+            ok = vm_commit_cow(t->vs, base + i * PAGE_SIZE, phys[i], 1, vprot);
+        else
+            ok = vm_commit(t->vs, base + i * PAGE_SIZE, phys[i], 1, vprot, false);
+        if (!ok) {
+            mapped = false;
+            break;
+        }
+    }
+    preempt_enable();
+
+    if (!mapped) {
+        vm_free_range(t->vs, base, base + pages * PAGE_SIZE);
+        vm_region_remove(t->vs, base, base + pages * PAGE_SIZE);
+        for (size_t j = 0; j < pages; j++)
+            if (own_flag[j]) pmm_free(phys[j], 1);
+        kfree(phys);
+        kfree(own_flag);
+        pcache_release(c);
+        return SYS_ENOMEM;
+    }
+
+    if (shared) pcache_mark_dirty(c, first_page, (uint32_t)pages);
+
+    if (!pcache_map_add(c, node.cache_key, shared, first_page, (uint32_t)pages, base,
+                        pages, phys, own_flag)) {
+        vm_free_range(t->vs, base, base + pages * PAGE_SIZE);
+        vm_region_remove(t->vs, base, base + pages * PAGE_SIZE);
+        for (size_t j = 0; j < pages; j++)
+            if (own_flag[j]) pmm_free(phys[j], 1);
+        kfree(phys);
+        kfree(own_flag);
+        pcache_release(c);
+        return SYS_ENOMEM;
+    }
+
+    return (int64_t)base;
+}
+
+
+static int64_t sys_msync(uint64_t addr, uint64_t len, unsigned flags) {
+    (void)flags;
+    struct task *t = task_current();
+    if (!t || !in_user()) return SYS_EINVAL;
+    if (len == 0 || (addr & (PAGE_SIZE - 1))) return SYS_EINVAL;
+
+    size_t pages = (size_t)((len + PAGE_SIZE - 1) / PAGE_SIZE);
+    struct vm_region *r = vm_region_find(t->vs, addr);
+    if (!r) return SYS_EINVAL;
+    if (r->backing != VM_BACKING_FILE) return 0;
+    pcache_sync_addr(addr, pages);
+    return 0;
+}
+
+static int64_t sys_mremap(uint64_t old_addr, uint64_t old_size, uint64_t new_size,
+                          unsigned flags) {
+    struct task *t = task_current();
+    if (!t || !in_user()) return SYS_EINVAL;
+    if (old_size == 0 || new_size == 0) return SYS_EINVAL;
+    if (old_addr & (PAGE_SIZE - 1)) return SYS_EINVAL;
+    if (old_size % PAGE_SIZE || new_size % PAGE_SIZE) return SYS_EINVAL;
+
+    struct vm_region *r = vm_region_find(t->vs, old_addr);
+    if (!r) return SYS_EINVAL;
+    if (r->start != old_addr || r->end != old_addr + old_size) return SYS_EINVAL;
+
+    size_t oldpages = old_size / PAGE_SIZE;
+    size_t newpages = new_size / PAGE_SIZE;
+    if (newpages == oldpages) return (int64_t)old_addr;
+
+    struct pcache_map m;
+    bool filed = (r->backing == VM_BACKING_FILE);
+    if (filed && !pcache_map_info(old_addr, &m)) return SYS_EINVAL;
+
+    if (newpages < oldpages) {
+        preempt_disable();
+        vm_free_range(t->vs, old_addr + newpages * PAGE_SIZE, old_addr + old_size);
+        r->end = old_addr + new_size;
+        preempt_enable();
+
+        if (filed) {
+            paddr_t *phys = kmalloc(sizeof(paddr_t) * newpages);
+            uint8_t *flag = kmalloc(newpages);
+            if (phys && flag) {
+                memcpy(phys, m.phys, sizeof(paddr_t) * newpages);
+                memcpy(flag, m.own_flag, newpages);
+                pcache_map_update(old_addr, old_addr, oldpages, newpages, phys, flag);
+            } else {
+                if (phys) kfree(phys);
+                if (flag) kfree(flag);
+            }
+        }
+        return (int64_t)old_addr;
+    }
+
+    bool maymove = (flags & ABI_MREMAP_MAYMOVE) != 0;
+    vaddr_t base = old_addr;
+
+    preempt_disable();
+    if (maymove) {
+        if (!vm_find_free(t->vs, SYS_MMAP_LO, SYS_MMAP_HI, new_size, &base)) {
+            preempt_enable();
+            return SYS_ENOMEM;
+        }
+    } else {
+        struct vm_region *nxt = vm_region_find(t->vs, old_addr + old_size);
+        if (nxt && nxt->start < old_addr + new_size) {
+            preempt_enable();
+            return SYS_ENOMEM;
+        }
+    }
+
+    paddr_t *phys = kmalloc(sizeof(paddr_t) * newpages);
+    uint8_t *flag = kmalloc(newpages);
+    if (!phys || !flag) {
+        preempt_enable();
+        if (phys) kfree(phys);
+        if (flag) kfree(flag);
+        return SYS_ENOMEM;
+    }
+    memset(phys, 0, sizeof(paddr_t) * newpages);
+    memset(flag, 0, newpages);
+
+    struct pcache_file *c = filed ? m.file : NULL;
+
+    for (size_t i = 0; i < oldpages; i++) {
+        uint64_t entry = vmm_query_in(t->vs->pml4, old_addr + i * PAGE_SIZE);
+        if (!(entry & PAGE_PRESENT)) continue;
+        paddr_t p = entry & VMM_PT_ADDR_MASK;
+        phys[i] = p;
+        flag[i] = (entry & PAGE_OWNED) ? 1 : 0;
+    }
+
+    for (size_t i = oldpages; i < newpages; i++) {
+        uint32_t idx = (filed ? m.first_page : 0) + (uint32_t)i;
+        if (filed && m.shared && c && idx < c->npages) {
+            phys[i] = c->phys[idx];
+            continue;
+        }
+        paddr_t p;
+        pmm_set_tag(PMM_TAG_USER);
+        bool got = pmm_alloc(&p, 1);
+        pmm_set_tag(PMM_TAG_NONE);
+        if (!got) {
+            preempt_enable();
+            for (size_t j = oldpages; j < i; j++)
+                if (flag[j]) pmm_free(phys[j], 1);
+            kfree(phys);
+            kfree(flag);
+            return SYS_ENOMEM;
+        }
+        phys[i] = p;
+        flag[i] = 1;
+        uint8_t *dst = (uint8_t *)(vmm_hhdm_offset + p);
+        memset(dst, 0, PAGE_SIZE);
+        if (filed && c && idx < c->npages) {
+            uint8_t *src = (uint8_t *)(vmm_hhdm_offset + c->phys[idx]);
+            uint64_t foff = (uint64_t)idx * PAGE_SIZE;
+            uint64_t left = c->size > foff ? c->size - foff : 0;
+            uint32_t chunk = left > PAGE_SIZE ? PAGE_SIZE : (uint32_t)left;
+            if (chunk) memcpy(dst, src, chunk);
+        }
+    }
+
+    bool owned = (r->backing == VM_BACKING_ANON);
+    for (size_t i = 0; i < newpages; i++) {
+        if (!vm_commit(t->vs, base + i * PAGE_SIZE, phys[i], 1, r->prot, owned)) {
+            preempt_enable();
+            for (size_t j = oldpages; j < i; j++)
+                if (flag[j]) pmm_free(phys[j], 1);
+            kfree(phys);
+            kfree(flag);
+            return SYS_ENOMEM;
+        }
+    }
+
+    if (base != old_addr) {
+        vmm_unmap_keep(t->vs->pml4, old_addr, oldpages);
+        vm_region_remove(t->vs, old_addr, old_addr + old_size);
+        if (vm_region_add(t->vs, base, base + new_size, r->prot, r->backing) != 0) {
+            preempt_enable();
+            kfree(phys);
+            kfree(flag);
+            return SYS_ENOMEM;
+        }
+    } else {
+        r->end = old_addr + new_size;
+    }
+    preempt_enable();
+
+    if (filed) {
+        pcache_map_update(old_addr, base, oldpages, newpages, phys, flag);
+    } else {
+        kfree(phys);
+        kfree(flag);
+    }
+
+    return (int64_t)base;
+}
+
 static int64_t sys_munmap(uint64_t addr, uint64_t len) {
     struct task *t = task_current();
     if (!t || !in_user()) return SYS_EINVAL;
@@ -851,13 +1229,16 @@ static int64_t sys_munmap(uint64_t addr, uint64_t len) {
     if (end <= addr) return SYS_EINVAL;
 
     struct vm_region *r = vm_region_find(t->vs, addr);
-    if (!r || (r->backing != VM_BACKING_ANON && r->backing != VM_BACKING_PHYS)) return SYS_EINVAL;
+    if (!r || (r->backing != VM_BACKING_ANON && r->backing != VM_BACKING_PHYS &&
+               r->backing != VM_BACKING_FILE)) return SYS_EINVAL;
     if (r->start != addr || r->end != end) return SYS_EINVAL;
 
     preempt_disable();
     vm_free_range(t->vs, addr, end);
     vm_region_remove(t->vs, addr, end);
     preempt_enable();
+
+    pcache_map_remove(addr, pages);
     return 0;
 }
 
@@ -1155,6 +1536,50 @@ static int64_t sys_fcntl(int fd, unsigned cmd, int64_t arg) {
             if (fd_set_status(t, fd, fl)) return SYS_EBADF;
             return 0;
         }
+        case ABI_F_GETLK:
+        case ABI_F_SETLK:
+        case ABI_F_SETLKW: {
+            struct sys_flock fl;
+            if (!copyin(&fl, (const void *)(uintptr_t)arg, sizeof fl)) return SYS_EFAULT;
+            if (fl.type != ABI_F_RDLCK && fl.type != ABI_F_WRLCK && fl.type != ABI_F_UNLCK)
+                return SYS_EINVAL;
+
+            struct kobject *lo = fd_get_checked(t, fd, KOBJ_FILE, 0);
+            if (!lo) return SYS_EBADF;
+            struct file *lf = (struct file *)lo;
+            uint64_t fsize = lf->node->size;
+            uint64_t fpos = lf->pos;
+            uint64_t key = fs_node_lock_key(lf->node);
+            kobject_put(lo);
+
+            uint64_t start, end;
+            if (fl.whence == 0) start = (uint64_t)fl.start;
+            else if (fl.whence == 1) start = fpos + (uint64_t)fl.start;
+            else if (fl.whence == 2) start = fsize + (uint64_t)fl.start;
+            else return SYS_EINVAL;
+            if (fl.len == 0) end = start;
+            else if (fl.len < 0) {
+                if ((uint64_t)(-fl.len) > start) return SYS_EINVAL;
+                start -= (uint64_t)(-fl.len);
+                end = fpos;
+            } else end = start + (uint64_t)fl.len;
+
+            if (cmd == ABI_F_GETLK) {
+                int ltype = ABI_F_UNLCK;
+                uint64_t ls = 0, le = 0;
+                fs_lock_get(t->pid, key, &ltype, &ls, &le);
+                fl.type = (int16_t)ltype;
+                fl.start = (int64_t)ls;
+                fl.len = (int64_t)(le - ls);
+                fl.pid = 0;
+                if (!copyout((void *)(uintptr_t)arg, &fl, sizeof fl)) return SYS_EFAULT;
+                return 0;
+            }
+
+            int lr = fs_lock_set(t->pid, key, fl.type, start, end, cmd == ABI_F_SETLKW);
+            if (lr) return (uint64_t)(int64_t)lr;
+            return 0;
+        }
         default: return SYS_EINVAL;
     }
 }
@@ -1326,8 +1751,62 @@ static int64_t sys_symlink(uintptr_t target, uintptr_t path) {
 }
 
 static int64_t sys_link(uintptr_t oldp, uintptr_t newp) {
-    (void)oldp; (void)newp;
-    return SYS_EOPNOTSUPP;
+    char ko[256];
+    char kn[256];
+    int cp_err = copy_path_resolved(oldp, ko, sizeof ko);
+    if (cp_err < 0) return cp_err;
+    cp_err = copy_path_resolved(newp, kn, sizeof kn);
+    if (cp_err < 0) return cp_err;
+    return (int64_t)fs_link(ko, kn);
+}
+
+static int64_t sys_rename(uintptr_t oldp, uintptr_t newp) {
+    char ko[256];
+    char kn[256];
+    int cp_err = copy_path_resolved(oldp, ko, sizeof ko);
+    if (cp_err < 0) return cp_err;
+    cp_err = copy_path_resolved(newp, kn, sizeof kn);
+    if (cp_err < 0) return cp_err;
+    return (int64_t)fs_rename(ko, kn);
+}
+
+static int64_t sys_chown(uintptr_t path, int uid, int gid) {
+    char kp[256];
+    int cp_err = copy_path_resolved(path, kp, sizeof kp);
+    if (cp_err < 0) return cp_err;
+    return (int64_t)fs_chown(kp, uid, gid);
+}
+
+static int64_t sys_fchown(int fd, int uid, int gid) {
+    struct task *t = task_current();
+    if (!t) return SYS_ENOSYS;
+    struct kobject *o = fd_get_checked(t, fd, KOBJ_FILE, 0);
+    if (!o) return SYS_EBADF;
+    int r = fs_node_chown(((struct file *)o)->node, uid, gid);
+    kobject_put(o);
+    return r;
+}
+
+static int64_t sys_statfs(uintptr_t path, uintptr_t buf) {
+    (void)path;
+    if (!buf) return SYS_EFAULT;
+
+    fs_statfs_t st;
+    int r = fs_statfs(&st);
+    if (r) return r;
+
+    struct sys_statfs out;
+    memset(&out, 0, sizeof out);
+    out.total_blocks = st.total_blocks;
+    out.free_blocks = st.free_blocks;
+    out.total_inodes = st.total_inodes;
+    out.free_inodes = st.free_inodes;
+    out.block_size = st.block_size;
+    out.name_max = st.name_max;
+
+    if (in_user() && !copyout((void *)buf, &out, sizeof out)) return SYS_EFAULT;
+    if (!in_user()) *(struct sys_statfs *)buf = out;
+    return 0;
 }
 
 static int64_t sys_chmod(uintptr_t path, unsigned mode) {
@@ -1348,11 +1827,21 @@ static int64_t sys_fchmod(int fd, unsigned mode) {
 }
 
 static int64_t sys_utimes(uintptr_t path, uintptr_t times) {
-    (void)times;
+    int64_t a = -1, m = -1;
+    if (times) {
+        struct sys_timespec2 tv;
+        if (in_user()) {
+            if (!copyin(&tv, (const void *)times, sizeof(tv))) return SYS_EFAULT;
+        } else {
+            tv = *(const struct sys_timespec2 *)times;
+        }
+        a = tv.asec;
+        m = tv.msec;
+    }
     char kpath[256];
     int cp_err = copy_path_resolved(path, kpath, sizeof kpath);
     if (cp_err < 0) return cp_err;
-    return (int64_t)fs_utimens(kpath, 0);
+    return (int64_t)fs_utimens(kpath, a, m);
 }
 
 static void sig_return(struct isr_frame *frame) {
@@ -1521,6 +2010,8 @@ void syscall_init(void) {
 #define FARG2 FARG1, (uint64_t)frame->rsi
 #define FARG3 FARG2, (uint64_t)frame->rdx
 #define FARG4 FARG3, (uint64_t)frame->r10
+#define FARG5 FARG4, (uint64_t)frame->r8
+#define FARG6 FARG5, (uint64_t)frame->r9
 
 #undef X
 

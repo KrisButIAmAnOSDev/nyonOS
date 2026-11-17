@@ -25,6 +25,9 @@
     X(getpid       ,   17, int32_t, 0, N(0)) \
     X(sleep        ,   18, int32_t, 1, N(ms), unsigned ms) \
     X(mmap         ,   19, int64_t, 3, N(len,prot,flags), uint64_t len, unsigned prot, unsigned flags) \
+    X(mmap_ext     ,   91, int64_t, 6, N((ulong)addr,len,prot,flags,fd,offset), uint64_t addr, uint64_t len, unsigned prot, unsigned flags, int fd, int64_t offset) \
+    X(msync        ,   92, int32_t, 3, N((ulong)addr,len,flags), uint64_t addr, uint64_t len, unsigned flags) \
+    X(mremap       ,   93, int64_t, 4, N((ulong)old_addr,old_size,new_size,flags), uint64_t old_addr, uint64_t old_size, uint64_t new_size, unsigned flags) \
     X(munmap       ,   20, int32_t, 2, N(addr,len), uint64_t addr, uint64_t len) \
     X(clock_gettime,   21, int32_t, 2, N(clk,(ulong)ts), unsigned clk, struct sys_timespec *ts) \
     X(futex        ,   22, int32_t, 4, N((ulong)addr,op,val,(ulong)ts), uint32_t *addr, unsigned op, uint32_t val, struct sys_timespec *ts) \
@@ -90,6 +93,10 @@
     X(epoll_create1 ,   84, int32_t, 1, N(flags), unsigned flags) \
     X(epoll_ctl    ,   85, int32_t, 4, N(epfd,op,fd,(ulong)event), int epfd, int op, int fd, const struct sys_epoll_event *event) \
     X(epoll_wait   ,   86, int32_t, 4, N(epfd,(ulong)events,maxevents,timeout), int epfd, struct sys_epoll_event *events, int maxevents, int timeout) \
+    X(rename       ,   87, int32_t, 2, N((ulong)oldp,(ulong)newp), const char *oldp, const char *newp) \
+    X(chown        ,   88, int32_t, 3, N((ulong)path,uid,gid), const char *path, int uid, int gid) \
+    X(fchown       ,   89, int32_t, 3, N(fd,uid,gid), int fd, int uid, int gid) \
+    X(statfs       ,   90, int32_t, 2, N((ulong)path,(ulong)buf), const char *path, struct sys_statfs *buf) \
     X(console_write,  240, int64_t, 4, N(dest,attr,(ulong)buf,len), unsigned dest, unsigned attr, const void *buf, unsigned len) \
     X(debug_print  ,  241, int64_t, 2, N((ulong)msg,len), const char *msg, unsigned len)
 
