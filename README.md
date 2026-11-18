@@ -1,6 +1,6 @@
 # nyonOS
 
-A unstable x86_64 hobby OS kernel written from scratch. Boots via Limine on BIOS/UEFI with idk
+![A unstable x86_64 hobby OS kernel written from scratch. Boots via Limine on BIOS/UEFI with idk](images/logo.png)
 
 ## Features
 
@@ -20,6 +20,7 @@ A unstable x86_64 hobby OS kernel written from scratch. Boots via Limine on BIOS
 - **fastfetch** - well worth sayin my agent did the patch file and patch for me (MIT)
 - **busybox** — user-provided applets (GPL-2.0-only)
 - **nano** — user-provided text editor (GPL-3.0-or-later)
+- **southparkclips37492 on discord** for drawing me an logo!!
 
 ## Building
 
