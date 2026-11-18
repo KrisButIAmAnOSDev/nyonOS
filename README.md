@@ -2,6 +2,8 @@
 
 ![A unstable x86_64 hobby OS kernel written from scratch. Boots via Limine on BIOS/UEFI with idk](images/logo.png)
 
+super unstable x86_64 hobby os
+
 ## Features
 
 - **Limine boot protocol** (revision 6) - works on BIOS and UEFI
