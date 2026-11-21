@@ -179,7 +179,7 @@ int main(void) {
         if (ln > 0) {
             link[ln] = 0;
             ck_true(link[0] == '/');
-            ck_true(strstr(link, "proc") == NULL);
+            ck_true(strncmp(link, "/proc/", 6) != 0);
         }
         ln = readlink("/proc/self/nosuch", link, sizeof(link) - 1);
         ck_true(ln < 0);

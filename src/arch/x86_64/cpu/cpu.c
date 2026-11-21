@@ -7,6 +7,8 @@
 #include "arch/x86_64/lapic/lapic.h"
 #include "arch/x86_64/idt/idt.h"
 #include "arch/x86_64/syscall/syscall.h"
+#include "arch/x86_64/hpet/hpet.h"
+#include "arch/x86_64/pit/pit.h"
 
 #define CPUID_MAX_EXTENDED 0x80000000u
 #define CPUID_EXTENDED_FEATURES 0x80000001u
@@ -108,12 +110,51 @@ static void detect_extended(void) {
     feat->invariant_tsc = (d >> 8) & 1;
 }
 
+static void detect_cpu_id(void) {
+    struct cpu_features *feat = &feats()->feat;
+    uint32_t a, b, c, d;
+
+    do_cpuid(CPUID_FEATURES, 0, &a, &b, &c, &d);
+    feat->stepping = (uint8_t)(a & 0xF);
+    feat->model = (uint8_t)((a >> 4) & 0xF);
+    feat->family = (uint8_t)((a >> 8) & 0xF);
+    if (feat->family == 0xF) feat->family += (uint8_t)((a >> 20) & 0xFF);
+    if (feat->family == 0x6 || feat->family == 0xF)
+        feat->model += (uint8_t)(((a >> 12) & 0xF) << 4);
+
+    do_cpuid(CPUID_MAX_EXTENDED, 0, &a, &b, &c, &d);
+    if (a >= 0x80000006u) {
+        do_cpuid(0x80000006u, 0, &a, &b, &c, &d);
+        feat->cache_kb = (uint16_t)((c >> 16) & 0xFFFF);
+    }
+}
+
+static uint32_t calibrate_tsc_mhz(void) {
+    if (!feats()->feat.tsc) return 0;
+
+    if (hpet_available()) {
+        uint64_t t0 = cpu_rdtsc();
+        uint64_t n0 = hpet_nanoseconds();
+        while (hpet_nanoseconds() - n0 < 10000000ULL) __asm__ volatile("pause");
+        uint64_t t1 = cpu_rdtsc();
+        uint64_t n1 = hpet_nanoseconds();
+        uint64_t delta_ns = n1 - n0;
+        if (delta_ns == 0) return 0;
+        return (uint32_t)((t1 - t0) * 1000000000ULL / delta_ns / 1000000ULL);
+    }
+
+    return 0;
+}
+
 void cpu_detect(void) {
     struct percpu *p = feats();
     if (p->detected) return;
 
     detect_basic();
     detect_extended();
+    detect_cpu_id();
+
+    p->feat.tsc_mhz = calibrate_tsc_mhz();
 
     if (cpu_cr4_read() & CR4_LA57) feats()->feat.la57 = true;
 

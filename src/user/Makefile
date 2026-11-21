@@ -5,6 +5,9 @@ MLIBC_BIN_DIR = $(patsubst %/,%,$(dir $(MLIBC_CC)))
 MLIBC_LD_LINK = obj/ldlink/ld
 MLIBC_CC_RUN = $(MLIBC_CC) -B$(abspath $(MLIBC_LD_LINK))
 
+DYN_SYSROOT = /home/quan/kawkaw/nyonos-toolchain/sysroot
+DYN_FLAGS = --sysroot=$(DYN_SYSROOT) -Wl,-dynamic-linker,/usr/lib/ld.so -Wl,-rpath,/usr/lib -L$(DYN_SYSROOT)/usr/local/lib
+
 .DEFAULT_GOAL := all
 
 USER_STRING = string.o
@@ -17,7 +20,7 @@ USER_LDFLAGS = -nostdlib -static-pie -pie -z noexecstack -T user.ld
 BINS = bin/hello bin/fdtest bin/mmtest bin/forktest bin/pipetest bin/fstest bin/fd2test bin/evtest bin/fbtest bin/devtest
 
 ifneq ($(NYONOS_MLIBC_CC),)
-BINS += bin/mmaptest bin/procfstest bin/mhello bin/sdtest bin/thrtest bin/clktest bin/proctest bin/featest bin/mandel bin/exectest bin/fdprobe bin/sigtest bin/systest bin/asynctest bin/tlstest
+BINS += bin/dltest bin/dynhello libtest.so bin/mmaptest bin/procfstest bin/mhello bin/sdtest bin/thrtest bin/clktest bin/proctest bin/featest bin/mandel bin/exectest bin/fdprobe bin/sigtest bin/systest bin/asynctest bin/tlstest
 endif
 
 -include $(BINS:=.o)
@@ -37,63 +40,74 @@ bin/%: %.o crt0.o user.ld $(USER_STRING)
 
 bin/mhello: mlibc_hello.c $(MLIBC_LD) $(MLIBC_LD_LINK)
 	mkdir -p "$(dir $@)"
-	$(MLIBC_CC_RUN) -static -T$(MLIBC_LD) -z max-page-size=0x1000 -s $< -o $@
+	$(MLIBC_CC_RUN) $(DYN_FLAGS) -s $< -o $@ -lc
 
 bin/fdprobe: fdprobe.c $(MLIBC_LD) $(MLIBC_LIBC) $(MLIBC_LD_LINK)
 	mkdir -p "$(dir $@)"
-	$(MLIBC_CC_RUN) -static -T$(MLIBC_LD) -z max-page-size=0x1000 -s $< -o $@
+	$(MLIBC_CC_RUN) $(DYN_FLAGS) -s $< -o $@ -lc
+
+bin/dltest: dltest.c $(MLIBC_LD) $(MLIBC_LIBC) $(MLIBC_LD_LINK)
+	mkdir -p "$(dir $@)"
+	$(MLIBC_CC_RUN) $(DYN_FLAGS) -I$(CURDIR)/../abi -s $< -o $@ -lc
+
+bin/dynhello: dynhello.c $(MLIBC_LD_LINK)
+	mkdir -p "$(dir $@)"
+	$(MLIBC_CC_RUN) $(DYN_FLAGS) -s $< -o $@ -lc
+
+libtest.so: libtest.c
+	$(MLIBC_CC_RUN) -shared -fPIC -nostdlib -Wl,--hash-style=gnu $< -o $@
 
 bin/mmaptest: mmaptest.c $(MLIBC_LD) $(MLIBC_LIBC) $(MLIBC_LD_LINK)
 	mkdir -p "$(dir $@)"
-	$(MLIBC_CC_RUN) -static -T$(MLIBC_LD) -z max-page-size=0x1000 -I$(CURDIR)/../abi -s $< -o $@
+	$(MLIBC_CC_RUN) $(DYN_FLAGS) -I$(CURDIR)/../abi -s $< -o $@ -lc
 
 bin/procfstest: procfstest.c $(MLIBC_LD) $(MLIBC_LIBC) $(MLIBC_LD_LINK)
 	mkdir -p "$(dir $@)"
-	$(MLIBC_CC_RUN) -static -T$(MLIBC_LD) -z max-page-size=0x1000 -I$(CURDIR)/../abi -s $< -o $@
+	$(MLIBC_CC_RUN) $(DYN_FLAGS) -I$(CURDIR)/../abi -s $< -o $@ -lc
 
 bin/sdtest: sdtest.c $(MLIBC_LD) $(MLIBC_LIBC) $(MLIBC_LD_LINK)
 	mkdir -p "$(dir $@)"
-	$(MLIBC_CC_RUN) -static -T$(MLIBC_LD) -z max-page-size=0x1000 -s $< -o $@
+	$(MLIBC_CC_RUN) $(DYN_FLAGS) -s $< -o $@ -lc
 
 bin/thrtest: thrtest.c $(MLIBC_LD) $(MLIBC_LIBC) $(MLIBC_LD_LINK)
 	mkdir -p "$(dir $@)"
-	$(MLIBC_CC_RUN) -static -T$(MLIBC_LD) -z max-page-size=0x1000 -s $< -o $@
+	$(MLIBC_CC_RUN) $(DYN_FLAGS) -s $< -o $@ -lc
 
 bin/clktest: clktest.c $(MLIBC_LD) $(MLIBC_LIBC) $(MLIBC_LD_LINK)
 	mkdir -p "$(dir $@)"
-	$(MLIBC_CC_RUN) -static -T$(MLIBC_LD) -z max-page-size=0x1000 -s $< -o $@
+	$(MLIBC_CC_RUN) $(DYN_FLAGS) -s $< -o $@ -lc
 
 bin/proctest: proctest.c $(MLIBC_LD) $(MLIBC_LIBC) $(MLIBC_LD_LINK)
 	mkdir -p "$(dir $@)"
-	$(MLIBC_CC_RUN) -static -T$(MLIBC_LD) -z max-page-size=0x1000 -s $< -o $@
+	$(MLIBC_CC_RUN) $(DYN_FLAGS) -s $< -o $@ -lc
 
 bin/sigtest: sigtest.c $(MLIBC_LD) $(MLIBC_LIBC) $(MLIBC_LD_LINK)
 	mkdir -p "$(dir $@)"
-	$(MLIBC_CC_RUN) -static -T$(MLIBC_LD) -z max-page-size=0x1000 -I$(CURDIR)/../abi -s $< -o $@
+	$(MLIBC_CC_RUN) $(DYN_FLAGS) -I$(CURDIR)/../abi -s $< -o $@ -lc
 
 bin/systest: systest.c $(MLIBC_LD) $(MLIBC_LIBC) $(MLIBC_LD_LINK)
 	mkdir -p "$(dir $@)"
-	$(MLIBC_CC_RUN) -static -T$(MLIBC_LD) -z max-page-size=0x1000 -I$(CURDIR)/../abi -s $< -o $@
+	$(MLIBC_CC_RUN) $(DYN_FLAGS) -I$(CURDIR)/../abi -s $< -o $@ -lc
 
 bin/asynctest: asynctest.c $(MLIBC_LD) $(MLIBC_LIBC) $(MLIBC_LD_LINK)
 	mkdir -p "$(dir $@)"
-	$(MLIBC_CC_RUN) -static -T$(MLIBC_LD) -z max-page-size=0x1000 -I$(CURDIR)/../abi -s $< -o $@
+	$(MLIBC_CC_RUN) $(DYN_FLAGS) -I$(CURDIR)/../abi -s $< -o $@ -lc
 
 bin/featest: featest.c $(MLIBC_LD) $(MLIBC_LIBC) $(MLIBC_LD_LINK)
 	mkdir -p "$(dir $@)"
-	$(MLIBC_CC_RUN) -static -T$(MLIBC_LD) -z max-page-size=0x1000 -s $< -o $@
+	$(MLIBC_CC_RUN) $(DYN_FLAGS) -s $< -o $@ -lc
 
 bin/mandel: mandel.c $(MLIBC_LD) $(MLIBC_LIBC) $(MLIBC_LD_LINK)
 	mkdir -p "$(dir $@)"
-	$(MLIBC_CC_RUN) -static -T$(MLIBC_LD) -z max-page-size=0x1000 -s $< -o $@
+	$(MLIBC_CC_RUN) $(DYN_FLAGS) -s $< -o $@ -lc
 
 bin/exectest: exectest.c $(MLIBC_LD) $(MLIBC_LIBC) $(MLIBC_LD_LINK)
 	mkdir -p "$(dir $@)"
-	$(MLIBC_CC_RUN) -static -T$(MLIBC_LD) -z max-page-size=0x1000 -s $< -o $@
+	$(MLIBC_CC_RUN) $(DYN_FLAGS) -s $< -o $@ -lc
 
 bin/tlstest: tlstest.c $(MLIBC_LD) $(MLIBC_LIBC) $(MLIBC_LD_LINK)
 	mkdir -p "$(dir $@)"
-	$(MLIBC_CC_RUN) -static -T$(MLIBC_LD) -z max-page-size=0x1000 -s $< -o $@
+	$(MLIBC_CC_RUN) $(DYN_FLAGS) -s $< -o $@ -lc
 
 %.o: %.c
 	mkdir -p "$(dir $@)"

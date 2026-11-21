@@ -279,9 +279,9 @@ index 0000000..3cb5381
 +# mlibc provides pthread symbols in libc itself; do not look for -lpthreads
 +set(CMAKE_HAVE_LIBC_PTHREAD TRUE CACHE INTERNAL "pthreads are in libc")
 +
-+set(CMAKE_EXE_LINKER_FLAGS_INIT "-static -T${NYONOS_LDSCRIPT} -z max-page-size=0x1000")
-+set(CMAKE_C_FLAGS_INIT "-fno-pie")
-+set(CMAKE_CXX_FLAGS_INIT "-fno-pie")
++set(CMAKE_EXE_LINKER_FLAGS_INIT "-L${NYONOS_SYSROOT}/usr/local/lib -Wl,-dynamic-linker,/usr/lib/ld.so -Wl,-rpath,/usr/lib")
++set(CMAKE_C_FLAGS_INIT "-fPIC")
++set(CMAKE_CXX_FLAGS_INIT "-fPIC")
 diff --git a/src/common/processing_linux.c b/src/common/processing_linux.c
 index 63d3951..90199aa 100644
 --- a/src/common/processing_linux.c

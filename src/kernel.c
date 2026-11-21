@@ -18,6 +18,10 @@
 #include "kernel/exec/elf.h"
 #include "kernel/mm/vmm/vmspace.h"
 #include "kernel/vfs/vfs.h"
+#include "arch/x86_64/acpi/acpi.h"
+#include "arch/x86_64/hpet/hpet.h"
+
+#define TIMER_HZ 1000
 #include "kernel/pipe/pipe.h"
 #include "kernel/mm/pmm/pmm.h"
 #include "kernel/mm/heap/heap.h"
@@ -53,6 +57,12 @@ static volatile struct limine_hhdm_request hhdm_request = {
 __attribute__((used, section(".limine_requests")))
 static volatile struct limine_memmap_request memmap_request = {
     .id = LIMINE_MEMMAP_REQUEST_ID,
+    .revision = 0
+};
+
+__attribute__((used, section(".limine_requests")))
+static volatile struct limine_rsdp_request rsdp_request = {
+    .id = LIMINE_RSDP_REQUEST_ID,
     .revision = 0
 };
 
@@ -345,11 +355,42 @@ void kmain(void) {
     pmm_init(memmap_request.response, hhdm_offset);
     vmm_init(hhdm_offset);
 
+    {
+        void *rsdp = rsdp_request.response ? rsdp_request.response->address : NULL;
+        kprintf(PRINT_SERIAL, "ACPI: Limine RSDP = %llx\n", (unsigned long long)(uintptr_t)rsdp);
+        if (!acpi_init((uint64_t)(uintptr_t)rsdp, hhdm_offset))
+            kprintf(PRINT_SERIAL, "ACPI: no valid tables found\n");
+    }
+
+    {
+        struct acpi_cpu_info cpus;
+        struct acpi_ioapic_info ioapics;
+        struct acpi_override_info overrides;
+        if (acpi_parse_madt(&cpus, &ioapics, &overrides)) {
+            kprintf(PRINT_SERIAL, "MADT: lapic_phys=%llx cpus=%u ioapics=%u overrides=%u\n",
+                    (unsigned long long)acpi_lapic_phys(), cpus.count,
+                    ioapics.count, overrides.count);
+            for (uint32_t i = 0; i < cpus.count; i++)
+                kprintf(PRINT_SERIAL, "MADT: cpu%u proc=%u apic=%u %s\n", i,
+                        cpus.processor_ids[i], cpus.apic_ids[i],
+                        cpus.enabled[i] ? "enabled" : "disabled");
+            for (uint32_t i = 0; i < ioapics.count; i++)
+                kprintf(PRINT_SERIAL, "MADT: ioapic%u id=%u addr=%llx gsi_base=%u\n", i,
+                        ioapics.apic_ids[i], (unsigned long long)ioapics.addresses[i],
+                        ioapics.gsi_bases[i]);
+            for (uint32_t i = 0; i < overrides.count; i++)
+                kprintf(PRINT_SERIAL, "MADT: override src=%u gsi=%u flags=%x\n",
+                        overrides.entries[i].source, overrides.entries[i].gsi,
+                        overrides.entries[i].flags);
+        }
+    }
+
     gdt_init(hhdm_offset, 0);
 
     cpu_bootstrap();
 
-    paddr_t lapic_phys = 0xFEE00000;
+    paddr_t lapic_phys = acpi_lapic_phys();
+    if (!lapic_phys) lapic_phys = 0xFEE00000;
     vaddr_t lapic_virt = hhdm_offset + lapic_phys;
     if (!vmm_map(lapic_virt, lapic_phys, 1, PAGE_PRESENT | PAGE_WRITE | PAGE_PCD)) {
        kprintf(PRINT_SERIAL, "nyonOS: Failed to map LAPIC!\n");
@@ -360,7 +401,8 @@ void kmain(void) {
     pic_remap(0x20, 0x28);
     pic_clear_mask(2);
     idt_init();
-    pit_init(1000);
+    if (!hpet_init(TIMER_HZ))
+        pit_init(TIMER_HZ);
     rtc_init();
     lapic_unmask_ext_int(lapic_virt);
 
@@ -387,6 +429,15 @@ void kmain(void) {
     {
         uint32_t ncpu = 1;
         struct limine_mp_response *mp = (struct limine_mp_response *)limine_mp_request.response;
+
+        {
+            struct acpi_cpu_info acpus;
+            if (acpi_parse_madt(&acpus, NULL, NULL)) {
+                kprintf(PRINT_SERIAL, "SMP: ACPI reports %u cpus, limine %llu\n",
+                        acpus.count, mp ? (unsigned long long)mp->cpu_count : 0ULL);
+            }
+        }
+
         if (mp) {
             ncpu = (uint32_t)mp->cpu_count;
             if (ncpu > MAX_CPUS) ncpu = MAX_CPUS;
@@ -420,7 +471,7 @@ void kmain(void) {
 
         kprintf(PRINT_SERIAL, "SMP: limine reports %u cpus, online %u, bsp lapic_id=%u\n",
                 ncpu, cpu_online_count(),
-                (unsigned)lapic_id_read(hhdm_offset + LAPIC_DEFAULT_PHYS));
+                (unsigned)lapic_id_read(hhdm_offset + lapic_phys));
     }
 
     kprintf(PRINT_SERIAL, "CPU: percpu self=%p id=%u online=%u of %u\n",
@@ -584,6 +635,10 @@ void kmain(void) {
         test_time_end("elf_run", er_start);
     }
 
+
+
+
+    fs_sync();
 
     {
         uint32_t n = cpu_count();

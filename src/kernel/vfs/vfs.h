@@ -37,6 +37,7 @@ typedef struct {
 struct fs_ops {
     bool (*iterate)(const fs_node_t *dir, uint32_t index, fs_node_t *out);
     bool (*lookup)(const char *path, fs_node_t *out);
+    bool (*lstat)(const char *path, fs_node_t *out);
     bool (*read)(const fs_node_t *node, uint32_t offset, void *buf, uint32_t len);
     int (*write)(fs_node_t *node, uint32_t offset, const void *buf, uint32_t len);
     int (*truncate)(fs_node_t *node);
@@ -91,6 +92,7 @@ void fs_node_released(const fs_node_t *node);
 fs_node_t *fs_node_ref(const fs_node_t *n);
 void fs_node_unref(fs_node_t *n);
 bool vfs_lookup(const char *path, fs_node_t *out);
+bool vfs_lstat(const char *path, fs_node_t *out);
 bool vfs_iterate(const fs_node_t *dir, uint32_t index, fs_node_t *out);
 bool vfs_read(const fs_node_t *node, uint32_t offset, void *buf, uint32_t len);
 int vfs_write(fs_node_t *node, uint32_t offset, const void *buf, uint32_t len);
@@ -103,6 +105,7 @@ int vfs_rmdir(const char *path);
 int vfs_utimens(const char *path, int64_t atime, int64_t mtime);
 int vfs_node_utimens(fs_node_t *node, int64_t atime, int64_t mtime);
 bool vfs_sync(void);
+void vfs_path_flush(void);
 bool vfs_readlink(const char *path, char *buf, uint32_t size);
 int vfs_symlink(const char *target, const char *path);
 int vfs_link(const char *oldpath, const char *newpath);

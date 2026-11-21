@@ -1,4 +1,5 @@
 #include "fs.h"
+#include "kernel/vfs/vfs.h"
 #include "kernel/block/block.h"
 #include "kernel/sync/preempt.h"
 #include "kernel/sync/sync.h"
@@ -893,7 +894,11 @@ static int fat_chmod(fs_node_t *node, uint32_t mode) {
 
 int fs_node_chattr(fs_node_t *node, uint32_t mode) {
     if (!node || node->is_root) return ABI_EIO;
-    if (node->ops && node->ops->chmod) return node->ops->chmod(node, mode);
+    if (node->ops && node->ops->chmod) {
+        int r = node->ops->chmod(node, mode);
+        if (r == 0) vfs_path_flush();
+        return r;
+    }
     return ABI_ENOSYS;
 }
 

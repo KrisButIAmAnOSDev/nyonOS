@@ -176,7 +176,7 @@ void pmm_init(struct limine_memmap_response *memmap, uint64_t hhdm_offset) {
     pmm_share = (uint32_t *)(pmm_hhdm_offset + share_phys);
     pmm_state = (uint8_t *)(pmm_hhdm_offset + state_phys);
     pmm_tags = (uint8_t *)(pmm_hhdm_offset + tag_phys);
-    memset(pmm_share, 0, total_pages);
+    memset(pmm_share, 0, (size_t)total_pages * sizeof(uint32_t));
     memset(pmm_state, PMM_RESERVED, total_pages);
     memset(pmm_tags, PMM_TAG_NONE, total_pages);
     for (unsigned o = 0; o <= PMM_MAX_ORDER; o++) pmm_free_lists[o] = NULL;

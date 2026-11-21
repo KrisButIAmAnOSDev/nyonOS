@@ -336,7 +336,7 @@ int main(void) {
 
 
     {
-        const char *cpath = "/BIN/busybox";
+        const char *cpath = "/BIN/BASH";
         int sfd = open(cpath, O_RDONLY);
         ck_true(sfd >= 0);
         if (sfd >= 0) {

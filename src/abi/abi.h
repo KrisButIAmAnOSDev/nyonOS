@@ -36,6 +36,9 @@
 #define ABI_ENOTTY (-25)
 #define ABI_EROFS (-30)
 #define ABI_EXDEV (-18)
+#define ABI_E2BIG  (-7)
+#define ABI_ELOOP  (-40)
+#define ABI_ENOEXEC (-8)
 
 #define ABI_SIG_DFL 0
 #define ABI_SIG_IGN 1
@@ -305,6 +308,7 @@ struct sys_flock {
 #define ABI_AT_PHENT   4
 #define ABI_AT_PHNUM   5
 #define ABI_AT_PAGESZ  6
+#define ABI_AT_BASE    7
 #define ABI_AT_ENTRY   9
 #define ABI_AT_RANDOM  25
 

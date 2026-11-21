@@ -280,8 +280,9 @@ static uint32_t proc_gen_cpuinfo(char *buf, uint32_t cap) {
             "flags\t\t: %s%s%s%s%s%s%s%s%s%s%s%s%s\n"
             "bogomips\t: %u.00\n"
             "cache size\t: %u KB\n",
-            i, vendor, brand, 6u, 142u, 9u,
-            (uint32_t)(1000 + i),
+            i, vendor, brand,
+            f ? f->family : 6u, f ? f->model : 142u, f ? f->stepping : 9u,
+            f && f->tsc_mhz ? f->tsc_mhz : 1000,
             f && f->nx ? "nx " : "",
             f && f->smep ? "smep " : "",
             f && f->smap ? "smap " : "",
@@ -295,8 +296,8 @@ static uint32_t proc_gen_cpuinfo(char *buf, uint32_t cap) {
             f && f->tsc ? "tsc " : "",
             f && f->syscall ? "syscall " : "",
             f && f->invpcid ? "invpcid " : "",
-            (uint32_t)(1000 + i) * 1000u,
-            256u);
+            (f && f->tsc_mhz ? f->tsc_mhz : 1000) * 1000u,
+            f ? f->cache_kb : 256u);
         if (n <= 0) break;
         if (used + (uint32_t)n >= cap) break;
         memcpy(buf + used, line, (size_t)n);

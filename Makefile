@@ -5,7 +5,7 @@ ifneq ($(findstring j,$(MAKEFLAGS)),)
 else
 MAKEFLAGS += -j$(JOBS)
 endif
-CFLAGS = -g -O2 -Wall -Wextra -std=gnu11 -ffreestanding -fno-stack-protector -fno-stack-check -fno-lto -fno-PIC -ffunction-sections -fdata-sections -m64 -march=x86-64 -mabi=sysv -mno-80387 -mno-mmx -mno-sse -mno-sse2 -mno-red-zone -mcmodel=kernel -Isrc
+CFLAGS = -g -O2 -Wall -Wextra -std=gnu11 -ffreestanding -fno-stack-protector -fno-stack-check -fno-lto -fno-PIC -ffunction-sections -fdata-sections -m64 -march=x86-64 -mabi=sysv -mno-80387 -mno-mmx -mno-sse -mno-sse2 -mno-red-zone -mcmodel=kernel -fno-strict-aliasing -Isrc
 
 TOOLCHAIN_CC_GLOB = $(wildcard ../nyonos-toolchain/toolchain16/bin/x86_64-nyonos-gcc \
                             toolchain/toolchain16/bin/x86_64-nyonos-gcc \

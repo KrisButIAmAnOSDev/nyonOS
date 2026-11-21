@@ -5,6 +5,7 @@
 #include "kernel/multitask/task.h"
 #include "arch/x86_64/idt/idt.h"
 #include "arch/x86_64/cpu/cpu.h"
+#include "kernel/sync/preempt.h"
 
 
 extern void user_copy_bytes(void *dst, const void *src, size_t len);
@@ -73,6 +74,7 @@ static bool do_copy(void *dst, const void *src, size_t len, bool src_is_user) {
         return false;
     }
 
+    preempt_disable();
     stac_if_needed();
     __asm__ volatile("sti" ::: "memory");
 
@@ -82,8 +84,10 @@ static bool do_copy(void *dst, const void *src, size_t len, bool src_is_user) {
 
     __asm__ volatile("cli" ::: "memory");
     clac_if_needed();
+    bool ok = percpu_copy_abort_get() == 0;
+    preempt_enable();
 
-    return percpu_copy_abort_get() == 0;
+    return ok;
 }
 
 bool copyin(void *dst, const void *src, size_t len) {
@@ -108,6 +112,7 @@ bool copyinstr(char *dst, const char *src, size_t max) {
 
     if (!user_range_ok((uint64_t)(uintptr_t)src, 1)) return false;
 
+    preempt_disable();
     stac_if_needed();
     __asm__ volatile("sti" ::: "memory");
 
@@ -118,6 +123,7 @@ bool copyinstr(char *dst, const char *src, size_t max) {
 
     __asm__ volatile("cli" ::: "memory");
     clac_if_needed();
+    preempt_enable();
 
     return !aborted;
 }

@@ -20,7 +20,7 @@ int main(int argc, char **argv) {
 	printf("EXEC start\n");
 
 	char *args[3];
-	args[0] = (char *)"/BIN/HELLO";
+	args[0] = (char *)"/BIN/hello";
 	args[1] = (char *)"--execve";
 	args[2] = NULL;
 
@@ -53,7 +53,7 @@ int main(int argc, char **argv) {
 	ck(WEXITSTATUS(st2) == 98, "execve of a missing file returns to the caller");
 
 	fflush(stdout);
-	int rc = system("/BIN/HELLO");
+	int rc = system("/BIN/hello");
 	printf("EXEC: system(\"/BIN/HELLO\")=%d\n", rc);
 	ck(rc == (127 << 8), "system() reaches the shell, which is not installed yet");
 

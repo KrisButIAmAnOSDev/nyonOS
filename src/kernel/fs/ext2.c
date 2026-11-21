@@ -54,6 +54,27 @@ typedef struct {
 static ext2_fs_t e2;
 static spinlock_t e2_lock = SPINLOCK_INIT;
 
+#define E2_INODE_CACHE_SIZE 512
+#define E2_MAX_GROUPS       512
+
+typedef struct {
+    uint32_t ino;
+    bool valid;
+    uint8_t data[256];
+} e2_inode_cache_entry_t;
+
+static e2_inode_cache_entry_t e2_inode_cache[E2_INODE_CACHE_SIZE];
+
+static uint8_t e2_sb_cache[1024];
+static uint8_t e2_gd_cache[E2_MAX_GROUPS][32];
+static bool e2_sb_dirty;
+static bool e2_gd_dirty[E2_MAX_GROUPS];
+
+static inline uint32_t e2_inode_slot_of(uint32_t ino) {
+    return ino % E2_INODE_CACHE_SIZE;
+}
+
+
 static bool e2_readlink_locked(const fs_node_t *node, char *buf, uint32_t size);
 static uint8_t e2_bounce[MAX_CPUS][EXT2_BLOCK_MAX];
 static uint8_t e2_bounce2[MAX_CPUS][EXT2_BLOCK_MAX];
@@ -167,14 +188,30 @@ static bool e2_write_at(uint64_t off, const void *buf, uint32_t len) {
     return ok;
 }
 
+
 static bool e2_group_desc(uint32_t g, uint8_t *out) {
-    uint32_t gdt_block = (e2.block_size == 1024) ? 2 : 1;
-    uint64_t off = (uint64_t)gdt_block * e2.block_size + (uint64_t)g * e2.desc_size;
-    return e2_read_at(off, out, 32);
+    if (g >= e2.group_count || g >= E2_MAX_GROUPS || !out) return false;
+    memcpy(out, e2_gd_cache[g], 32);
+    return true;
+}
+
+
+static bool e2_group_desc_store(uint32_t g, const uint8_t *gd) {
+    if (g >= e2.group_count || g >= E2_MAX_GROUPS || !gd) return false;
+    memcpy(e2_gd_cache[g], gd, 32);
+    e2_gd_dirty[g] = true;
+    return true;
 }
 
 static bool e2_read_inode(uint32_t ino, uint8_t *buf) {
     if (ino < 1 || ino > e2.inodes_count) return false;
+
+    uint32_t slot = e2_inode_slot_of(ino);
+    if (e2_inode_cache[slot].valid && e2_inode_cache[slot].ino == ino) {
+        memcpy(buf, e2_inode_cache[slot].data, e2.inode_size);
+        return true;
+    }
+
     uint32_t g = (ino - 1) / e2.inodes_per_group;
     uint32_t idx = (ino - 1) % e2.inodes_per_group;
 
@@ -183,7 +220,12 @@ static bool e2_read_inode(uint32_t ino, uint8_t *buf) {
     uint32_t itable = rd32(gd + 8);
 
     uint64_t off = (uint64_t)itable * e2.block_size + (uint64_t)idx * e2.inode_size;
-    return e2_read_at(off, buf, e2.inode_size);
+    if (!e2_read_at(off, buf, e2.inode_size)) return false;
+
+    e2_inode_cache[slot].ino = ino;
+    e2_inode_cache[slot].valid = true;
+    memcpy(e2_inode_cache[slot].data, buf, e2.inode_size);
+    return true;
 }
 
 static bool e2_inode_slot(uint32_t ino, uint32_t *g_out, uint32_t *idx_out) {
@@ -202,7 +244,12 @@ static bool e2_write_inode(uint32_t ino, const uint8_t *buf) {
     uint32_t itable = rd32(gd + 8);
 
     uint64_t off = (uint64_t)itable * e2.block_size + (uint64_t)idx * e2.inode_size;
-    return e2_write_at(off, buf, e2.inode_size);
+    if (!e2_write_at(off, buf, e2.inode_size)) return false;
+    uint32_t slot = e2_inode_slot_of(ino);
+    e2_inode_cache[slot].ino = ino;
+    e2_inode_cache[slot].valid = true;
+    memcpy(e2_inode_cache[slot].data, buf, e2.inode_size);
+    return true;
 }
 
 static bool e2_filetype(void) {
@@ -229,6 +276,7 @@ static uint8_t *e2_bitmap_block(uint32_t block) {
 static bool e2_bitmap_load(uint32_t bitmap_block, uint32_t bits) {
     uint32_t bytes = (bits + 7) / 8;
     uint32_t nblocks = (bytes + e2.block_size - 1) / e2.block_size;
+    if ((uint64_t)nblocks * e2.block_size > sizeof(e2_bm_buf)) return false;
 
     for (uint32_t i = 0; i < nblocks; i++) {
         uint8_t *b = e2_bitmap_block(bitmap_block + i);
@@ -241,6 +289,7 @@ static bool e2_bitmap_load(uint32_t bitmap_block, uint32_t bits) {
 static bool e2_bitmap_store(uint32_t bitmap_block, uint32_t bits) {
     uint32_t bytes = (bits + 7) / 8;
     uint32_t nblocks = (bytes + e2.block_size - 1) / e2.block_size;
+    if ((uint64_t)nblocks * e2.block_size > sizeof(e2_bm_buf)) return false;
 
     for (uint32_t i = 0; i < nblocks; i++) {
         uint8_t *b = e2_bitmap_block(bitmap_block + i);
@@ -280,19 +329,17 @@ static bool e2_bitmap_clear(uint32_t bitmap_block, uint32_t bits, uint32_t index
 }
 
 static void e2_super_counts(int32_t dblocks, int32_t dinodes) {
-    uint8_t sb[1024];
-    if (!e2_read_at(EXT2_SUPER_OFFSET, sb, sizeof sb)) return;
-    uint32_t fb = rd32(sb + 12);
-    uint32_t fi = rd32(sb + 16);
-    if (dblocks > 0 && fb < (uint32_t)dblocks) fb = 0;
+    uint32_t fb = rd32(e2_sb_cache + 12);
+    uint32_t fi = rd32(e2_sb_cache + 16);
+    if (dblocks < 0 && fb < (uint32_t)(-dblocks)) fb = 0;
     else fb = (uint32_t)((int32_t)fb + dblocks);
-    if (dinodes > 0 && fi < (uint32_t)dinodes) fi = 0;
+    if (dinodes < 0 && fi < (uint32_t)(-dinodes)) fi = 0;
     else fi = (uint32_t)((int32_t)fi + dinodes);
-    uint8_t *p = sb + 12;
+    uint8_t *p = e2_sb_cache + 12;
     p[0] = (uint8_t)fb; p[1] = (uint8_t)(fb >> 8); p[2] = (uint8_t)(fb >> 16); p[3] = (uint8_t)(fb >> 24);
-    p = sb + 16;
+    p = e2_sb_cache + 16;
     p[0] = (uint8_t)fi; p[1] = (uint8_t)(fi >> 8); p[2] = (uint8_t)(fi >> 16); p[3] = (uint8_t)(fi >> 24);
-    e2_write_at(EXT2_SUPER_OFFSET, sb, sizeof sb);
+    e2_sb_dirty = true;
 }
 
 static void e2_group_counts(uint32_t g, int32_t dblocks, int32_t dinodes) {
@@ -300,13 +347,13 @@ static void e2_group_counts(uint32_t g, int32_t dblocks, int32_t dinodes) {
     if (!e2_group_desc(g, gd)) return;
     uint16_t fb = rd16(gd + 12);
     uint16_t fi = rd16(gd + 14);
-    fb = (uint16_t)((int32_t)fb + dblocks);
-    fi = (uint16_t)((int32_t)fi + dinodes);
+    int32_t nb = (int32_t)fb + dblocks;
+    int32_t ni = (int32_t)fi + dinodes;
+    fb = (uint16_t)(nb < 0 ? 0 : (nb > 0xFFFF ? 0xFFFF : nb));
+    fi = (uint16_t)(ni < 0 ? 0 : (ni > 0xFFFF ? 0xFFFF : ni));
     gd[12] = (uint8_t)fb; gd[13] = (uint8_t)(fb >> 8);
     gd[14] = (uint8_t)fi; gd[15] = (uint8_t)(fi >> 8);
-    uint32_t gdt_block = (e2.block_size == 1024) ? 2 : 1;
-    uint64_t off = (uint64_t)gdt_block * e2.block_size + (uint64_t)g * e2.desc_size;
-    e2_write_at(off, gd, 32);
+    e2_group_desc_store(g, gd);
 }
 
 static void e2_dir_counts(uint32_t g, int32_t delta) {
@@ -315,9 +362,7 @@ static void e2_dir_counts(uint32_t g, int32_t delta) {
     uint16_t dc = rd16(gd + 16);
     dc = (uint16_t)((int32_t)dc + delta);
     gd[16] = (uint8_t)dc; gd[17] = (uint8_t)(dc >> 8);
-    uint32_t gdt_block = (e2.block_size == 1024) ? 2 : 1;
-    uint64_t off = (uint64_t)gdt_block * e2.block_size + (uint64_t)g * e2.desc_size;
-    e2_write_at(off, gd, 32);
+    e2_group_desc_store(g, gd);
 }
 
 static bool e2_alloc_block(uint32_t *out) {
@@ -391,7 +436,7 @@ static bool e2_new_block(uint32_t *out) {
     if (!e2_alloc_block(&blk)) return false;
     uint8_t *b = bounce2();
     memset(b, 0, e2.block_size);
-    if (!e2_write_block(blk, b)) return false;
+    if (!e2_write_block(blk, b)) { e2_free_block(blk); return false; }
     *out = blk;
     return true;
 }
@@ -400,7 +445,7 @@ static bool e2_map_block_alloc(uint8_t *inode, uint32_t lblk, uint32_t *out) {
     uint32_t *ib = (uint32_t *)(inode + 40);
     uint32_t ptrs = e2.block_size / 4;
     uint8_t *b = bounce();
-    uint8_t *b2 = bounce2();
+    uint8_t *b2 = bounce3();
 
     if (lblk < 12) {
         if (!ib[lblk]) {
@@ -601,8 +646,8 @@ static void e2_fill_node(fs_node_t *out, uint32_t ino, const uint8_t *inode,
     bool is_dir = (mode & EXT2_S_IFMT) == EXT2_S_IFDIR;
     bool ro = ((mode & 0777) & 0222) == 0;
 
-    if (!is_dir && (e2.feature_ro_compat & EXT2_RO_LARGE_FILE))
-        size |= size_high << 16;
+    if (!is_dir && (e2.feature_ro_compat & EXT2_RO_LARGE_FILE) && size_high)
+        size = UINT32_MAX;
 
     memset(out, 0, sizeof(*out));
     if (name) {
@@ -614,6 +659,7 @@ static void e2_fill_node(fs_node_t *out, uint32_t ino, const uint8_t *inode,
         out->name[1] = 0;
     }
     out->attr = (is_dir ? FS_ATTR_DIRECTORY : 0) | (ro ? FS_ATTR_READ_ONLY : 0);
+    if ((mode & EXT2_S_IFMT) == EXT2_S_IFLNK) out->attr |= FS_ATTR_SYMLINK;
     out->cluster = ino;
     out->dir_cluster = ino;
     out->dir_index = 0;
@@ -699,7 +745,7 @@ static bool e2_find_cb(void *vctx, uint32_t ino, uint8_t ftype, const char *name
     if (name[0] == '.' && name[1] == '.' && name[2] == 0) return true;
 
     if (ctx->name) {
-        if (strcasecmp(name, ctx->name) != 0) return true;
+        if (strcmp(name, ctx->name) != 0) return true;
         ctx->found = true;
         ctx->ino = ino;
         return false;
@@ -826,6 +872,7 @@ static bool e2_lookup_locked(const char *path, fs_node_t *out) {
     return true;
 }
 
+
 static bool e2_lookup(const char *path, fs_node_t *out) {
     bool ok;
     spin_lock(&e2_lock);
@@ -848,6 +895,7 @@ static bool e2_iterate_locked(const fs_node_t *dir, uint32_t index, fs_node_t *o
 
 static bool e2_read_block_run(uint32_t first, uint32_t count, void *dst) {
     if (!e2.mounted || !dst || !count) return false;
+    if (first >= e2.blocks_count || count > e2.blocks_count - first) return false;
     uint32_t sectors = e2.block_size / 512;
     uint64_t lba = (uint64_t)first * sectors;
     return block_read(e2.dev, lba, sectors * count, dst);
@@ -996,6 +1044,7 @@ static int e2_write_locked(fs_node_t *node, uint32_t offset, const void *buf, ui
     if (!e2.mounted || !node || !buf) return ABI_EINVAL;
     if (node->is_dir) return ABI_EISDIR;
     if (!len) return 0;
+    if (offset > UINT32_MAX - len) return ABI_EINVAL;
 
     uint8_t inode[256];
     if (e2.inode_size > sizeof inode) return ABI_EINVAL;
@@ -1013,8 +1062,11 @@ static int e2_write_locked(fs_node_t *node, uint32_t offset, const void *buf, ui
 
         uint32_t blk;
         if (!e2_map_block_alloc(inode, lblk, &blk)) {
+            uint32_t *sz = (uint32_t *)(inode + 4);
+            if (off > *sz) *sz = off;
             e2_write_inode(node->cluster, inode);
-            return ABI_ENOSPC;
+            node->size = *sz;
+            return off > offset ? (int)(off - offset) : ABI_ENOSPC;
         }
 
         uint8_t *b = bounce();
@@ -1031,8 +1083,11 @@ static int e2_write_locked(fs_node_t *node, uint32_t offset, const void *buf, ui
         }
         preempt_enable();
         if (!ok) {
+            uint32_t *sz = (uint32_t *)(inode + 4);
+            if (off > *sz) *sz = off;
             e2_write_inode(node->cluster, inode);
-            return ABI_EIO;
+            node->size = *sz;
+            return off > offset ? (int)(off - offset) : ABI_EIO;
         }
 
         in += chunk;
@@ -1455,6 +1510,24 @@ static bool e2_dir_remove(fs_node_t *dir, uint32_t blk, uint32_t off) {
     return ok;
 }
 
+static bool e2_lstat_locked(const char *path, fs_node_t *out) {
+    if (!e2.mounted || !path || !out) return false;
+    char dirpath[FS_PATH_MAX], name[FS_MAX_NAME + 1];
+    if (!e2_split_path(path, dirpath, sizeof dirpath, name, sizeof name)) return false;
+    fs_node_t dir;
+    if (!e2_lookup_locked(dirpath, &dir) || !dir.is_dir) return false;
+    uint32_t ino = 0, blk = 0, off = 0;
+    if (!e2_dir_find(&dir, name, &ino, &blk, &off)) return false;
+    return e2_node_from_inode(ino, name, out);
+}
+
+static bool e2_lstat(const char *path, fs_node_t *out) {
+    bool ok;
+    spin_lock(&e2_lock);
+    ok = e2_lstat_locked(path, out);
+    spin_unlock(&e2_lock);
+    return ok;
+}
 static int e2_create_locked(const char *path, fs_node_t *out) {
     fs_node_t tmp;
     if (!out) out = &tmp;
@@ -1906,13 +1979,21 @@ static int e2_node_utimens(fs_node_t *node, int64_t atime, int64_t mtime) {
 static bool e2_sync(void) {
     if (!e2.mounted) return false;
     spin_lock(&e2_lock);
-    uint8_t sb[1024];
-    if (e2_read_at(EXT2_SUPER_OFFSET, sb, sizeof sb)) {
-        *(uint32_t *)(sb + 48) = (uint32_t)rtc_unix_time();
-        *(uint16_t *)(sb + 58) = 1;
-        e2_write_at(EXT2_SUPER_OFFSET, sb, sizeof sb);
-        block_flush(e2.dev);
+    *(uint32_t *)(e2_sb_cache + 48) = (uint32_t)rtc_unix_time();
+    *(uint16_t *)(e2_sb_cache + 58) = 1;
+    e2_sb_dirty = true;
+    if (e2_sb_dirty) {
+        e2_write_at(EXT2_SUPER_OFFSET, e2_sb_cache, sizeof e2_sb_cache);
+        e2_sb_dirty = false;
     }
+    for (uint32_t g = 0; g < e2.group_count && g < E2_MAX_GROUPS; g++) {
+        if (!e2_gd_dirty[g]) continue;
+        uint32_t gdt_block = (e2.block_size == 1024) ? 2 : 1;
+        uint64_t off = (uint64_t)gdt_block * e2.block_size + (uint64_t)g * e2.desc_size;
+        e2_write_at(off, e2_gd_cache[g], 32);
+        e2_gd_dirty[g] = false;
+    }
+    block_flush(e2.dev);
     spin_unlock(&e2_lock);
     return true;
 }
@@ -2126,6 +2207,7 @@ static int e2_rename(const char *oldpath, const char *newpath) {
 const struct fs_ops ext2_ops = {
     .iterate = e2_iterate,
     .lookup = e2_lookup,
+    .lstat = e2_lstat,
     .read = e2_read,
     .write = e2_write,
     .truncate = e2_truncate,
@@ -2185,6 +2267,8 @@ bool ext2_mount(block_device_t *dev) {
     if (e2.feature_ro_compat & EXT2_RO_DIR_INDEX) return false;
 
     if (!e2.blocks_per_group || !e2.inodes_per_group) return false;
+    if (e2.blocks_per_group > block_size * 8 || e2.inodes_per_group > block_size * 8) return false;
+    if (e2.inode_size < 128 || e2.inode_size > 256 || (e2.inode_size & (e2.inode_size - 1))) return false;
     if (e2.blocks_count < e2.first_data_block) return false;
 
     e2.group_count = (e2.blocks_count - e2.first_data_block + e2.blocks_per_group - 1) /
@@ -2198,6 +2282,19 @@ bool ext2_mount(block_device_t *dev) {
 
     for (uint32_t id = 0; id < MAX_CPUS; id++) e2_icache_blk[id] = 0;
 
+    memset(e2_inode_cache, 0, sizeof e2_inode_cache);
+    memset(e2_gd_dirty, 0, sizeof e2_gd_dirty);
+    e2_sb_dirty = false;
+    memcpy(e2_sb_cache, sb, sizeof e2_sb_cache);
+
+    if (e2.group_count <= E2_MAX_GROUPS) {
+        uint32_t gdt_block = (e2.block_size == 1024) ? 2 : 1;
+        for (uint32_t g = 0; g < e2.group_count; g++) {
+            uint64_t off = (uint64_t)gdt_block * e2.block_size + (uint64_t)g * e2.desc_size;
+            if (!e2_read_at(off, e2_gd_cache[g], 32)) break;
+        }
+    }
+
     {
         uint16_t mc = rd16(sb + 52);
         mc++;
@@ -2205,7 +2302,9 @@ bool ext2_mount(block_device_t *dev) {
         sb[53] = (uint8_t)(mc >> 8);
         *(uint16_t *)(sb + 58) = 0;
         *(uint32_t *)(sb + 44) = (uint32_t)rtc_unix_time();
+        memcpy(e2_sb_cache, sb, sizeof e2_sb_cache);
         e2_write_at(EXT2_SUPER_OFFSET, sb, sizeof sb);
+        e2_sb_dirty = false;
     }
 
     kprintf(PRINT_SERIAL, "EXT2: mounted %s, block size %u, %u blocks, %u inodes, "

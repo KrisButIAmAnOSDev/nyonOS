@@ -1,6 +1,7 @@
 #include "kernel/mm/heap/heap.h"
 #include "kernel/lib/string.h"
 #include "arch/x86_64/cpu/cpu.h"
+#include "arch/x86_64/hpet/hpet.h"
 #include "kernel/mm/vmm/vmm.h"
 #include "kernel/mm/pagecache/pcache.h"
 #include "kernel/tty/tty.h"
@@ -209,7 +210,7 @@ static char **exec_copy_vec(uintptr_t user_vec, size_t *out_n) {
         return v;
     }
 
-    char **out = kmalloc(sizeof(char *) * (EXEC_MAX_ARGS + 1));
+    char **out = kzalloc(sizeof(char *) * (EXEC_MAX_ARGS + 1));
     if (!out) return NULL;
 
     size_t n = 0;
@@ -252,8 +253,41 @@ static char **exec_copy_vec(uintptr_t user_vec, size_t *out_n) {
     return out;
 }
 
+static bool exec_read_line(const fs_node_t *node, char *buf, size_t max) {
+    size_t i = 0;
+    for (; i + 1 < max; i++) {
+        char c;
+        if (!fs_node_read(node, (uint32_t)i, &c, 1)) break;
+        if (c == '\n' || c == '\r' || c == 0) { buf[i] = 0; return true; }
+        buf[i] = c;
+    }
+    buf[i] = 0;
+    return i > 0;
+}
+
+static bool exec_parse_shebang(const fs_node_t *node, char *interp, size_t imax,
+                               char *optarg, size_t omax) {
+    char line[EXEC_MAX_PATH];
+    if (!exec_read_line(node, line, sizeof line)) return false;
+    if (line[0] != '#' || line[1] != '!') return false;
+
+    const char *p = line + 2;
+    while (*p == ' ' || *p == '\t') p++;
+
+    size_t n = 0;
+    while (*p && *p != ' ' && *p != '\t' && *p != '\n' && n + 1 < imax)
+        interp[n++] = *p++;
+    interp[n] = 0;
+    if (!n) return false;
+
+    while (*p == ' ' || *p == '\t') p++;
+    n = 0;
+    while (*p && n + 1 < omax) optarg[n++] = *p++;
+    optarg[n] = 0;
+    return true;
+}
+
 static int64_t sys_execve(uintptr_t path, uintptr_t uargv, uintptr_t uenvp) {
-    kprintf(PRINT_SERIAL, "EVDBG path=%llx\n", (unsigned long long)path);
     struct task *t = task_current();
     struct isr_frame *frame = current_frame;
 
@@ -263,6 +297,9 @@ static int64_t sys_execve(uintptr_t path, uintptr_t uargv, uintptr_t uenvp) {
     char kpath_raw[EXEC_MAX_PATH];
     char kpath[EXEC_MAX_PATH];
     if (!copyinstr(kpath_raw, (const char *)path, sizeof kpath_raw)) return SYS_EFAULT;
+    size_t pn = 0;
+    while (pn < sizeof kpath_raw && kpath_raw[pn]) pn++;
+    if (pn == sizeof kpath_raw) return SYS_ENAMETOOLONG;
     if (!path_join(t, kpath_raw, kpath, sizeof kpath)) return SYS_ENAMETOOLONG;
 
     size_t argc = 0, envc = 0;
@@ -275,10 +312,83 @@ static int64_t sys_execve(uintptr_t path, uintptr_t uargv, uintptr_t uenvp) {
     }
 
     fs_node_t node;
-    if (!fs_lookup(kpath, &node)) {
+    int depth;
+    for (depth = 0; depth < 8; depth++) {
+        if (!fs_lookup(kpath, &node)) {
+            exec_free_vec(argv);
+            exec_free_vec(envp);
+            return SYS_ENOENT;
+        }
+
+        char interp[EXEC_MAX_PATH], optarg[EXEC_MAX_PATH];
+        if (!exec_parse_shebang(&node, interp, sizeof interp, optarg, sizeof optarg))
+            break;
+
+        kprintf(PRINT_SERIAL, "exec: %s is a script, interp=%s arg=%s\n",
+                kpath, interp, optarg);
+
+        size_t nargs = argc;
+        if (optarg[0]) nargs++;
+        if (nargs + 1 >= EXEC_MAX_ARGS) {
+            exec_free_vec(argv);
+            exec_free_vec(envp);
+            return SYS_E2BIG;
+        }
+
+        char **nargv = kmalloc(sizeof(char *) * (EXEC_MAX_ARGS + 1));
+        if (!nargv) {
+            exec_free_vec(argv);
+            exec_free_vec(envp);
+            return SYS_ENOMEM;
+        }
+        size_t w = 0;
+        size_t ilen = strlen(interp) + 1;
+        nargv[w] = kmalloc(ilen);
+        if (!nargv[w]) { exec_free_vec(nargv); exec_free_vec(argv); exec_free_vec(envp); return SYS_ENOMEM; }
+        memcpy(nargv[w++], interp, ilen);
+        if (optarg[0]) {
+            size_t olen = strlen(optarg) + 1;
+            nargv[w] = kmalloc(olen);
+            if (!nargv[w]) { exec_free_vec(nargv); exec_free_vec(argv); exec_free_vec(envp); return SYS_ENOMEM; }
+            memcpy(nargv[w++], optarg, olen);
+        }
+        size_t slen = strlen(kpath) + 1;
+        nargv[w] = kmalloc(slen);
+        if (!nargv[w]) { exec_free_vec(nargv); exec_free_vec(argv); exec_free_vec(envp); return SYS_ENOMEM; }
+        memcpy(nargv[w++], kpath, slen);
+        for (size_t i = 1; i < argc; i++) {
+            size_t alen = strlen(argv[i]) + 1;
+            nargv[w] = kmalloc(alen);
+            if (!nargv[w]) { exec_free_vec(nargv); exec_free_vec(argv); exec_free_vec(envp); return SYS_ENOMEM; }
+            memcpy(nargv[w++], argv[i], alen);
+        }
+        nargv[w] = NULL;
+
+        exec_free_vec(argv);
+        argv = nargv;
+        argc = w;
+
+        if (!path_join(t, interp, kpath, sizeof kpath)) {
+            exec_free_vec(argv);
+            exec_free_vec(envp);
+            return SYS_ENAMETOOLONG;
+        }
+    }
+
+    if (depth >= 8) {
+        kprintf(PRINT_SERIAL, "exec: too many script recursions\n");
         exec_free_vec(argv);
         exec_free_vec(envp);
-        return SYS_ENOENT;
+        return SYS_ELOOP;
+    }
+
+    uint8_t magic[4] = {0};
+    fs_node_read(&node, 0, magic, sizeof magic);
+    if (magic[0] != 0x7F || magic[1] != 'E' || magic[2] != 'L' || magic[3] != 'F') {
+        kprintf(PRINT_SERIAL, "exec: %s is not an elf file\n", kpath);
+        exec_free_vec(argv);
+        exec_free_vec(envp);
+        return SYS_ENOEXEC;
     }
 
     struct elf_image img;
@@ -295,12 +405,7 @@ static int64_t sys_execve(uintptr_t path, uintptr_t uargv, uintptr_t uenvp) {
     exec_free_vec(envp);
     task_set_exe_path(t, kpath);
 
-    kprintf(PRINT_SERIAL, "EXECDBG %s entry=%llx sp=%llx argc=%u\n", kpath,
-            (unsigned long long)img.entry, (unsigned long long)img.stack_top,
-            (unsigned)argc);
-
     struct vmspace *old_vs = t->vs;
-    struct page_table *old_pml4 = t->pml4;
 
     t->vs = img.vs;
     t->pml4 = img.vs->pml4;
@@ -311,6 +416,14 @@ static int64_t sys_execve(uintptr_t path, uintptr_t uargv, uintptr_t uenvp) {
     t->user_code_base = 0;
     t->user_code_pages = 0;
     t->fs_base = 0;
+    for (int s = 1; s < 65; s++) {
+        if (t->sig_act_handler[s] != ABI_SIG_IGN)
+            t->sig_act_handler[s] = ABI_SIG_DFL;
+        t->sig_act_mask[s] = 0;
+        t->sig_act_flags[s] = 0;
+    }
+    t->sig_in_handler = false;
+    t->sig_frame_user = 0;
     t->exit_code = 0;
     t->zombie = false;
     t->blocked = false;
@@ -319,7 +432,6 @@ static int64_t sys_execve(uintptr_t path, uintptr_t uargv, uintptr_t uenvp) {
     task_aspace_update();
 
     if (old_vs && old_vs != img.vs) vm_destroy(old_vs);
-    if (old_pml4 && old_pml4 != img.vs->pml4) vmm_destroy_address_space(old_pml4);
 
     fd_close_cloexec(t);
 
@@ -374,6 +486,60 @@ static int copy_path(const char *up, char *out, size_t out_max) {
     return out[0] ? 0 : ABI_EFAULT;
 }
 
+#define NYONOS_AT_FDCWD (-100)
+
+static bool path_join_base(const char *base, const char *in, char *out, size_t max) {
+    if (!base || !in || !out || max < 2) return false;
+    size_t n = 0;
+    out[n++] = '/';
+    const char *parts[2] = { base, in };
+    for (int i = 0; i < 2; i++) {
+        const char *p = parts[i];
+        while (*p) {
+            while (*p == '/') p++;
+            const char *st = p;
+            while (*p && *p != '/') p++;
+            size_t l = (size_t)(p - st);
+            if (!l) break;
+            if (l == 1 && st[0] == '.') continue;
+            if (l == 2 && st[0] == '.' && st[1] == '.') {
+                if (n > 1) {
+                    n--;
+                    while (n > 1 && out[n - 1] != '/') n--;
+                }
+                continue;
+            }
+            if (n + l + 2 >= max) return false;
+            if (n > 1) out[n++] = '/';
+            for (size_t k = 0; k < l; k++) out[n++] = st[k];
+        }
+    }
+    out[n] = 0;
+    return true;
+}
+
+static int copy_path_at(int dirfd, uintptr_t up, char *out, size_t out_max) {
+    char raw[256];
+    int cp_err = copy_path((const char *)up, raw, sizeof raw);
+    if (cp_err < 0) return cp_err;
+    struct task *t = task_current();
+    if (!t) return ABI_EINVAL;
+
+    if (raw[0] == '/' || dirfd == NYONOS_AT_FDCWD) {
+        if (!path_join(t, raw, out, out_max)) return ABI_ENAMETOOLONG;
+        return 0;
+    }
+
+    struct kobject *o = fd_get_checked(t, dirfd, KOBJ_TYPE_ANY, 0);
+    if (!o) return ABI_EBADF;
+    if (o->type != KOBJ_FILE || !o->ops) { fd_put(o); return ABI_ENOTDIR; }
+    struct file *f = (struct file *)o;
+    if (!f->node || !f->node->is_dir) { fd_put(o); return ABI_ENOTDIR; }
+    bool ok = path_join_base(f->path, raw, out, out_max);
+    fd_put(o);
+    return ok ? 0 : ABI_ENAMETOOLONG;
+}
+
 static int copy_path_resolved(uintptr_t up, char *out, size_t out_max) {
     char raw[256];
     int cp_err = copy_path((const char *)up, raw, sizeof raw);
@@ -423,18 +589,16 @@ static int64_t sys_mkdir(uintptr_t path, unsigned mode) {
 }
 
 static int64_t sys_mkdirat(int dirfd, uintptr_t path, unsigned mode) {
-    (void)dirfd;
     (void)mode;
     char kpath[256];
-    int cp_err = copy_path_resolved(path, kpath, sizeof kpath);
+    int cp_err = copy_path_at(dirfd, path, kpath, sizeof kpath);
     if (cp_err < 0) return cp_err;
     return (int64_t)fs_mkdir(kpath, NULL);
 }
 
 static int64_t sys_unlinkat(int dirfd, uintptr_t path, int flags) {
-    (void)dirfd;
     char kpath[256];
-    int cp_err = copy_path_resolved(path, kpath, sizeof kpath);
+    int cp_err = copy_path_at(dirfd, path, kpath, sizeof kpath);
     if (cp_err < 0) return cp_err;
     if (flags & 0x200) return (int64_t)fs_rmdir(kpath);
     return (int64_t)fs_unlink(kpath);
@@ -497,7 +661,7 @@ static int64_t sys_utimensat(int dirfd, uintptr_t path, uintptr_t times, int fla
 
     if (path) {
         char kpath[256];
-        int cp_err = copy_path_resolved(path, kpath, sizeof kpath);
+        int cp_err = copy_path_at(dirfd, path, kpath, sizeof kpath);
         if (cp_err < 0) return cp_err;
         return (int64_t)fs_utimens(kpath, a, m);
     }
@@ -716,7 +880,7 @@ static void fill_stat(struct sys_stat *out, const fs_node_t *n) {
         out->uid = 0;
         out->gid = 0;
     }
-    out->pad = 0;
+    out->pad = (n->attr & FS_ATTR_SYMLINK) ? 1u : 0u;
     for (unsigned i = 0; i < SYS_MAX_NAME; i++) out->name[i] = (i < FS_MAX_NAME) ? n->name[i] : 0;
 }
 
@@ -1291,15 +1455,17 @@ static int64_t sys_clock_gettime(unsigned clk, uintptr_t ts) {
     uint64_t ticks = pit_get_ticks();
     uint32_t hz = pit_frequency();
     struct sys_timespec out;
+    uint64_t ns = hpet_available()
+        ? hpet_nanoseconds()
+        : (uint64_t)ticks * 1000000000ULL / hz;
 
     if (clk == ABI_CLOCK_MONOTONIC) {
-        out.sec = (int64_t)(ticks / hz);
-        out.nsec = (int64_t)((ticks % hz) * 1000000000ULL / hz);
+        out.sec = (int64_t)(ns / 1000000000ULL);
+        out.nsec = (int64_t)(ns % 1000000000ULL);
     } else if (clk == ABI_CLOCK_REALTIME) {
-        int64_t elapsed = (int64_t)(ticks / hz);
         int64_t base = rtc_unix_time();
-        out.sec = base + elapsed;
-        out.nsec = (int64_t)((ticks % hz) * 1000000000ULL / hz);
+        out.sec = base + (int64_t)(ns / 1000000000ULL);
+        out.nsec = (int64_t)(ns % 1000000000ULL);
     } else {
         return SYS_EINVAL;
     }
@@ -1704,17 +1870,16 @@ static int64_t sys_sigprocmask(int how, uintptr_t set_ptr, uintptr_t old_ptr) {
 }
 
 static int64_t sys_fstatat(int dirfd, uintptr_t path, uintptr_t st, int flags) {
-    (void)flags;
     struct task *t = task_current();
     if (!t) return SYS_ENOSYS;
     if (!path) return SYS_EFAULT;
 
     char kpath[256];
-    int cp_err = copy_path_resolved(path, kpath, sizeof kpath);
+    int cp_err = copy_path_at(dirfd, path, kpath, sizeof kpath);
     if (cp_err < 0) return cp_err;
 
     fs_node_t n;
-    if (!fs_lookup(kpath, &n)) return SYS_ENOENT;
+    if (!(flags & 0x100) ? !fs_lookup(kpath, &n) : !vfs_lstat(kpath, &n)) return SYS_ENOENT;
 
     struct sys_stat kst;
     fill_stat(&kst, &n);

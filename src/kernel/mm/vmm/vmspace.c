@@ -302,7 +302,7 @@ bool vm_stack_push_strings(struct vmspace *vs, const char **strs, size_t count,
     if (top_va - floor_va < words * 8 + 16) return false;
 
     uint64_t sp_va = top_va - words * 8;
-    uint64_t stack[256];
+    uint64_t stack[1 + 128 + 1 + 128 + 1 + 128 * 2 + 2];
     size_t w = 0;
     stack[w++] = count;
     memcpy(&stack[w], argv_ptr, count * sizeof(uint64_t));

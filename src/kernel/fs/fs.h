@@ -21,6 +21,7 @@
 #define FS_ATTR_DIRECTORY 0x10
 #define FS_ATTR_LFN       0x0F
 #define FS_ATTR_ARCHIVE   0x20
+#define FS_ATTR_SYMLINK   0x40
 
 typedef struct {
     block_device_t *dev;

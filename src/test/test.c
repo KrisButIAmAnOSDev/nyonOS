@@ -1178,7 +1178,7 @@ void shell_run(void) {
             kprintf(PRINT_SERIAL, "SHELL: bash exited\n");
             return;
         }
-        if (++smp_ticks % 250 == 0) {
+        if (++smp_ticks % 1225 == 0) {
             for (uint32_t i = 0; i < cpu_count(); i++)
                 kprintf(PRINT_SERIAL, "SMP: cpu%u resched %llu switches %llu\n", i,
                         (unsigned long long)cpu_resched_count(i),
@@ -2268,10 +2268,6 @@ void elf_reject_test(int *bad) {
     memcpy(t, good, sizeof(t));
     t[64 + 4] = ELF_PF_W | ELF_PF_X;
     elf_bad_test("writable and executable segment rejected", t, 512, fsize, ELF_EWX, bad);
-
-    memcpy(t, good, sizeof(t));
-    t[64] = ELF_PT_INTERP;
-    elf_bad_test("dynamic binary rejected for now", t, 512, fsize, ELF_EINTERP, bad);
 
     memcpy(t, good, sizeof(t));
     t[24] = 0x11; t[25] = 0x22; t[26] = 0x33; t[27] = 0x44;

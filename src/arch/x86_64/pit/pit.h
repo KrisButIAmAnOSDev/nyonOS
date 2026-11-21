@@ -10,6 +10,7 @@
 #define PIT_FREQUENCY 1193182
 
 void pit_init(uint32_t frequency_hz);
+void pit_set_frequency(uint32_t frequency_hz);
 void pit_sleep(uint64_t ms);
 uint64_t pit_get_ticks(void);
 uint32_t pit_frequency(void);

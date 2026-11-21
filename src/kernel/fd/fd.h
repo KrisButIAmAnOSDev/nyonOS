@@ -110,6 +110,7 @@ struct file {
     uint64_t pos;
     bool writable;
     bool append;
+    char path[FD_PATH_MAX];
 };
 
 struct input_file {

@@ -9,7 +9,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PORTS = os.path.join(ROOT, "build", "ports")
 TOOLCHAIN = os.environ.get("NYONOS_TOOLCHAIN", os.path.join(ROOT, "..", "nyonos-toolchain"))
 SYSROOT = os.path.join(TOOLCHAIN, "sysroot")
-CROSS = os.path.join(TOOLCHAIN, "toolchain16", "bin", "x86_64-nyonos-")
+CROSS = os.path.join(TOOLCHAIN, "toolchain-all", "bin", "x86_64-nyonos-")
 NCURSES = "6.5"
 NANO = "8.5"
 
@@ -66,6 +66,17 @@ def patch_config_sub(path):
         f.write(s)
 
 
+def patch_ncurses_shared(path):
+    with open(path) as f:
+        s = f.read()
+    old = "\t(*)\n\t\tCC_SHARED_OPTS='unknown'\n\t\tMK_SHARED_LIB='echo unknown'\n\t\t;;\n\tesac"
+    new = "\t(nyonos*)\n\t\tCC_SHARED_OPTS='-fPIC'\n\t\tMK_SHARED_LIB='${CC} ${LDFLAGS} ${CFLAGS} -shared -Wl,--defsym,__init_array_start=0 -Wl,--defsym,__init_array_end=0 -Wl,--defsym,__fini_array_start=0 -Wl,--defsym,__fini_array_end=0 -Wl,--defsym,__preinit_array_start=0 -Wl,--defsym,__preinit_array_end=0 -Wl,-soname,'$cf_cv_shared_soname' -o $@'\n\t\tcf_cv_shlib_version=rel\n\t\t;;\n\t(*)\n\t\tCC_SHARED_OPTS='unknown'\n\t\tMK_SHARED_LIB='echo unknown'\n\t\t;;\n\tesac"
+    if old in s:
+        s = s.replace(old, new, 1)
+        with open(path, "w") as f:
+            f.write(s)
+
+
 def main():
     if os.path.exists(CACHED_BIN):
         print(CACHED_BIN)
@@ -86,37 +97,41 @@ def main():
     fetch(NCURSES_URL, nc_tar)
     extract(nc_tar, nc_dir)
     patch_config_sub(os.path.join(nc_dir, "config.sub"))
+    patch_ncurses_shared(os.path.join(nc_dir, "configure"))
 
     fetch(NANO_URL, nano_tar)
     extract(nano_tar, nano_dir)
     patch_config_sub(os.path.join(nano_dir, "config.sub"))
 
-    os.environ["PATH"] = os.path.join(TOOLCHAIN, "toolchain16", "bin") + os.pathsep + os.environ.get("PATH", "")
+    os.environ["PATH"] = (os.path.join(TOOLCHAIN, "toolchain-all", "bin") + os.pathsep +
+                          os.path.join(TOOLCHAIN, "toolchain16", "bin") + os.pathsep +
+                          os.environ.get("PATH", ""))
 
     cores = str(os.cpu_count() or 1)
 
-    if not os.path.exists(os.path.join(NCROOT, "usr", "lib", "libncurses.a")):
+    if not os.path.exists(os.path.join(NCROOT, "usr", "lib", "libncurses.so")):
         run(["env",
              f"CC={CROSS}gcc",
              f"CFLAGS=--sysroot={SYSROOT} -D_GNU_SOURCE -O2 -fPIC",
              f"CPPFLAGS=--sysroot={SYSROOT} -D_GNU_SOURCE",
+             f"LDFLAGS=--sysroot={SYSROOT} -L{SYSROOT}/usr/local/lib -Wl,-dynamic-linker,/usr/lib/ld.so -Wl,-rpath,/usr/lib",
              "./configure", "--host=x86_64-nyonos", "--prefix=/usr",
              "--without-ada", "--without-cxx-binding", "--without-manpages",
-             "--without-progs", "--without-tests", "--without-shared", "--with-normal",
-             "--disable-widec", "--without-debug", "--without-profile",
+             "--without-progs", "--without-tests", "--with-shared", "--with-normal",
+             "--enable-rpath", "--disable-widec", "--without-debug", "--without-profile",
              "--disable-stripping", "--disable-db-install"], cwd=nc_dir)
         run(["make", "-j", cores], cwd=nc_dir)
         run(["make", "install", f"DESTDIR={NCROOT}"], cwd=nc_dir)
 
-    libnc = os.path.join(NCROOT, "usr", "lib", "libncursesw.a")
+    libnc = os.path.join(NCROOT, "usr", "lib", "libncursesw.so")
     if not os.path.exists(libnc):
-        os.symlink("libncurses.a", libnc)
+        os.symlink("libncurses.so", libnc)
 
     run(["env",
          f"CC={CROSS}gcc",
-         f"CFLAGS=--sysroot={SYSROOT} -D_GNU_SOURCE -O2",
+         f"CFLAGS=--sysroot={SYSROOT} -D_GNU_SOURCE -O2 -fPIC",
          f"CPPFLAGS=--sysroot={SYSROOT} -D_GNU_SOURCE -I{NCROOT}/usr/include",
-         f"LDFLAGS=--sysroot={SYSROOT} -L{NCROOT}/usr/lib -static",
+         f"LDFLAGS=--sysroot={SYSROOT} -L{NCROOT}/usr/lib -L{SYSROOT}/usr/local/lib -Wl,-dynamic-linker,/usr/lib/ld.so -Wl,-rpath,/usr/lib",
          "./configure", "--host=x86_64-nyonos", "--prefix=/usr",
          "--disable-nls", "--disable-utf8", "--disable-nanorc"], cwd=nano_dir)
     run(["make", "-j", cores], cwd=nano_dir)

@@ -56,6 +56,10 @@ void pit_init(uint32_t frequency_hz) {
     kprintf(PRINT_SERIAL, "PIT initialized at %u Hz\n", pit_frequency_hz);
 }
 
+void pit_set_frequency(uint32_t frequency_hz) {
+    if (frequency_hz) pit_frequency_hz = frequency_hz;
+}
+
 void pit_sleep(uint64_t ms) {
     uint64_t target = pit_ticks + (ms * pit_frequency_hz) / 1000;
     if (target <= pit_ticks) return;

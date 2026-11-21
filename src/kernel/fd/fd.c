@@ -953,6 +953,18 @@ static int console_ioctl(struct kobject *o, unsigned req, uint64_t arg, struct t
             task_wake_chan(keyboard_wait_chan());
             return 0;
         }
+        case 0x5413: {
+            struct sys_winsize ws;
+            tty_winsize_get(0, &ws);
+            if (!copyout((void *)arg, &ws, sizeof ws)) return FD_EFAULT;
+            return 0;
+        }
+        case 0x5414: {
+            struct sys_winsize ws;
+            if (!copyin(&ws, (const void *)arg, sizeof ws)) return FD_EFAULT;
+            tty_winsize_set(0, &ws);
+            return 0;
+        }
         default:
             return FD_EINVAL;
     }
@@ -1234,6 +1246,10 @@ int fd_open(struct task *t, const char *path, uint32_t oflags) {
     f->pos = 0;
     f->writable = (oflags & FD_OPEN_MODE) != FD_OPEN_READ;
     f->append = (oflags & FD_OPEN_APPEND) != 0;
+    size_t path_len = strlen(path);
+    if (path_len >= sizeof f->path) path_len = sizeof f->path - 1;
+    memcpy(f->path, path, path_len);
+    f->path[path_len] = 0;
     if (f->append) f->pos = f->node->size;
 
     uint16_t fflags = 0;

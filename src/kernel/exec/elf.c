@@ -79,8 +79,6 @@ int elf_validate_phdrs(const elf64_phdr *ph, size_t phnum, size_t file_size,
 
     for (size_t i = 0; i < phnum; i++) {
 
-        if (ph[i].type == ELF_PT_INTERP) return ELF_EINTERP;
-
         if (ph[i].type != ELF_PT_LOAD) continue;
 
         if (ph[i].filesz > ph[i].memsz) return ELF_EMEMSZ;
@@ -142,7 +140,7 @@ const char *elf_error_text(int err) {
         case ELF_EWX: return "segment is writable and executable";
         case ELF_EENTRY: return "entry point is not in an executable segment";
         case ELF_ETOOLARGE: return "image too large";
-        case ELF_EINTERP: return "dynamic binaries are not supported yet";
+        case ELF_EINTERP: return "invalid interpreter";
         default: return "bad elf";
     }
 }
@@ -159,6 +157,101 @@ static uint8_t seg_prot(uint32_t flags) {
 static int elf_load_core(const fs_node *file, struct elf_image *out, const char **err,
                          const char **argv, size_t argc, const char **envp,
                          size_t envc, const struct elf_shared *shared);
+
+#define LDSO_BASE 0x50000000ULL
+
+static int elf_map_ldso(const char *ipath, struct vmspace *vs, uint64_t *out_entry,
+                        uint64_t *out_base) {
+    fs_node_t node;
+    if (!fs_lookup(ipath, &node)) return ELF_EOFFSET;
+
+    uint8_t ehdr[sizeof(elf64_header)];
+    if (!fs_node_read(&node, 0, ehdr, sizeof(ehdr))) return ELF_EBADMAGIC;
+
+    size_t phoff = 0, phentsize = 0, phnum = 0;
+    bool pie = false;
+    uint64_t entry = 0;
+    int r = elf_validate_hdr(ehdr, sizeof(ehdr), node.size, &phoff, &phentsize, &phnum, &pie, &entry);
+    if (r) return r;
+
+    elf64_phdr *ph = (elf64_phdr *)kmalloc(phnum * sizeof(elf64_phdr));
+    if (!ph) return ELF_ETOOLARGE;
+
+    for (size_t i = 0; i < phnum; i++) {
+        uint8_t raw[sizeof(elf64_phdr)];
+        if (!fs_node_read(&node, (uint32_t)(phoff + i * phentsize), raw, sizeof(raw))) {
+            kfree(ph); return ELF_EOFFSET;
+        }
+        phdr_read(raw, 0, &ph[i]);
+    }
+
+    bool ok = false;
+    r = elf_validate_phdrs(ph, phnum, node.size, pie, entry, &ok);
+    if (r || !ok) { kfree(ph); return r ? r : ELF_EBADMAGIC; }
+
+    uint64_t min_vaddr = UINT64_MAX;
+    for (size_t i = 0; i < phnum; i++) {
+        if (ph[i].type != ELF_PT_LOAD || ph[i].memsz == 0) continue;
+        if (ph[i].vaddr < min_vaddr) min_vaddr = ph[i].vaddr;
+    }
+    if (min_vaddr == UINT64_MAX || min_vaddr >= LDSO_BASE) { kfree(ph); return ELF_EADDR; }
+
+    uint64_t bias = LDSO_BASE - min_vaddr;
+
+    for (size_t i = 0; i < phnum; i++) {
+        if (ph[i].type != ELF_PT_LOAD || ph[i].memsz == 0) continue;
+
+        uint8_t prot = seg_prot(ph[i].flags);
+        vaddr_t vseg = ph[i].vaddr + bias;
+        vaddr_t start = vseg & ~(PAGE_SIZE - 1);
+        vaddr_t end = (vseg + ph[i].memsz + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
+
+        for (vaddr_t va = start; va < end; va += PAGE_SIZE) {
+            paddr_t phys;
+            pmm_set_tag(PMM_TAG_ELF);
+            bool ok = pmm_alloc(&phys, 1);
+            pmm_set_tag(PMM_TAG_NONE);
+            if (!ok) { kfree(ph); return ELF_ETOOLARGE; }
+
+            uint8_t *page = (uint8_t *)(vmm_hhdm_offset + phys);
+            memset(page, 0, PAGE_SIZE);
+
+            vaddr_t read_from = va > vseg ? va : vseg;
+            vaddr_t read_to = vseg + ph[i].filesz;
+            if (ph[i].offset > node.size) read_to = read_from;
+            else if (ph[i].offset + (read_to - read_from > ph[i].filesz ? ph[i].filesz : read_to - read_from) > node.size)
+                read_to = vseg + (node.size - ph[i].offset);
+            if (read_to > end) read_to = end;
+            if (read_to > read_from) {
+                uint64_t skip = read_from - vseg;
+                uint32_t want = (uint32_t)(ph[i].filesz - skip);
+                size_t room = PAGE_SIZE - (size_t)(read_from - va);
+                if (want > room) want = (uint32_t)room;
+                if (want && !fs_node_read(&node, (uint32_t)(ph[i].offset + skip),
+                                          page + (read_from - va), want)) {
+                    pmm_free(phys, 1);
+                    kfree(ph);
+                    return ELF_EOFFSET;
+                }
+            }
+
+            if (!vm_commit(vs, va, phys, 1, prot, true)) {
+                pmm_free(phys, 1);
+                kfree(ph);
+                return ELF_ETOOLARGE;
+            }
+        }
+
+        if (vm_region_add(vs, start, end, prot, VM_BACKING_ANON) != 0) {
+            kfree(ph); return ELF_ETOOLARGE;
+        }
+    }
+
+    kfree(ph);
+    *out_entry = bias + entry;
+    *out_base = bias;
+    return 0;
+}
 
 static const char *default_env[] = {
     "PATH=/BIN",
@@ -222,6 +315,26 @@ static int elf_load_core(const fs_node *file, struct elf_image *out, const char 
     bool ok = false;
     r = elf_validate_phdrs(ph, phnum, file->size, is_pie, entry, &ok);
     if (r || !ok) { kfree(ph); if (err) *err = elf_error_text(r); return r ? r : ELF_EBADMAGIC; }
+
+    char interp_path[256] = {0};
+    bool has_interp = false;
+    for (size_t i = 0; i < phnum; i++) {
+        if (ph[i].type != ELF_PT_INTERP) continue;
+        if (ph[i].filesz == 0 || ph[i].filesz > sizeof(interp_path) ||
+            ph[i].offset > file->size || file->size - ph[i].offset < ph[i].filesz) {
+            kfree(ph);
+            if (err) *err = "invalid interpreter path";
+            return ELF_EINTERP;
+        }
+        if (!fs_node_read(file, (uint32_t)ph[i].offset, interp_path, (uint32_t)ph[i].filesz)) {
+            kfree(ph);
+            if (err) *err = "cannot read interpreter path";
+            return ELF_EOFFSET;
+        }
+        interp_path[ph[i].filesz - 1] = 0;
+        has_interp = true;
+        break;
+    }
 
     if (is_pie) {
         for (size_t i = 0; i < phnum; i++) {
@@ -384,6 +497,18 @@ static int elf_load_core(const fs_node *file, struct elf_image *out, const char 
 
     kfree(prot);
 
+    uint64_t ldso_entry = 0;
+    uint64_t ldso_base = 0;
+    if (has_interp) {
+        int ir = elf_map_ldso(interp_path, vs, &ldso_entry, &ldso_base);
+        if (ir) {
+            kfree((void *)ph);
+            vm_destroy(vs);
+            if (err) *err = "cannot load interpreter";
+            return ir;
+        }
+    }
+
     if (!vs->has_stack && !vm_setup_stack(vs)) {
         if (err) *err = "no stack";
         kfree((void *)ph);
@@ -414,6 +539,9 @@ static int elf_load_core(const fs_node *file, struct elf_image *out, const char 
     aux[auxc].type = ABI_AT_PHNUM;  aux[auxc].value = phnum;     auxc++;
     aux[auxc].type = ABI_AT_PAGESZ; aux[auxc].value = PAGE_SIZE; auxc++;
     aux[auxc].type = ABI_AT_ENTRY;  aux[auxc].value = entry + load_bias; auxc++;
+    if (has_interp) {
+        aux[auxc].type = ABI_AT_BASE;  aux[auxc].value = ldso_base; auxc++;
+    }
 
     uint64_t random_addr = 0;
     {
@@ -460,7 +588,7 @@ static int elf_load_core(const fs_node *file, struct elf_image *out, const char 
         }
     }
 
-    out->entry = entry + load_bias;
+    out->entry = has_interp ? ldso_entry : (entry + load_bias);
     out->is_pie = is_pie;
     out->stack_top = sp;
     out->argc = argc_out;

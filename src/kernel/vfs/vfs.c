@@ -1,5 +1,6 @@
 #include "kernel/vfs/vfs.h"
 #include "kernel/kprintf/kprintf.h"
+#include "kernel/sync/sync.h"
 #include "abi/abi.h"
 #include "kernel/mm/pagecache/pcache.h"
 
@@ -17,6 +18,64 @@ typedef struct {
 static vfs_mount_t mounts[VFS_MAX_MOUNTS];
 static uint32_t mount_count;
 static const struct fs_ops *vfs_default_ops;
+
+#define VFS_PATH_CACHE_SIZE 128
+
+typedef struct {
+    bool used;
+    char path[FS_PATH_MAX];
+    fs_node_t node;
+} vfs_path_entry_t;
+
+static vfs_path_entry_t vfs_path_cache[VFS_PATH_CACHE_SIZE];
+static spinlock_t vfs_path_lock = SPINLOCK_INIT;
+
+void vfs_path_flush(void) {
+    spin_lock(&vfs_path_lock);
+    for (uint32_t i = 0; i < VFS_PATH_CACHE_SIZE; i++) vfs_path_cache[i].used = false;
+    spin_unlock(&vfs_path_lock);
+}
+
+static bool vfs_path_get(const char *path, fs_node_t *out) {
+    if (!path || !out) return false;
+    spin_lock(&vfs_path_lock);
+    for (uint32_t i = 0; i < VFS_PATH_CACHE_SIZE; i++) {
+        vfs_path_entry_t *e = &vfs_path_cache[i];
+        if (e->used && !strcmp(e->path, path)) {
+            *out = e->node;
+            spin_unlock(&vfs_path_lock);
+            return true;
+        }
+    }
+    spin_unlock(&vfs_path_lock);
+    return false;
+}
+
+static void vfs_path_put(const char *path, const fs_node_t *node) {
+    if (!path || !node) return;
+    size_t n = strlen(path);
+    if (n >= FS_PATH_MAX) return;
+    spin_lock(&vfs_path_lock);
+    for (uint32_t i = 0; i < VFS_PATH_CACHE_SIZE; i++) {
+        vfs_path_entry_t *e = &vfs_path_cache[i];
+        if (e->used && !strcmp(e->path, path)) {
+            e->node = *node;
+            spin_unlock(&vfs_path_lock);
+            return;
+        }
+    }
+    for (uint32_t i = 0; i < VFS_PATH_CACHE_SIZE; i++) {
+        vfs_path_entry_t *e = &vfs_path_cache[i];
+        if (!e->used) {
+            memcpy(e->path, path, n + 1);
+            e->node = *node;
+            e->used = true;
+            spin_unlock(&vfs_path_lock);
+            return;
+        }
+    }
+    spin_unlock(&vfs_path_lock);
+}
 
 static bool path_has_prefix(const char *path, const char *prefix, size_t plen) {
     if (!path || !prefix) return false;
@@ -42,11 +101,14 @@ bool vfs_mount(const char *prefix, const struct fs_ops *ops) {
     mounts[mount_count].plen = n;
     mounts[mount_count].ops = ops;
     mount_count++;
+    vfs_path_flush();
     return true;
 }
 
 bool vfs_lookup(const char *path, fs_node_t *out) {
     if (!path || !out) return false;
+
+    if (vfs_path_get(path, out)) return true;
 
     size_t best = 0;
     int best_i = -1;
@@ -60,13 +122,17 @@ bool vfs_lookup(const char *path, fs_node_t *out) {
         }
     }
 
+    bool ok;
     if (best_i >= 0) {
-        return mounts[best_i].ops->lookup(path + best, out);
+        ok = mounts[best_i].ops->lookup(path + best, out);
+    } else if (vfs_default_ops && vfs_default_ops->lookup) {
+        ok = vfs_default_ops->lookup(path, out);
+    } else {
+        return false;
     }
 
-    if (vfs_default_ops && vfs_default_ops->lookup)
-        return vfs_default_ops->lookup(path, out);
-    return false;
+    if (ok && best_i < 0) vfs_path_put(path, out);
+    return ok;
 }
 
 static uint32_t default_entry_count(const fs_node_t *dir) {
@@ -77,6 +143,7 @@ static uint32_t default_entry_count(const fs_node_t *dir) {
         n++;
     return n;
 }
+
 
 bool vfs_iterate(const fs_node_t *dir, uint32_t index, fs_node_t *out) {
     if (!dir || !out || !dir->ops) return false;
@@ -122,18 +189,23 @@ bool vfs_read(const fs_node_t *node, uint32_t offset, void *buf, uint32_t len) {
 
 int vfs_write(fs_node_t *node, uint32_t offset, const void *buf, uint32_t len) {
     if (!node || !node->ops || !node->ops->write) return -1;
+    vfs_path_flush();
     pcache_write_through(node, offset, buf, len);
     return node->ops->write(node, offset, buf, len);
 }
 
 int vfs_truncate(fs_node_t *node) {
     if (!node || !node->ops || !node->ops->truncate) return -1;
-    return node->ops->truncate(node);
+    int r = node->ops->truncate(node);
+    if (r == 0) vfs_path_flush();
+    return r;
 }
 
 int vfs_resize(fs_node_t *node, uint32_t size) {
     if (!node || !node->ops || !node->ops->resize) return -1;
-    return node->ops->resize(node, size);
+    int r = node->ops->resize(node, size);
+    if (r == 0) vfs_path_flush();
+    return r;
 }
 
 static int vfs_mount_for(const char *path, const struct fs_ops **ops_out) {
@@ -161,51 +233,74 @@ static int vfs_mount_for(const char *path, const struct fs_ops **ops_out) {
     return -1;
 }
 
+bool vfs_lstat(const char *path, fs_node_t *out) {
+    if (!path || !out) return false;
+    const struct fs_ops *ops = NULL;
+    int strip = vfs_mount_for(path, &ops);
+    if (strip < 0 || !ops) return false;
+    if (ops->lstat) return ops->lstat(path + strip, out);
+    return vfs_lookup(path, out);
+}
+
 int vfs_create(const char *path, fs_node_t *out) {
     const struct fs_ops *ops = NULL;
     int strip = vfs_mount_for(path, &ops);
     if (strip < 0 || !ops || !ops->create) return -ABI_ENOENT;
-    return ops->create(path + strip, out);
+    int r = ops->create(path + strip, out);
+    if (r == 0) vfs_path_flush();
+    return r;
 }
 
 int vfs_mkdir(const char *path, fs_node_t *out) {
     const struct fs_ops *ops = NULL;
     int strip = vfs_mount_for(path, &ops);
     if (strip < 0 || !ops || !ops->mkdir) return -ABI_ENOENT;
-    return ops->mkdir(path + strip, out);
+    int r = ops->mkdir(path + strip, out);
+    if (r == 0) vfs_path_flush();
+    return r;
 }
 
 int vfs_unlink(const char *path) {
     const struct fs_ops *ops = NULL;
     int strip = vfs_mount_for(path, &ops);
     if (strip < 0 || !ops || !ops->unlink) return -ABI_ENOENT;
-    return ops->unlink(path + strip);
+    int r = ops->unlink(path + strip);
+    if (r == 0) vfs_path_flush();
+    return r;
 }
 
 int vfs_rmdir(const char *path) {
     const struct fs_ops *ops = NULL;
     int strip = vfs_mount_for(path, &ops);
     if (strip < 0 || !ops || !ops->rmdir) return -ABI_ENOENT;
-    return ops->rmdir(path + strip);
+    int r = ops->rmdir(path + strip);
+    if (r == 0) vfs_path_flush();
+    return r;
 }
 
 int vfs_utimens(const char *path, int64_t atime, int64_t mtime) {
     const struct fs_ops *ops = NULL;
     int strip = vfs_mount_for(path, &ops);
     if (strip < 0 || !ops || !ops->utimens) return -ABI_EROFS;
-    return ops->utimens(path + strip, atime, mtime);
+    int r = ops->utimens(path + strip, atime, mtime);
+    if (r == 0) vfs_path_flush();
+    return r;
 }
 
 int vfs_node_utimens(fs_node_t *node, int64_t atime, int64_t mtime) {
     if (!node || !node->ops || !node->ops->node_utimens) return -ABI_EROFS;
-    return node->ops->node_utimens(node, atime, mtime);
+    int r = node->ops->node_utimens(node, atime, mtime);
+    if (r == 0) vfs_path_flush();
+    return r;
 }
 
 int vfs_link(const char *oldpath, const char *newpath) {
     const struct fs_ops *ops = NULL;
     int strip = vfs_mount_for(newpath, &ops);
     if (strip < 0 || !ops || !ops->link) return -ABI_EXDEV;
-    return ops->link(oldpath, newpath + strip);
+    int r = ops->link(oldpath, newpath + strip);
+    if (r == 0) vfs_path_flush();
+    return r;
 }
 
 int vfs_rename(const char *oldpath, const char *newpath) {
@@ -215,7 +310,9 @@ int vfs_rename(const char *oldpath, const char *newpath) {
     int nstrip = vfs_mount_for(newpath, &nops);
     if (ostrip < 0 || nstrip < 0 || !ops || !ops->rename) return -ABI_EXDEV;
     if (ops != nops) return -ABI_EXDEV;
-    return ops->rename(oldpath + ostrip, newpath + nstrip);
+    int r = ops->rename(oldpath + ostrip, newpath + nstrip);
+    if (r == 0) vfs_path_flush();
+    return r;
 }
 
 int vfs_chown(const char *path, int uid, int gid) {
@@ -224,12 +321,16 @@ int vfs_chown(const char *path, int uid, int gid) {
     if (strip < 0 || !ops || !ops->chown) return -ABI_EROFS;
     fs_node_t node;
     if (!ops->lookup(path + strip, &node)) return -ABI_ENOENT;
-    return ops->chown(&node, uid, gid);
+    int r = ops->chown(&node, uid, gid);
+    if (r == 0) vfs_path_flush();
+    return r;
 }
 
 int vfs_node_chown(fs_node_t *node, int uid, int gid) {
     if (!node || !node->ops || !node->ops->chown) return -ABI_EROFS;
-    return node->ops->chown(node, uid, gid);
+    int r = node->ops->chown(node, uid, gid);
+    if (r == 0) vfs_path_flush();
+    return r;
 }
 
 int vfs_statfs(fs_statfs_t *out) {

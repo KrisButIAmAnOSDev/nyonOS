@@ -23,7 +23,25 @@ EXT2_MB=${EXT2_MB:-512}
 EXT2_STAGE=build/ext2-stage
 
 rm -rf "$EXT2_STAGE" build/ext2.img
-mkdir -p "$EXT2_STAGE/BIN" "$EXT2_STAGE/usr/share/terminfo" "$EXT2_STAGE/SUB" "$EXT2_STAGE/docs" "$EXT2_STAGE/empty" "$EXT2_STAGE/etc"
+mkdir -p "$EXT2_STAGE/BIN" "$EXT2_STAGE/usr/share/terminfo" "$EXT2_STAGE/usr/lib" "$EXT2_STAGE/lib" "$EXT2_STAGE/SUB" "$EXT2_STAGE/docs" "$EXT2_STAGE/empty" "$EXT2_STAGE/etc"
+
+MLIBC_LIBDIR=${NYONOS_MLIBC_LIBDIR:-/home/quan/kawkaw/nyonos-toolchain/sysroot/usr/local/lib}
+if [ -f "$MLIBC_LIBDIR/ld.so" ] && [ -f "$MLIBC_LIBDIR/libc.so" ]; then
+    cp "$MLIBC_LIBDIR/ld.so" "$EXT2_STAGE/usr/lib/ld.so"
+    cp "$MLIBC_LIBDIR/ld.so" "$EXT2_STAGE/lib/ld.so"
+    for lib in "$MLIBC_LIBDIR"/*.so; do
+        cp "$lib" "$EXT2_STAGE/usr/lib/"
+        cp "$lib" "$EXT2_STAGE/lib/"
+    done
+fi
+if [ -f src/user/libtest.so ]; then
+    cp src/user/libtest.so "$EXT2_STAGE/usr/lib/libtest.so"
+fi
+NCROOT=build/ports/ncroot/usr/lib
+if [ -f "$NCROOT/libncurses.so.6.5" ]; then
+    cp -a "$NCROOT"/libncurses.so* "$EXT2_STAGE/usr/lib/"
+    cp -a "$NCROOT"/libncursesw.so* "$EXT2_STAGE/usr/lib/"
+fi
 
 cat > "$EXT2_STAGE/etc/os-release" <<'EOF'
 NAME="nyonOS"
@@ -47,6 +65,8 @@ printf 'nyonos\n' > "$EXT2_STAGE/etc/machine-id"
 cp /tmp/nyonos-fs-test.txt "$EXT2_STAGE/TEST.TXT"
 cp /tmp/nyonos-fs-inner.txt "$EXT2_STAGE/SUB/INNER.TXT"
 printf 'hello from ext2\nsecond line\n' > "$EXT2_STAGE/hello.txt"
+printf '#!/BIN/BASH\necho SHELLSCRIPT: shebang works\necho SHELLSCRIPT: arg was $1\n' > "$EXT2_STAGE/TEST.SH"
+chmod +x "$EXT2_STAGE/TEST.SH"
 printf 'nested file content\n' > "$EXT2_STAGE/docs/nested.txt"
 printf 'deep\n' > "$EXT2_STAGE/docs/deep.txt"
 head -c 200000 /dev/urandom > "$EXT2_STAGE/big.bin"
@@ -64,6 +84,12 @@ if [ -f src/user/bin/asynctest ]; then
 fi
 if [ -f src/user/bin/mmaptest ]; then
     PROGRAMS="$PROGRAMS mmaptest"
+fi
+if [ -f src/user/bin/dltest ]; then
+    PROGRAMS="$PROGRAMS dltest"
+fi
+if [ -f src/user/bin/dynhello ]; then
+    PROGRAMS="$PROGRAMS dynhello"
 fi
 if [ -f src/user/bin/mhello ]; then
     PROGRAMS="$PROGRAMS mhello"
@@ -124,13 +150,14 @@ fi
 
 if [ -n "$BB_BIN" ] && [ -f "$BB_BIN" ]; then
     cp "$BB_BIN" "$EXT2_STAGE/BIN/busybox"
-    BB_APPLETS="basename cat clear cmp comm cp cut dirname du echo env expand expr false find grep head hexdump hostname id install ln ls md5sum mkdir mktemp mv nl od printf readlink rev rm rmdir seq sha256sum shred sleep sort split stat strings sync tac tail tee test touch tr true uname unexpand uniq wc which xargs yes"
+    BB_APPLETS="basename cat cksum clear cmp comm cp cut date dd diff dirname du echo env expand expr false find grep head hexdump hostname id install kill ln ls md5sum mkdir mktemp more mv nl od printf printenv ps pwd readlink rev rm rmdir sed seq sha256sum shred sleep sort split stat strings sync tac tail tee test timeout touch tr true uname unexpand uniq wc which xargs yes"
     for applet in $BB_APPLETS; do
         ln -sf busybox "$EXT2_STAGE/BIN/$applet"
     done
 fi
 
 if [ -f ../bash/bash ]; then
+    cp ../bash/bash "$EXT2_STAGE/BIN/bash"
     cp ../bash/bash "$EXT2_STAGE/BIN/BASH"
 fi
 
@@ -140,6 +167,7 @@ if [ -z "$NANO_BIN" ] && [ -f tools/nano.bin ]; then
 fi
 
 if [ -n "$NANO_BIN" ] && [ -f "$NANO_BIN" ]; then
+    cp "$NANO_BIN" "$EXT2_STAGE/BIN/nano"
     cp "$NANO_BIN" "$EXT2_STAGE/BIN/NANO"
 fi
 

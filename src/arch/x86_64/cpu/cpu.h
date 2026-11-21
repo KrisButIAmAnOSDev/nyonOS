@@ -29,6 +29,11 @@ struct cpu_features {
     bool la57;
     bool syscall;
     bool invpcid;
+    uint32_t tsc_mhz;
+    uint8_t family;
+    uint8_t model;
+    uint8_t stepping;
+    uint16_t cache_kb;
 };
 
 struct isr_frame;
